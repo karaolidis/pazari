@@ -57,11 +57,6 @@ impl<M> JsonLinesDecoder<M> {
     }
 
     #[must_use]
-    pub const fn pending(&self) -> usize {
-        self.buf.len()
-    }
-
-    #[must_use]
     pub const fn is_poisoned(&self) -> bool {
         self.poisoned
     }
@@ -114,6 +109,10 @@ impl<M: DeserializeOwned> Decoder<M> for JsonLinesDecoder<M> {
                 Err(error)
             }
         }
+    }
+
+    fn pending(&self) -> usize {
+        self.buf.len()
     }
 }
 

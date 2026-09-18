@@ -9,3 +9,13 @@ authors = [
 
 [lints]
 workspace = true
+
+[dependencies]
+pazari-proto = { path = "../pazari-proto" }
+serde = "1.0.229"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", default-features = false, features = ["net", "io-util", "rt"] }
+tokio-vsock = "0.7.2"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", default-features = false, features = ["macros", "rt-multi-thread", "time", "net", "io-util", "rt"] }

@@ -29,4 +29,6 @@ pub trait Decoder<M> {
     fn push(&mut self, chunk: &[u8]) -> Result<(), DecodeError>;
 
     fn next_message(&mut self) -> Result<Option<M>, DecodeError>;
+
+    fn pending(&self) -> usize;
 }

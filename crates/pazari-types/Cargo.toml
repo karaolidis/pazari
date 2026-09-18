@@ -1,0 +1,18 @@
+[package]
+name = "pazari-types"
+version = "0.1.0"
+edition = "2024"
+description = "Strict domain types for pazari"
+authors = [
+    "Nikolaos Karaolidis <nick@karaolidis.com>",
+]
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+
+[dev-dependencies]
+serde_json = "1.0.151"

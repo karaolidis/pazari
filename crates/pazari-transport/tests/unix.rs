@@ -6,8 +6,8 @@ use std::{
 };
 
 use pazari_proto::{
-    Codec, DecodeError, DenyReason, GrantReason, GuestMessage, HostMessage, JsonLinesCodec,
-    MAX_LINE_BYTES, PROTOCOL_VERSION, Urgency,
+    Codec, DecodeError, DenyReason, GrantReason, Guest, GuestMessage, Host, HostMessage,
+    JsonLinesCodec, PROTOCOL_VERSION, Urgency,
 };
 use pazari_transport::{
     AnyConnection, AnyConnector, AnyListener, Connector, Listener, MessageStream, PeerId,
@@ -15,8 +15,8 @@ use pazari_transport::{
 };
 use tokio::{io::AsyncWriteExt, net::UnixStream};
 
-type GuestStream<T> = MessageStream<T, JsonLinesCodec, HostMessage, GuestMessage>;
-type HostStream<T> = MessageStream<T, JsonLinesCodec, GuestMessage, HostMessage>;
+type GuestStream<T> = MessageStream<T, JsonLinesCodec, Guest>;
+type HostStream<T> = MessageStream<T, JsonLinesCodec, Host>;
 
 static SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
@@ -274,7 +274,8 @@ async fn violation(name: &str, raw: Vec<u8>) -> (TransportError, TransportError)
 
 #[tokio::test]
 async fn an_over_long_line_is_fatal_and_keeps_failing() {
-    let (first, second) = violation("over-long", vec![b'x'; MAX_LINE_BYTES + 1]).await;
+    let (first, second) =
+        violation("over-long", vec![b'x'; JsonLinesCodec::MAX_FRAME_BYTES + 1]).await;
 
     assert!(
         matches!(

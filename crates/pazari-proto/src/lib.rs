@@ -8,10 +8,8 @@ pub mod message;
 
 pub use codec::{Codec, Decoder, JsonLinesCodec, JsonLinesDecoder};
 pub use error::{DecodeError, EncodeError};
-pub use message::{DenyReason, GrantReason, GuestMessage, HostMessage, Urgency};
+pub use message::{DenyReason, GrantReason, Guest, GuestMessage, Host, HostMessage, Peer, Urgency};
 
 pub const PROTOCOL_VERSION: u16 = 1;
-
-pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
 pub const DEFAULT_VSOCK_PORT: u32 = 4650;

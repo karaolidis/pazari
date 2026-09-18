@@ -2,7 +2,7 @@ use std::{fmt, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::RangeError;
+use crate::{bounded::Bounded, error::RangeError};
 
 pub const MAX_DURATION: Duration = Duration::from_hours(24);
 
@@ -15,15 +15,30 @@ impl Interval {
     pub const MAX: Duration = MAX_DURATION;
 
     pub fn try_new(value: Duration) -> Result<Self, RangeError> {
-        if value.is_zero() || value > Self::MAX {
-            return Err(RangeError::new("Interval", &value, "(0s, 24h]"));
-        }
-
-        Ok(Self(value))
+        <Self as Bounded>::try_new(value)
     }
 
     #[must_use]
     pub const fn get(self) -> Duration {
+        self.0
+    }
+}
+
+impl Bounded for Interval {
+    type Raw = Duration;
+
+    const NAME: &'static str = "Interval";
+    const BOUNDS: &'static str = "(0s, 24h]";
+
+    fn contains(value: Duration) -> bool {
+        !value.is_zero() && value <= Self::MAX
+    }
+
+    fn wrap(value: Duration) -> Self {
+        Self(value)
+    }
+
+    fn get(self) -> Duration {
         self.0
     }
 }
@@ -58,15 +73,30 @@ impl Delay {
     pub const MAX: Duration = MAX_DURATION;
 
     pub fn try_new(value: Duration) -> Result<Self, RangeError> {
-        if value > Self::MAX {
-            return Err(RangeError::new("Delay", &value, "[0s, 24h]"));
-        }
-
-        Ok(Self(value))
+        <Self as Bounded>::try_new(value)
     }
 
     #[must_use]
     pub const fn get(self) -> Duration {
+        self.0
+    }
+}
+
+impl Bounded for Delay {
+    type Raw = Duration;
+
+    const NAME: &'static str = "Delay";
+    const BOUNDS: &'static str = "[0s, 24h]";
+
+    fn contains(value: Duration) -> bool {
+        value <= Self::MAX
+    }
+
+    fn wrap(value: Duration) -> Self {
+        Self(value)
+    }
+
+    fn get(self) -> Duration {
         self.0
     }
 }

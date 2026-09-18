@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_with::{DurationMilliSeconds, serde_as};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -110,4 +110,25 @@ pub enum DenyReason {
     HostPressure,
     RateLimited,
     Policy,
+}
+
+pub trait Peer {
+    type Incoming: DeserializeOwned;
+    type Outgoing: Serialize;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Guest;
+
+impl Peer for Guest {
+    type Incoming = HostMessage;
+    type Outgoing = GuestMessage;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Host;
+
+impl Peer for Host {
+    type Incoming = GuestMessage;
+    type Outgoing = HostMessage;
 }

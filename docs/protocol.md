@@ -4,7 +4,7 @@ This is the normative specification of the protocol spoken between a pazari
 guest agent (`pazari-agent`) and the pazari host daemon (`pazarid`).
 
 The reference implementation is the `pazari-proto` crate. Where this document
-names a constant (`PROTOCOL_VERSION`, `MAX_LINE_BYTES`, `DEFAULT_VSOCK_PORT`),
+names a constant (`PROTOCOL_VERSION`, `MAX_FRAME_BYTES`, `DEFAULT_VSOCK_PORT`),
 the value is whatever that crate declares.
 
 ## Transport
@@ -23,8 +23,8 @@ serialised in UTF-8 with no interior line terminators, followed by one `LF`
 (`0x0A`). There is no other whitespace between messages.
 
 - A *line* is the bytes between terminators, excluding the terminating `LF`.
-- A line MUST NOT exceed `MAX_LINE_BYTES`, excluding its terminator. A line of
-  exactly `MAX_LINE_BYTES` is legal.
+- A line MUST NOT exceed `MAX_FRAME_BYTES`, excluding its terminator. A line of
+  exactly `MAX_FRAME_BYTES` is legal.
 - `CR` (`0x0D`) is never a framing character. CRLF line endings are not
   accepted; a `CR` anywhere in a line is a protocol violation.
 - Empty lines are not keepalives, comments, or padding. They are a protocol
@@ -32,11 +32,12 @@ serialised in UTF-8 with no interior line terminators, followed by one `LF`
 
 A sender MUST reject its own message rather than emit an over-long line. A
 receiver MUST detect an over-long line during accumulation, that is, as soon as
-`MAX_LINE_BYTES` unterminated bytes have arrived, without waiting for the
+`MAX_FRAME_BYTES` unterminated bytes have arrived, without waiting for the
 terminator that would prove the sender is beyond the cap.
 
 Framing is independent of the message payload format. `pazari-proto` expresses
-this as a `Codec` trait; `JsonLinesCodec` is the initial implementation.
+this as a `Codec` trait, which declares `MAX_FRAME_BYTES`; `JsonLinesCodec` is
+the initial implementation.
 
 ## Encoding conventions
 
@@ -151,7 +152,7 @@ always sufficient.
 
 Every one of the following is a protocol violation:
 
-- a line longer than `MAX_LINE_BYTES`
+- a line longer than `MAX_FRAME_BYTES`
 - an empty line
 - a `CR` byte in a line
 - a line that is not valid UTF-8

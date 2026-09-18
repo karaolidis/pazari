@@ -1,44 +1,42 @@
 use std::marker::PhantomData;
 
-use pazari_proto::{Codec, Decoder};
-use serde::{Serialize, de::DeserializeOwned};
+use pazari_proto::{Codec, Decoder, Peer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{Connection, TransportError};
 
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 
-pub struct MessageStream<T, C, In, Out>
+pub struct MessageStream<T, C, P>
 where
     C: Codec,
-    In: DeserializeOwned,
+    P: Peer,
 {
     connection: T,
-    decoder: C::Decoder<In>,
+    decoder: C::Decoder<P::Incoming>,
     chunk: Box<[u8]>,
     encoded: Vec<u8>,
-    outgoing: PhantomData<fn(&Out)>,
+    peer: PhantomData<fn() -> P>,
 }
 
-impl<T, C, In, Out> MessageStream<T, C, In, Out>
+impl<T, C, P> MessageStream<T, C, P>
 where
     T: Connection,
     C: Codec,
-    In: DeserializeOwned,
-    Out: Serialize,
+    P: Peer,
 {
     #[must_use]
     pub fn new(connection: T) -> Self {
         Self {
             connection,
-            decoder: C::decoder::<In>(),
+            decoder: C::decoder::<P::Incoming>(),
             chunk: vec![0; READ_CHUNK_BYTES].into_boxed_slice(),
             encoded: Vec::new(),
-            outgoing: PhantomData,
+            peer: PhantomData,
         }
     }
 
-    pub async fn send(&mut self, message: &Out) -> Result<(), TransportError> {
+    pub async fn send(&mut self, message: &P::Outgoing) -> Result<(), TransportError> {
         self.encoded.clear();
         C::encode(message, &mut self.encoded)?;
 
@@ -48,7 +46,7 @@ where
         Ok(())
     }
 
-    pub async fn recv(&mut self) -> Result<Option<In>, TransportError> {
+    pub async fn recv(&mut self) -> Result<Option<P::Incoming>, TransportError> {
         loop {
             if let Some(message) = self.decoder.next_message()? {
                 return Ok(Some(message));

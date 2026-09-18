@@ -29,21 +29,20 @@ impl UnixListener {
     pub fn path(&self) -> &Path {
         &self.path
     }
-
-    #[must_use]
-    pub fn peer(&self) -> PeerId {
-        PeerId::Unix {
-            path: self.path.clone(),
-        }
-    }
 }
 
 impl Listener for UnixListener {
     type Connection = UnixStream;
 
+    fn local(&self) -> PeerId {
+        PeerId::Unix {
+            path: self.path.clone(),
+        }
+    }
+
     async fn accept(&self) -> Result<(Self::Connection, PeerId), TransportError> {
         let (connection, _) = self.inner.accept().await?;
-        Ok((connection, self.peer()))
+        Ok((connection, self.local()))
     }
 }
 
@@ -66,6 +65,12 @@ impl UnixConnector {
 
 impl Connector for UnixConnector {
     type Connection = UnixStream;
+
+    fn peer(&self) -> PeerId {
+        PeerId::Unix {
+            path: self.path.clone(),
+        }
+    }
 
     async fn connect(&self) -> Result<Self::Connection, TransportError> {
         Ok(UnixStream::connect(&self.path).await?)

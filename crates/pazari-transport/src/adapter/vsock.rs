@@ -7,26 +7,35 @@ use crate::{Connector, Listener, PeerId, TransportError};
 #[derive(Debug)]
 pub struct VsockListener {
     inner: tokio_vsock::VsockListener,
+    address: VsockAddr,
 }
 
 impl VsockListener {
     pub fn bind(cid: u32, port: u32) -> Result<Self, TransportError> {
-        Ok(Self {
-            inner: tokio_vsock::VsockListener::bind(VsockAddr::new(cid, port))?,
-        })
+        let inner = tokio_vsock::VsockListener::bind(VsockAddr::new(cid, port))?;
+        let address = inner.local_addr()?;
+
+        Ok(Self { inner, address })
     }
 
     pub fn bind_any(port: u32) -> Result<Self, TransportError> {
         Self::bind(VMADDR_CID_ANY, port)
     }
 
-    pub fn port(&self) -> Result<u32, TransportError> {
-        Ok(self.inner.local_addr()?.port())
+    #[must_use]
+    pub fn port(&self) -> u32 {
+        self.address.port()
     }
 }
 
 impl Listener for VsockListener {
     type Connection = VsockStream;
+
+    fn local(&self) -> PeerId {
+        PeerId::Vsock {
+            cid: self.address.cid(),
+        }
+    }
 
     async fn accept(&self) -> Result<(Self::Connection, PeerId), TransportError> {
         let (connection, address) = self.inner.accept().await?;
@@ -65,6 +74,10 @@ impl Default for VsockConnector {
 
 impl Connector for VsockConnector {
     type Connection = VsockStream;
+
+    fn peer(&self) -> PeerId {
+        PeerId::Vsock { cid: self.cid }
+    }
 
     async fn connect(&self) -> Result<Self::Connection, TransportError> {
         Ok(VsockStream::connect(VsockAddr::new(self.cid, self.port)).await?)

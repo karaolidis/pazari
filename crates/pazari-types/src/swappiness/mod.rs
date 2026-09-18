@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::RangeError;
+use crate::{bounded::Bounded, error::RangeError};
 
 /// A `swappiness=` argument for `memory.reclaim`.
 ///
@@ -16,15 +16,30 @@ impl Swappiness {
     pub const MAX: u8 = 200;
 
     pub fn try_new(value: u8) -> Result<Self, RangeError> {
-        if value > Self::MAX {
-            return Err(RangeError::new("Swappiness", &value, "[0, 200]"));
-        }
-
-        Ok(Self(value))
+        <Self as Bounded>::try_new(value)
     }
 
     #[must_use]
     pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl Bounded for Swappiness {
+    type Raw = u8;
+
+    const NAME: &'static str = "Swappiness";
+    const BOUNDS: &'static str = "[0, 200]";
+
+    fn contains(value: u8) -> bool {
+        value <= Self::MAX
+    }
+
+    fn wrap(value: u8) -> Self {
+        Self(value)
+    }
+
+    fn get(self) -> u8 {
         self.0
     }
 }

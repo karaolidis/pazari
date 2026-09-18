@@ -11,6 +11,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Connection for T {}
 pub trait Listener {
     type Connection: Connection;
 
+    fn local(&self) -> PeerId;
+
     fn accept(
         &self,
     ) -> impl Future<Output = Result<(Self::Connection, PeerId), TransportError>> + Send;
@@ -18,6 +20,8 @@ pub trait Listener {
 
 pub trait Connector {
     type Connection: Connection;
+
+    fn peer(&self) -> PeerId;
 
     fn connect(&self) -> impl Future<Output = Result<Self::Connection, TransportError>> + Send;
 }

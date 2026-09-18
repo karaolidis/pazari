@@ -24,6 +24,13 @@ pub enum AnyListener {
 impl Listener for AnyListener {
     type Connection = AnyConnection;
 
+    fn local(&self) -> PeerId {
+        match self {
+            Self::Unix(listener) => listener.local(),
+            Self::Vsock(listener) => listener.local(),
+        }
+    }
+
     async fn accept(&self) -> Result<(Self::Connection, PeerId), TransportError> {
         match self {
             Self::Unix(listener) => {
@@ -46,6 +53,13 @@ pub enum AnyConnector {
 
 impl Connector for AnyConnector {
     type Connection = AnyConnection;
+
+    fn peer(&self) -> PeerId {
+        match self {
+            Self::Unix(connector) => connector.peer(),
+            Self::Vsock(connector) => connector.peer(),
+        }
+    }
 
     async fn connect(&self) -> Result<Self::Connection, TransportError> {
         match self {

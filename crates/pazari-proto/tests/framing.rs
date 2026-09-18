@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use pazari_proto::{
     Codec, DecodeError, Decoder, DenyReason, EncodeError, GrantReason, GuestMessage, HostMessage,
-    JsonLinesCodec, MAX_LINE_BYTES, Urgency,
+    JsonLinesCodec, Urgency,
 };
 
 const fn request() -> GuestMessage {
@@ -64,11 +64,13 @@ fn many_messages_in_one_chunk_decode_in_order() {
 fn an_over_long_line_fails_before_its_terminator_arrives() {
     let mut decoder = JsonLinesCodec::decoder::<GuestMessage>();
 
-    decoder.push(&vec![b'x'; MAX_LINE_BYTES]).unwrap();
+    decoder
+        .push(&vec![b'x'; JsonLinesCodec::MAX_FRAME_BYTES])
+        .unwrap();
 
     let error = decoder.push(b"x").unwrap_err();
     assert!(
-        matches!(error, DecodeError::LineTooLong { len } if len == MAX_LINE_BYTES + 1),
+        matches!(error, DecodeError::LineTooLong { len, .. } if len == JsonLinesCodec::MAX_FRAME_BYTES + 1),
         "unexpected error: {error}"
     );
 
@@ -79,15 +81,17 @@ fn an_over_long_line_fails_before_its_terminator_arrives() {
 fn a_line_of_exactly_the_cap_is_accepted() {
     let mut decoder = JsonLinesCodec::decoder::<GuestMessage>();
 
-    decoder.push(&vec![b'x'; MAX_LINE_BYTES]).unwrap();
+    decoder
+        .push(&vec![b'x'; JsonLinesCodec::MAX_FRAME_BYTES])
+        .unwrap();
 
     assert!(!decoder.is_poisoned());
-    assert_eq!(decoder.pending(), MAX_LINE_BYTES);
+    assert_eq!(decoder.pending(), JsonLinesCodec::MAX_FRAME_BYTES);
 }
 
 #[test]
 fn a_complete_over_long_line_fails_on_decode() {
-    let mut line = vec![b'x'; MAX_LINE_BYTES + 1];
+    let mut line = vec![b'x'; JsonLinesCodec::MAX_FRAME_BYTES + 1];
     line.push(b'\n');
 
     let mut decoder = JsonLinesCodec::decoder::<GuestMessage>();
@@ -97,7 +101,7 @@ fn a_complete_over_long_line_fails_on_decode() {
         .next_message()
         .expect_err("expected a protocol violation");
     assert!(
-        matches!(error, DecodeError::LineTooLong { len } if len == MAX_LINE_BYTES + 1),
+        matches!(error, DecodeError::LineTooLong { len, .. } if len == JsonLinesCodec::MAX_FRAME_BYTES + 1),
         "unexpected error: {error}"
     );
 }
@@ -106,7 +110,7 @@ fn a_complete_over_long_line_fails_on_decode() {
 fn encoding_an_over_long_message_fails_and_leaves_the_buffer_untouched() {
     let message = GuestMessage::ReclaimNak {
         id: 1,
-        reason: "x".repeat(MAX_LINE_BYTES),
+        reason: "x".repeat(JsonLinesCodec::MAX_FRAME_BYTES),
     };
 
     let mut out = b"prefix".to_vec();

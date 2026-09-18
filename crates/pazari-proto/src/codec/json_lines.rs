@@ -3,7 +3,7 @@ use std::{marker::PhantomData, str};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
-    DecodeError, EncodeError, MAX_LINE_BYTES,
+    DecodeError, EncodeError,
     codec::{Codec, Decoder},
 };
 
@@ -12,6 +12,8 @@ pub struct JsonLinesCodec;
 
 impl Codec for JsonLinesCodec {
     type Decoder<M: DeserializeOwned> = JsonLinesDecoder<M>;
+
+    const MAX_FRAME_BYTES: usize = 64 * 1024;
 
     fn encode<M>(message: &M, out: &mut Vec<u8>) -> Result<(), EncodeError>
     where
@@ -25,9 +27,12 @@ impl Codec for JsonLinesCodec {
         }
 
         let len = out.len() - start;
-        if len > MAX_LINE_BYTES {
+        if len > Self::MAX_FRAME_BYTES {
             out.truncate(start);
-            return Err(EncodeError::LineTooLong { len });
+            return Err(EncodeError::LineTooLong {
+                len,
+                cap: Self::MAX_FRAME_BYTES,
+            });
         }
 
         out.push(b'\n');
@@ -55,11 +60,6 @@ impl<M> JsonLinesDecoder<M> {
             message: PhantomData,
         }
     }
-
-    #[must_use]
-    pub const fn is_poisoned(&self) -> bool {
-        self.poisoned
-    }
 }
 
 impl<M> Default for JsonLinesDecoder<M> {
@@ -82,9 +82,12 @@ impl<M: DeserializeOwned> Decoder<M> for JsonLinesDecoder<M> {
             .rposition(|&byte| byte == b'\n')
             .map_or(self.buf.len(), |index| self.buf.len() - index - 1);
 
-        if unterminated > MAX_LINE_BYTES {
+        if unterminated > JsonLinesCodec::MAX_FRAME_BYTES {
             self.poisoned = true;
-            return Err(DecodeError::LineTooLong { len: unterminated });
+            return Err(DecodeError::LineTooLong {
+                len: unterminated,
+                cap: JsonLinesCodec::MAX_FRAME_BYTES,
+            });
         }
 
         Ok(())
@@ -114,6 +117,10 @@ impl<M: DeserializeOwned> Decoder<M> for JsonLinesDecoder<M> {
     fn pending(&self) -> usize {
         self.buf.len()
     }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
 }
 
 fn decode_line<M: DeserializeOwned>(line: &[u8]) -> Result<M, DecodeError> {
@@ -121,8 +128,11 @@ fn decode_line<M: DeserializeOwned>(line: &[u8]) -> Result<M, DecodeError> {
         return Err(DecodeError::EmptyLine);
     }
 
-    if line.len() > MAX_LINE_BYTES {
-        return Err(DecodeError::LineTooLong { len: line.len() });
+    if line.len() > JsonLinesCodec::MAX_FRAME_BYTES {
+        return Err(DecodeError::LineTooLong {
+            len: line.len(),
+            cap: JsonLinesCodec::MAX_FRAME_BYTES,
+        });
     }
 
     if let Some(offset) = line.iter().position(|&byte| byte == b'\r') {

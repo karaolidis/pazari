@@ -9,6 +9,8 @@ use crate::{DecodeError, EncodeError};
 pub trait Codec {
     type Decoder<M: DeserializeOwned>: Decoder<M>;
 
+    const MAX_FRAME_BYTES: usize;
+
     fn encode<M>(message: &M, out: &mut Vec<u8>) -> Result<(), EncodeError>
     where
         M: Serialize + ?Sized;
@@ -31,4 +33,6 @@ pub trait Decoder<M> {
     fn next_message(&mut self) -> Result<Option<M>, DecodeError>;
 
     fn pending(&self) -> usize;
+
+    fn is_poisoned(&self) -> bool;
 }

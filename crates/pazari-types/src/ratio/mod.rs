@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::RangeError;
+use crate::{bounded::Bounded, error::RangeError};
 
 /// A proportion of something, in `(0, 1]`.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -13,15 +13,30 @@ impl Fraction {
     pub const MAX: f64 = 1.0;
 
     pub fn try_new(value: f64) -> Result<Self, RangeError> {
-        if !value.is_finite() || value <= 0.0 || value > Self::MAX {
-            return Err(RangeError::new("Fraction", &value, "(0, 1]"));
-        }
-
-        Ok(Self(value))
+        <Self as Bounded>::try_new(value)
     }
 
     #[must_use]
     pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Bounded for Fraction {
+    type Raw = f64;
+
+    const NAME: &'static str = "Fraction";
+    const BOUNDS: &'static str = "(0, 1]";
+
+    fn contains(value: f64) -> bool {
+        value.is_finite() && value > 0.0 && value <= Self::MAX
+    }
+
+    fn wrap(value: f64) -> Self {
+        Self(value)
+    }
+
+    fn get(self) -> f64 {
         self.0
     }
 }
@@ -55,15 +70,30 @@ impl Psi {
     pub const MAX: f64 = 100.0;
 
     pub fn try_new(value: f64) -> Result<Self, RangeError> {
-        if !value.is_finite() || value <= 0.0 || value > Self::MAX {
-            return Err(RangeError::new("Psi", &value, "(0, 100]"));
-        }
-
-        Ok(Self(value))
+        <Self as Bounded>::try_new(value)
     }
 
     #[must_use]
     pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Bounded for Psi {
+    type Raw = f64;
+
+    const NAME: &'static str = "Psi";
+    const BOUNDS: &'static str = "(0, 100]";
+
+    fn contains(value: f64) -> bool {
+        value.is_finite() && value > 0.0 && value <= Self::MAX
+    }
+
+    fn wrap(value: f64) -> Self {
+        Self(value)
+    }
+
+    fn get(self) -> f64 {
         self.0
     }
 }

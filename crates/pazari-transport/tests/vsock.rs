@@ -1,13 +1,13 @@
 use std::time::Duration;
 
-use pazari_proto::{GuestMessage, HostMessage, JsonLinesCodec, PROTOCOL_VERSION};
+use pazari_proto::{Guest, GuestMessage, Host, HostMessage, JsonLinesCodec, PROTOCOL_VERSION};
 use pazari_transport::{
     Connector, Listener, MessageStream, PeerId, VsockConnector, VsockListener,
     adapter::vsock::VMADDR_CID_LOCAL,
 };
 
-type GuestStream<T> = MessageStream<T, JsonLinesCodec, HostMessage, GuestMessage>;
-type HostStream<T> = MessageStream<T, JsonLinesCodec, GuestMessage, HostMessage>;
+type GuestStream<T> = MessageStream<T, JsonLinesCodec, Guest>;
+type HostStream<T> = MessageStream<T, JsonLinesCodec, Host>;
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -45,10 +45,7 @@ async fn a_loopback_round_trip_carries_messages() {
         }
     };
 
-    assert_eq!(
-        listener.port().expect("failed to read the bound port"),
-        port
-    );
+    assert_eq!(listener.port(), port);
 
     let connector = VsockConnector::new(VMADDR_CID_LOCAL, port);
     assert_eq!(connector.cid(), VMADDR_CID_LOCAL);

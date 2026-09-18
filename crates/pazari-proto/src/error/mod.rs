@@ -2,21 +2,19 @@ use std::str::Utf8Error;
 
 use thiserror::Error;
 
-use crate::MAX_LINE_BYTES;
-
 #[derive(Debug, Error)]
 pub enum EncodeError {
     #[error("failed to serialize message: {0}")]
     Serialize(#[from] serde_json::Error),
 
-    #[error("encoded message is {len} bytes, over MAX_LINE_BYTES ({MAX_LINE_BYTES})")]
-    LineTooLong { len: usize },
+    #[error("encoded message is {len} bytes, over the codec's {cap} byte frame cap")]
+    LineTooLong { len: usize, cap: usize },
 }
 
 #[derive(Debug, Error)]
 pub enum DecodeError {
-    #[error("line reached {len} bytes with no terminator, over MAX_LINE_BYTES ({MAX_LINE_BYTES})")]
-    LineTooLong { len: usize },
+    #[error("line reached {len} bytes with no terminator, over the codec's {cap} byte frame cap")]
+    LineTooLong { len: usize, cap: usize },
 
     #[error("empty line")]
     EmptyLine,

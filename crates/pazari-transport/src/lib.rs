@@ -5,6 +5,9 @@ pub mod connection;
 pub mod error;
 pub mod message;
 
+#[cfg(test)]
+mod testing;
+
 pub use adapter::{
     AnyConnection, AnyConnector, AnyListener, UnixConnector, UnixListener, VsockConnector,
     VsockListener,

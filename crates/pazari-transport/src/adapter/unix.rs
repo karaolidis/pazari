@@ -101,3 +101,62 @@ fn clear_stale(path: &Path) -> Result<(), TransportError> {
         Err(error) => Err(error.into()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::socket_path;
+
+    #[tokio::test]
+    async fn the_listener_identifies_peers_by_its_own_path() {
+        let path = socket_path("peer-id");
+        let listener = UnixListener::bind(&path).expect("failed to bind the listener");
+        let connector = UnixConnector::new(&path);
+
+        assert_eq!(listener.path(), path);
+        assert_eq!(connector.path(), path);
+
+        let expected = PeerId::Unix { path: path.clone() };
+        assert_eq!(listener.local(), expected);
+        assert_eq!(connector.peer(), expected);
+
+        for _ in 0..3u8 {
+            let guest = connector.connect().await.unwrap();
+            let (connection, peer) = listener.accept().await.unwrap();
+
+            assert_eq!(peer, expected);
+
+            drop(connection);
+            drop(guest);
+        }
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_stale_socket_file_is_rebound() {
+        let path = socket_path("stale");
+
+        drop(UnixListener::bind(&path).unwrap());
+        assert!(fs::symlink_metadata(&path).is_ok());
+
+        let listener = UnixListener::bind(&path).expect("failed to bind the listener");
+        let connector = UnixConnector::new(&path);
+
+        let guest = connector.connect().await.unwrap();
+        let (connection, peer) = listener.accept().await.unwrap();
+        assert_eq!(peer, PeerId::Unix { path: path.clone() });
+
+        let error =
+            UnixListener::bind(&path).expect_err("expected a live listener to be respected");
+        assert!(
+            matches!(&error, TransportError::Io { source } if source.kind() == io::ErrorKind::AddrInUse),
+            "unexpected error: {error}"
+        );
+
+        drop(connection);
+        drop(guest);
+        drop(listener);
+        let _ = fs::remove_file(&path);
+    }
+}

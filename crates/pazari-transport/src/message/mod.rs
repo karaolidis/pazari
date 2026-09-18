@@ -72,3 +72,208 @@ where
         self.connection
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use pazari_proto::{Codec, DecodeError, GuestMessage, HostMessage, JsonLinesCodec};
+    use tokio::io::{AsyncWriteExt, DuplexStream, duplex};
+
+    use super::MessageStream;
+    use crate::{
+        TransportError,
+        testing::{GuestStream, HostStream, framed, guest_messages, host_messages},
+    };
+
+    const BUFFER: usize = 1 << 20;
+
+    fn pair() -> (DuplexStream, DuplexStream) {
+        duplex(BUFFER)
+    }
+
+    async fn violation(raw: Vec<u8>) -> (TransportError, TransportError) {
+        let (mut guest, host) = pair();
+        guest.write_all(&raw).await.expect("failed to write");
+        guest.flush().await.expect("failed to flush");
+
+        let mut stream = HostStream::new(host);
+
+        let first = stream
+            .recv()
+            .await
+            .expect_err("expected a protocol violation");
+        let second = stream
+            .recv()
+            .await
+            .expect_err("expected the decoder to stay poisoned");
+
+        (first, second)
+    }
+
+    #[tokio::test]
+    async fn messages_travel_in_both_directions() {
+        let (guest, host) = pair();
+        let mut guest = GuestStream::new(guest);
+        let mut host = HostStream::new(host);
+
+        for message in &guest_messages() {
+            guest.send(message).await.unwrap();
+        }
+
+        let mut received = Vec::new();
+        for _ in 0..guest_messages().len() {
+            received.push(host.recv().await.unwrap().unwrap());
+        }
+        assert_eq!(received, guest_messages());
+
+        for message in &host_messages() {
+            host.send(message).await.unwrap();
+        }
+
+        let mut received = Vec::new();
+        for _ in 0..host_messages().len() {
+            received.push(guest.recv().await.unwrap().unwrap());
+        }
+        assert_eq!(received, host_messages());
+    }
+
+    #[tokio::test]
+    async fn a_message_split_into_small_writes_arrives_whole() {
+        let message = guest_messages().swap_remove(2);
+        let wire = framed(std::slice::from_ref(&message));
+
+        let (mut guest, host) = duplex(3);
+
+        let writer = tokio::spawn(async move {
+            guest.write_all(&wire).await.unwrap();
+            guest.flush().await.unwrap();
+        });
+
+        let mut stream = HostStream::new(host);
+
+        assert_eq!(stream.recv().await.unwrap(), Some(message));
+
+        writer.await.unwrap();
+        assert_eq!(stream.recv().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn messages_written_in_one_burst_arrive_in_order() {
+        let messages = guest_messages();
+        let wire = framed(&messages);
+
+        let (mut guest, host) = pair();
+        guest.write_all(&wire).await.unwrap();
+        guest.flush().await.unwrap();
+
+        let mut stream = HostStream::new(host);
+
+        let mut received = Vec::new();
+        for _ in 0..messages.len() {
+            received.push(stream.recv().await.unwrap().unwrap());
+        }
+
+        assert_eq!(received, messages);
+    }
+
+    #[tokio::test]
+    async fn a_clean_close_ends_the_stream() {
+        let (guest, host) = pair();
+
+        let mut guest = GuestStream::new(guest);
+        guest.send(&GuestMessage::Bye {}).await.unwrap();
+        drop(guest);
+
+        let mut stream = HostStream::new(host);
+
+        assert_eq!(stream.recv().await.unwrap(), Some(GuestMessage::Bye {}));
+        assert_eq!(stream.recv().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_close_mid_message_is_truncated() {
+        let wire = framed(std::slice::from_ref(&GuestMessage::Bye {}));
+        let partial = wire.len() - 2;
+
+        let (mut guest, host) = pair();
+        guest.write_all(&wire[..partial]).await.unwrap();
+        guest.flush().await.unwrap();
+        drop(guest);
+
+        let mut stream = HostStream::new(host);
+
+        let error = stream
+            .recv()
+            .await
+            .expect_err("expected a truncated stream");
+        assert!(
+            matches!(error, TransportError::Truncated { pending } if pending == partial),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_over_long_line_is_fatal_and_keeps_failing() {
+        let (first, second) = violation(vec![b'x'; JsonLinesCodec::MAX_FRAME_BYTES + 1]).await;
+
+        assert!(
+            matches!(
+                first,
+                TransportError::Decode {
+                    source: DecodeError::LineTooLong { .. }
+                }
+            ),
+            "unexpected error: {first}"
+        );
+        assert!(
+            matches!(
+                second,
+                TransportError::Decode {
+                    source: DecodeError::Poisoned
+                }
+            ),
+            "unexpected error: {second}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_line_is_fatal_and_keeps_failing() {
+        let (first, second) = violation(b"{\"type\":\"bye\"\n".to_vec()).await;
+
+        assert!(
+            matches!(
+                first,
+                TransportError::Decode {
+                    source: DecodeError::Malformed { .. }
+                }
+            ),
+            "unexpected error: {first}"
+        );
+        assert!(
+            matches!(
+                second,
+                TransportError::Decode {
+                    source: DecodeError::Poisoned
+                }
+            ),
+            "unexpected error: {second}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_typed_stream_releases_its_connection() {
+        let (guest, host) = pair();
+
+        let stream: HostStream<DuplexStream> = MessageStream::new(host);
+        let mut host = stream.into_inner();
+
+        let wire = framed(std::slice::from_ref(&HostMessage::Ceiling { ceiling: 42 }));
+        host.write_all(&wire).await.unwrap();
+        host.flush().await.unwrap();
+
+        let mut guest = GuestStream::new(guest);
+        assert_eq!(
+            guest.recv().await.unwrap(),
+            Some(HostMessage::Ceiling { ceiling: 42 })
+        );
+    }
+}

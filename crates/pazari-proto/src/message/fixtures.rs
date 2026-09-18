@@ -1,9 +1,107 @@
 use std::time::Duration;
 
-use pazari_proto::{
-    Codec, Decoder, DenyReason, GrantReason, GuestMessage, HostMessage, JsonLinesCodec, Urgency,
-};
 use proptest::prelude::*;
+
+use crate::{DenyReason, GrantReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Urgency};
+
+pub fn guest_messages() -> Vec<GuestMessage> {
+    vec![
+        GuestMessage::Hello {
+            protocol: PROTOCOL_VERSION,
+            agent_version: "0.1.0".to_owned(),
+            boot_mem: 2_147_483_648,
+            block_size: 134_217_728,
+            plugged: 0,
+        },
+        GuestMessage::GrantRequest {
+            id: 1,
+            current: 2_147_483_648,
+            target: 4_294_967_296,
+            reason: GrantReason::Throttle,
+            urgency: Urgency::High,
+        },
+        GuestMessage::GrantRequest {
+            id: 2,
+            current: 2_147_483_648,
+            target: 3_221_225_472,
+            reason: GrantReason::Preflight,
+            urgency: Urgency::Low,
+        },
+        GuestMessage::GrantRequest {
+            id: 3,
+            current: 2_147_483_648,
+            target: 3_221_225_472,
+            reason: GrantReason::Manual,
+            urgency: Urgency::Low,
+        },
+        GuestMessage::OfferRelease {
+            id: 4,
+            current: 4_294_967_296,
+            releasable: 1_073_741_824,
+        },
+        GuestMessage::ReclaimAck {
+            id: 7,
+            will_release: 536_870_912,
+        },
+        GuestMessage::ReclaimNak {
+            id: 8,
+            reason: "workload working set is pinned".to_owned(),
+        },
+        GuestMessage::Status {
+            plugged: 4_294_967_296,
+            available: 1_073_741_824,
+            high_events: 12,
+            max_events: 0,
+            psi_some10: 12.5,
+            psi_full10: 0.25,
+            swap_used: 0,
+            workload_usage: 3_221_225_472,
+        },
+        GuestMessage::Bye {},
+    ]
+}
+
+pub fn host_messages() -> Vec<HostMessage> {
+    vec![
+        HostMessage::Welcome {
+            protocol: PROTOCOL_VERSION,
+            ceiling: 8_589_934_592,
+            status_interval_ms: Duration::from_millis(1000),
+        },
+        HostMessage::Ceiling {
+            ceiling: 4_294_967_296,
+        },
+        HostMessage::Grant {
+            id: 1,
+            target: 3_221_225_472,
+        },
+        HostMessage::Deny {
+            id: 2,
+            reason: DenyReason::HostPressure,
+            retry_after_ms: Some(Duration::from_millis(5000)),
+        },
+        HostMessage::Deny {
+            id: 3,
+            reason: DenyReason::Ceiling,
+            retry_after_ms: None,
+        },
+        HostMessage::Deny {
+            id: 4,
+            reason: DenyReason::RateLimited,
+            retry_after_ms: Some(Duration::from_millis(250)),
+        },
+        HostMessage::Deny {
+            id: 5,
+            reason: DenyReason::Policy,
+            retry_after_ms: None,
+        },
+        HostMessage::ReclaimRequest {
+            id: 9,
+            desired: 1_073_741_824,
+            deadline_ms: Duration::from_secs(30),
+        },
+    ]
+}
 
 fn grant_reason() -> impl Strategy<Value = GrantReason> {
     prop_oneof![
@@ -30,7 +128,7 @@ fn millis() -> impl Strategy<Value = Duration> {
     any::<u64>().prop_map(Duration::from_millis)
 }
 
-fn guest_message() -> impl Strategy<Value = GuestMessage> {
+pub fn guest_message() -> impl Strategy<Value = GuestMessage> {
     prop_oneof![
         (
             any::<u16>(),
@@ -110,7 +208,7 @@ fn guest_message() -> impl Strategy<Value = GuestMessage> {
     ]
 }
 
-fn host_message() -> impl Strategy<Value = HostMessage> {
+pub fn host_message() -> impl Strategy<Value = HostMessage> {
     prop_oneof![
         (any::<u16>(), any::<u64>(), millis()).prop_map(
             |(protocol, ceiling, status_interval_ms)| {
@@ -138,79 +236,4 @@ fn host_message() -> impl Strategy<Value = HostMessage> {
             }
         }),
     ]
-}
-
-fn rechunked<M, S>(stream: &[u8], sizes: &[usize]) -> Result<Vec<M>, TestCaseError>
-where
-    M: serde::de::DeserializeOwned,
-    S: Codec,
-{
-    let mut decoder = S::decoder::<M>();
-    let mut decoded = Vec::new();
-    let mut offset = 0;
-
-    for size in sizes.iter().copied().cycle() {
-        if offset == stream.len() {
-            break;
-        }
-
-        let end = (offset + size).min(stream.len());
-        decoder
-            .push(&stream[offset..end])
-            .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        offset = end;
-
-        while let Some(message) = decoder
-            .next_message()
-            .map_err(|error| TestCaseError::fail(error.to_string()))?
-        {
-            decoded.push(message);
-        }
-    }
-
-    Ok(decoded)
-}
-
-proptest! {
-    #[test]
-    fn guest_messages_round_trip(message in guest_message()) {
-        let framed = JsonLinesCodec::encode_to_vec(&message)?;
-        let decoded = rechunked::<GuestMessage, JsonLinesCodec>(&framed, &[framed.len().max(1)])?;
-        prop_assert_eq!(decoded, vec![message]);
-    }
-
-    #[test]
-    fn host_messages_round_trip(message in host_message()) {
-        let framed = JsonLinesCodec::encode_to_vec(&message)?;
-        let decoded = rechunked::<HostMessage, JsonLinesCodec>(&framed, &[framed.len().max(1)])?;
-        prop_assert_eq!(decoded, vec![message]);
-    }
-
-    #[test]
-    fn a_guest_stream_survives_arbitrary_chunking(
-        messages in prop::collection::vec(guest_message(), 0..8),
-        sizes in prop::collection::vec(1usize..64, 1..8),
-    ) {
-        let mut stream = Vec::new();
-        for message in &messages {
-            JsonLinesCodec::encode(message, &mut stream)?;
-        }
-
-        let decoded = rechunked::<GuestMessage, JsonLinesCodec>(&stream, &sizes)?;
-        prop_assert_eq!(decoded, messages);
-    }
-
-    #[test]
-    fn a_host_stream_survives_arbitrary_chunking(
-        messages in prop::collection::vec(host_message(), 0..8),
-        sizes in prop::collection::vec(1usize..64, 1..8),
-    ) {
-        let mut stream = Vec::new();
-        for message in &messages {
-            JsonLinesCodec::encode(message, &mut stream)?;
-        }
-
-        let decoded = rechunked::<HostMessage, JsonLinesCodec>(&stream, &sizes)?;
-        prop_assert_eq!(decoded, messages);
-    }
 }

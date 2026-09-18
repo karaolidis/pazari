@@ -114,3 +114,52 @@ impl AsyncWrite for AnyConnection {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use pazari_proto::{GuestMessage, HostMessage};
+
+    use super::*;
+    use crate::{
+        MessageStream,
+        testing::{GuestStream, HostStream, socket_path},
+    };
+
+    #[tokio::test]
+    async fn the_runtime_wrappers_carry_messages() {
+        let path = socket_path("any");
+        let listener = AnyListener::Unix(UnixListener::bind(&path).unwrap());
+        let connector = AnyConnector::Unix(UnixConnector::new(&path));
+
+        let expected = PeerId::Unix { path: path.clone() };
+        assert_eq!(listener.local(), expected);
+        assert_eq!(connector.peer(), expected);
+
+        let host = tokio::spawn(async move {
+            let (connection, peer) = listener.accept().await.unwrap();
+            assert!(matches!(peer, PeerId::Unix { .. }));
+
+            let mut stream: HostStream<AnyConnection> = MessageStream::new(connection);
+            assert_eq!(stream.recv().await.unwrap(), Some(GuestMessage::Bye {}));
+
+            stream
+                .send(&HostMessage::Ceiling { ceiling: 42 })
+                .await
+                .unwrap();
+        });
+
+        let mut guest: GuestStream<AnyConnection> =
+            MessageStream::new(connector.connect().await.unwrap());
+        guest.send(&GuestMessage::Bye {}).await.unwrap();
+
+        assert_eq!(
+            guest.recv().await.unwrap(),
+            Some(HostMessage::Ceiling { ceiling: 42 })
+        );
+
+        host.await.unwrap();
+        let _ = fs::remove_file(&path);
+    }
+}

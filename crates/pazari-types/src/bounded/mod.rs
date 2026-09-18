@@ -24,3 +24,63 @@ pub trait Bounded: Copy + Sized {
         Ok(Self::wrap(value))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fmt, time::Duration};
+
+    use serde::{Serialize, de::DeserializeOwned};
+
+    use crate::{Bounded, Delay, Fraction, Interval, Psi, Swappiness};
+
+    fn round_trips<T>(raw: T::Raw)
+    where
+        T: Bounded + Serialize + DeserializeOwned + PartialEq + fmt::Debug,
+    {
+        let value = T::try_new(raw).expect("the fixture is inside the range");
+
+        let text = serde_json::to_string(&value).expect("a valid value serialises");
+        let back: T = serde_json::from_str(&text).expect("its own output deserialises");
+
+        assert_eq!(back, value, "{} lost {raw:?} in a round trip", T::NAME);
+    }
+
+    fn rejects<T>(raw: T::Raw)
+    where
+        T: Bounded + fmt::Debug,
+    {
+        let error = T::try_new(raw).expect_err("the fixture is outside the range");
+
+        assert_eq!(error.what, T::NAME);
+        assert_eq!(error.bounds, T::BOUNDS);
+        assert_eq!(error.value, format!("{raw:?}"));
+    }
+
+    #[test]
+    fn every_bounded_type_survives_its_own_serialisation() {
+        round_trips::<Interval>(Duration::from_millis(1_500));
+        round_trips::<Delay>(Duration::from_secs(30));
+        round_trips::<Fraction>(0.5);
+        round_trips::<Psi>(5.5);
+        round_trips::<Swappiness>(60);
+    }
+
+    #[test]
+    fn every_rejection_names_its_type_and_bounds() {
+        rejects::<Interval>(Duration::ZERO);
+        rejects::<Delay>(Duration::from_secs(86_401));
+        rejects::<Fraction>(1.5);
+        rejects::<Psi>(101.0);
+        rejects::<Swappiness>(201);
+    }
+
+    #[test]
+    fn the_range_agrees_with_what_it_admits() {
+        assert!(Interval::contains(Duration::from_secs(1)));
+        assert!(!Interval::contains(Duration::ZERO));
+        assert_eq!(
+            Interval::wrap(Duration::from_secs(1)).get(),
+            Duration::from_secs(1)
+        );
+    }
+}

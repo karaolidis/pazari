@@ -1,0 +1,11 @@
+[package]
+name = "pazari-stress"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic memory workload generator"
+authors = [
+    "Nikolaos Karaolidis <nick@karaolidis.com>",
+]
+
+[lints]
+workspace = true

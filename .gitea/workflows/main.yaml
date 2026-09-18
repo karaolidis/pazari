@@ -1,0 +1,60 @@
+name: Build and Release Binary
+
+on:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_PERMIT_COPY_RENAME: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: clippy, rustfmt
+
+      - name: Compile
+        run: cargo check --all-features --all-targets --workspace
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --all-features --all-targets --workspace -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features --all-targets --workspace
+
+  release:
+    if: gitea.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      RUSTUP_PERMIT_COPY_RENAME: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+
+      - name: Build
+        run: cargo build --release --all-features --all-targets
+
+      - name: Release
+        uses: akkuman/gitea-release-action@main
+        with:
+          name: "Release ${{ gitea.sha }}"
+          tag_name: "release-${{ gitea.sha }}"
+          files: |
+            target/release/pazarid
+            target/release/pazari-agent

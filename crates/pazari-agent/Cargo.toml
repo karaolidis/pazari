@@ -1,0 +1,15 @@
+[package]
+name = "pazari-agent"
+version = "0.1.0"
+edition = "2024"
+description = "pazari guest agent"
+authors = [
+    "Nikolaos Karaolidis <nick@karaolidis.com>",
+]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "pazari-agent"
+path = "src/main.rs"

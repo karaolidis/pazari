@@ -1,0 +1,15 @@
+[package]
+name = "pazarid"
+version = "0.1.0"
+edition = "2024"
+description = "pazari host daemon"
+authors = [
+    "Nikolaos Karaolidis <nick@karaolidis.com>",
+]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "pazarid"
+path = "src/main.rs"

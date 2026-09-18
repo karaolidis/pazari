@@ -1,0 +1,11 @@
+[package]
+name = "pazari-proto"
+version = "0.1.0"
+edition = "2024"
+description = "Wire protocol for pazari guest-host negotiation"
+authors = [
+    "Nikolaos Karaolidis <nick@karaolidis.com>",
+]
+
+[lints]
+workspace = true

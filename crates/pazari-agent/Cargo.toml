@@ -13,3 +13,11 @@ workspace = true
 [[bin]]
 name = "pazari-agent"
 path = "src/main.rs"
+
+[dependencies]
+pazari-proto = { path = "../pazari-proto" }
+pazari-types = { path = "../pazari-types" }
+thiserror = "2.0.20"
+
+[dev-dependencies]
+proptest = "1.11.0"

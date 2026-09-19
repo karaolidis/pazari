@@ -17,7 +17,12 @@ path = "src/main.rs"
 [dependencies]
 pazari-proto = { path = "../pazari-proto" }
 pazari-types = { path = "../pazari-types" }
+rustix = { version = "1.1.5", features = ["net"] }
 thiserror = "2.0.20"
+tokio = { version = "1.53.1", default-features = false, features = ["rt", "time", "sync", "net", "fs", "io-util"] }
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 proptest = "1.11.0"
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", default-features = false, features = ["rt", "time", "sync", "net", "fs", "io-util", "macros", "rt-multi-thread"] }

@@ -11,7 +11,10 @@ pub use crate::runtime::cgroup::{
     raw::RawCgroup,
     systemd::SystemdCgroup,
 };
-use crate::runtime::error::RuntimeError;
+use crate::runtime::{
+    config::{Backend, RuntimeConfig},
+    error::RuntimeError,
+};
 
 pub const MEMORY_HIGH: &str = "memory.high";
 pub const MEMORY_MAX: &str = "memory.max";
@@ -58,6 +61,25 @@ pub trait Cgroup: Send + Sync {
 pub enum AnyCgroup {
     Raw(RawCgroup),
     Systemd(SystemdCgroup),
+}
+
+impl AnyCgroup {
+    pub async fn open(config: &RuntimeConfig) -> Result<Self, RuntimeError> {
+        Ok(match &config.backend {
+            Backend::Cgroupfs => Self::Raw(RawCgroup::new(&config.cgroup)),
+            Backend::Systemd { unit } => {
+                Self::Systemd(SystemdCgroup::connect(unit.clone(), &config.cgroup).await?)
+            }
+        })
+    }
+
+    #[must_use]
+    pub fn released(&self) -> String {
+        match self {
+            Self::Raw(cgroup) => cgroup.released(),
+            Self::Systemd(cgroup) => cgroup.released(),
+        }
+    }
 }
 
 impl Cgroup for AnyCgroup {

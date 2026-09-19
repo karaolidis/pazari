@@ -13,6 +13,9 @@ use crate::runtime::{
 const CONTROLLERS: &str = "cgroup.controllers";
 const SUBTREE_CONTROL: &str = "cgroup.subtree_control";
 
+/// The prefix of the `/proc/self/cgroup` line that names a cgroup v2 path.
+const UNIFIED_ENTRY: &str = "0::";
+
 const READS: [&str; 3] = [MEMORY_EVENTS, MEMORY_CURRENT, MEMORY_PRESSURE];
 
 const WRITES: [&str; 4] = [MEMORY_HIGH, MEMORY_MAX, MEMORY_OOM_GROUP, MEMORY_RECLAIM];
@@ -110,6 +113,7 @@ impl<'a> Preflight<'a> {
             checks: vec![
                 self.cgroup_v2(),
                 self.workload_cgroup(),
+                self.agent_cgroup(),
                 self.memory_controller(),
                 self.memmap_on_memory(),
                 self.transparent_hugepages(),
@@ -175,6 +179,81 @@ impl<'a> Preflight<'a> {
         }
 
         fail(NAME, format!("{}: {}", cgroup.display(), faults.join("; ")))
+    }
+
+    fn agent_cgroup(self) -> Check {
+        const NAME: &str = "agent cgroup";
+
+        let path = &self.config.paths.self_cgroup;
+        let workload = &self.config.cgroup;
+
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                return warn(NAME, format!("cannot read {}: {error}", path.display()));
+            }
+        };
+
+        let Some(own) = text
+            .lines()
+            .find_map(|line| line.strip_prefix(UNIFIED_ENTRY))
+            .map(str::trim)
+        else {
+            return warn(
+                NAME,
+                format!(
+                    "{} carries no {UNIFIED_ENTRY} line: the agent cannot tell which cgroup it is in",
+                    path.display()
+                ),
+            );
+        };
+
+        if own == "/" {
+            return warn(
+                NAME,
+                format!(
+                    "{} reports the hierarchy root, which is what a cgroup namespace reports too: the agent cannot tell it is outside {}",
+                    path.display(),
+                    workload.display()
+                ),
+            );
+        }
+
+        let own = self
+            .config
+            .paths
+            .cgroup_root
+            .join(own.trim_start_matches('/'));
+
+        if !own.is_dir() {
+            return warn(
+                NAME,
+                format!(
+                    "{} is not a cgroup directory: the agent is in a cgroup namespace and cannot tell it is outside {}",
+                    own.display(),
+                    workload.display()
+                ),
+            );
+        }
+
+        if own.starts_with(workload) {
+            return fail(
+                NAME,
+                format!(
+                    "the agent runs in {}, inside the cgroup it brakes: memory.high would throttle the process that has to lift it",
+                    own.display()
+                ),
+            );
+        }
+
+        pass(
+            NAME,
+            format!(
+                "the agent runs in {}, outside {}",
+                own.display(),
+                workload.display()
+            ),
+        )
     }
 
     fn memory_controller(self) -> Check {
@@ -416,7 +495,7 @@ mod tests {
 
         assert_eq!(report.severity(), Severity::Pass, "{report}");
         assert!(report.passed());
-        assert_eq!(report.checks().len(), 7);
+        assert_eq!(report.checks().len(), 8);
     }
 
     #[test]
@@ -457,6 +536,70 @@ mod tests {
         let report = Preflight::new(&config).run(None);
 
         assert_eq!(severity(&report, "workload cgroup"), Severity::Fail);
+    }
+
+    #[test]
+    fn an_agent_in_the_cgroup_it_brakes_fails() {
+        let guest = Guest::new();
+        Guest::write(&guest.config.paths.self_cgroup, "0::/workload.slice\n");
+
+        let report = Preflight::new(&guest.config).run(None);
+
+        assert_eq!(severity(&report, "agent cgroup"), Severity::Fail);
+        assert!(detail(&report, "agent cgroup").contains("inside the cgroup it brakes"));
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn an_agent_under_the_cgroup_it_brakes_fails() {
+        let guest = Guest::new();
+        Guest::dir(&guest.config.cgroup.join("agent.service"));
+        Guest::write(
+            &guest.config.paths.self_cgroup,
+            "0::/workload.slice/agent.service\n",
+        );
+
+        assert_eq!(
+            severity(&Preflight::new(&guest.config).run(None), "agent cgroup"),
+            Severity::Fail
+        );
+    }
+
+    #[test]
+    fn an_agent_in_a_cgroup_that_only_shares_a_prefix_passes() {
+        let guest = Guest::new();
+        Guest::dir(&guest.config.paths.cgroup_root.join("workload.slice2"));
+        Guest::write(&guest.config.paths.self_cgroup, "0::/workload.slice2\n");
+
+        assert_eq!(
+            severity(&Preflight::new(&guest.config).run(None), "agent cgroup"),
+            Severity::Pass
+        );
+    }
+
+    #[test]
+    fn an_agent_that_cannot_place_itself_warns_rather_than_guess() {
+        let guest = Guest::new();
+
+        for text in ["0::/\n", "0::/elsewhere.slice\n", "3:memory:/workload\n"] {
+            Guest::write(&guest.config.paths.self_cgroup, text);
+
+            let report = Preflight::new(&guest.config).run(None);
+
+            assert_eq!(
+                severity(&report, "agent cgroup"),
+                Severity::Warn,
+                "did not warn on {text:?}"
+            );
+            assert!(report.passed(), "a warning still starts the agent");
+        }
+
+        Guest::remove(&guest.config.paths.self_cgroup);
+
+        assert_eq!(
+            severity(&Preflight::new(&guest.config).run(None), "agent cgroup"),
+            Severity::Warn
+        );
     }
 
     #[test]

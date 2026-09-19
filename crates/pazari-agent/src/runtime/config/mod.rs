@@ -10,6 +10,8 @@ pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 pub const MEMINFO: &str = "/proc/meminfo";
 
+pub const SELF_CGROUP: &str = "/proc/self/cgroup";
+
 /// The virtio-mem block size, in lowercase hexadecimal with no `0x`.
 pub const BLOCK_SIZE: &str = "/sys/devices/system/memory/block_size_bytes";
 
@@ -26,6 +28,7 @@ pub const RECLAIM_CHUNK: u64 = 64 << 20;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     pub cgroup_root: PathBuf,
+    pub self_cgroup: PathBuf,
     pub meminfo: PathBuf,
     pub block_size: PathBuf,
     pub memmap_on_memory: PathBuf,
@@ -37,6 +40,7 @@ impl Paths {
     pub fn under(root: &Path) -> Self {
         Self {
             cgroup_root: rooted(root, CGROUP_ROOT),
+            self_cgroup: rooted(root, SELF_CGROUP),
             meminfo: rooted(root, MEMINFO),
             block_size: rooted(root, BLOCK_SIZE),
             memmap_on_memory: rooted(root, MEMMAP_ON_MEMORY),
@@ -49,6 +53,7 @@ impl Default for Paths {
     fn default() -> Self {
         Self {
             cgroup_root: PathBuf::from(CGROUP_ROOT),
+            self_cgroup: PathBuf::from(SELF_CGROUP),
             meminfo: PathBuf::from(MEMINFO),
             block_size: PathBuf::from(BLOCK_SIZE),
             memmap_on_memory: PathBuf::from(MEMMAP_ON_MEMORY),
@@ -142,6 +147,10 @@ mod tests {
 
         assert_eq!(paths.cgroup_root, Path::new("/tmp/fixture/sys/fs/cgroup"));
         assert_eq!(paths.meminfo, Path::new("/tmp/fixture/proc/meminfo"));
+        assert_eq!(
+            paths.self_cgroup,
+            Path::new("/tmp/fixture/proc/self/cgroup")
+        );
         assert_eq!(
             paths.memmap_on_memory,
             Path::new("/tmp/fixture/sys/module/memory_hotplug/parameters/memmap_on_memory")

@@ -14,6 +14,7 @@ use crate::runtime::{
 
 const MEMORY_HIGH: &str = "MemoryHigh";
 const MEMORY_MAX: &str = "MemoryMax";
+const INFINITY: &str = "infinity";
 
 #[proxy(
     interface = "org.freedesktop.systemd1.Manager",
@@ -69,6 +70,11 @@ impl SystemdCgroup {
     #[must_use]
     pub fn path(&self) -> &Path {
         self.files.path()
+    }
+
+    #[must_use]
+    pub fn released(&self) -> String {
+        format!("{} {MEMORY_HIGH} = {INFINITY}", self.unit)
     }
 
     async fn set(&self, property: &'static str, limit: Limit) -> Result<(), RuntimeError> {

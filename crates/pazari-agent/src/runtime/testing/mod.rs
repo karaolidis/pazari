@@ -39,6 +39,8 @@ pub const MEMINFO: &str = "MemTotal:        2096756 kB\n\
                            SwapFree:        1048572 kB\n\
                            HugePages_Total:       0\n";
 
+pub const AGENT_CGROUP: &str = "system.slice/pazari-agent.service";
+
 pub const BLOCK_SIZE: &str = "8000000\n";
 
 const FILES: [&str; 9] = [
@@ -103,6 +105,8 @@ impl Guest {
         Self::write(&paths.block_size, BLOCK_SIZE);
         Self::write(&paths.memmap_on_memory, "Y\n");
         Self::write(&paths.transparent_hugepage, "always [madvise] never\n");
+        Self::write(&paths.self_cgroup, &format!("0::/{AGENT_CGROUP}\n"));
+        Self::dir(&paths.cgroup_root.join(AGENT_CGROUP));
 
         for name in FILES {
             Self::write(&guest.config.cgroup.join(name), "");
@@ -119,6 +123,10 @@ impl Guest {
         }
 
         fs::write(path, text).expect("a fixture file");
+    }
+
+    pub fn dir(path: &Path) {
+        fs::create_dir_all(path).expect("a fixture directory");
     }
 
     pub fn remove(path: &Path) {

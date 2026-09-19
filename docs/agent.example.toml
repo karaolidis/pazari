@@ -1,0 +1,128 @@
+# How often the agent reads the workload cgroup and `/proc/meminfo`.
+tick_interval = "1s"
+
+[engine]
+# Memory withheld for the guest's own services, excluding the workload.
+# Set me.
+service_reserve = "256MiB"
+
+# The standing headroom the brake releases when the workload is throttled,
+# i.e. a burst the workload can take while waiting for more memory from
+# the host. Set me.
+burst_reserve = "256MiB"
+
+# The sliver of the burst reserve the brake holds back while a grant is in
+# flight to stop an overshoot. Set me.
+open_guard = "64MiB"
+
+# How much more memory a grant asks for.
+grow_step = "512MiB"
+
+# How long to wait before re-asking a host that denied a request.
+deny_backoff = "5s"
+
+# How long a resize is left to settle.
+settle_grace = "10s"
+
+# The share of its budget the workload must stay under to count as idle.
+idle_threshold = 0.5
+
+# How many consecutive idle intervals it takes before the agent offers
+# memory back.
+idle_intervals = 3
+
+# How much an offer to release gives back at a time.
+shrink_step = "256MiB"
+
+# How long after a release before another one is allowed.
+shrink_cooldown = "30s"
+
+# The `swappiness=` argument for `memory.reclaim`. Leave the key out to
+# reclaim at the guest's own `vm.swappiness`.
+reclaim_swappiness = 0
+
+# How much memory one titration step claims while the agent is still
+# finding the workload's working set.
+titrate_step = "64MiB"
+
+# How long each titration step is given before the next one.
+titrate_interval = "10s"
+
+# The memory pressure, in percent of wall time, at which titration decides
+# it has found the edge of the working set.
+titrate_psi_threshold = 5.0
+
+# What the agent does once the workload wants more than the ceiling
+# allows.
+[engine.exhaustion]
+# Possible variants:
+# - Leave the band open and let the workload degrade.
+#     kind = "stall"
+#     # How long a workload may want more than the ceiling allows before the
+#     # agent stops waiting for the host to move.
+#     timeout = "60s"
+# - Let the workload reach `memory.max` and be killed as a unit.
+#     kind = "kill"
+kind = "stall"
+
+[runtime]
+# The managed workload cgroup, as an absolute path under the unified
+# hierarchy. Set me.
+cgroup = "/sys/fs/cgroup/workload.slice"
+
+# What the guest booted with, excluding anything hot-plugged. Set me.
+boot_mem = "2GiB"
+
+# How long the hotplug listener waits for one resize's uevent to end.
+hotplug_debounce = "250ms"
+
+# How much one `memory.reclaim` write asks for.
+reclaim_chunk = "64MiB"
+
+# Whether `/sys/kernel/mm/transparent_hugepage/enabled` set to `always`
+# fails preflight.
+thp_always_fatal = true
+
+# Which adapter writes `memory.high` and `memory.max`.
+[runtime.backend]
+# Possible variants:
+# - Straight to the cgroup's own files.
+#     kind = "cgroupfs"
+# - Through the runtime properties of a unit.
+#     kind = "systemd"
+#     # The unit carrying the limits as `MemoryHigh` and `MemoryMax`. Set me.
+#     unit = "workload.service"
+kind = "cgroupfs"
+
+[transport]
+# Possible variants:
+# - `AF_VSOCK`.
+#     kind = "vsock"
+#     # The host's context id.
+#     cid = 2
+#     
+#     # The port pazarid listens on.
+#     port = 4650
+#     
+#     # How long to wait for the host's `welcome`.
+#     handshake_timeout = "10s"
+#     
+#     # The first reconnect delay.
+#     reconnect_min = "500ms"
+#     
+#     # The cap the reconnect delay doubles towards.
+#     reconnect_max = "30s"
+# - An `AF_UNIX` socket.
+#     kind = "unix"
+#     # The socket pazarid listens on. Set me.
+#     path = "/run/pazari/host.sock"
+#     
+#     # How long to wait for the host's `welcome`.
+#     handshake_timeout = "10s"
+#     
+#     # The first reconnect delay.
+#     reconnect_min = "500ms"
+#     
+#     # The cap the reconnect delay doubles towards.
+#     reconnect_max = "30s"
+kind = "vsock"

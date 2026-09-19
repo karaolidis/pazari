@@ -32,6 +32,11 @@ impl RawCgroup {
         &self.path
     }
 
+    #[must_use]
+    pub fn released(&self) -> String {
+        format!("{}/{MEMORY_HIGH} = {}", self.path.display(), Limit::Max)
+    }
+
     pub async fn read(&self, name: &str) -> Result<String, RuntimeError> {
         let path = self.path.join(name);
 

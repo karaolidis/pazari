@@ -4,7 +4,7 @@ use std::{num::NonZeroU64, time::Duration};
 
 use pazari_proto::{Guest, GuestMessage, HostMessage, JsonLinesCodec, PROTOCOL_VERSION};
 use pazari_transport::{AnyConnection, AnyConnector, Connector, MessageStream, TransportError};
-use pazari_types::Interval;
+use pazari_types::{Clock, Interval};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -12,7 +12,7 @@ use tokio::{
 };
 use tracing::{Instrument, debug, info, info_span, warn};
 
-use crate::{engine::Event, runtime::Clock, session::backoff::Backoff};
+use crate::{engine::Event, session::backoff::Backoff};
 
 const EVENT_DEPTH: usize = 64;
 const OUTBOUND_DEPTH: usize = 64;

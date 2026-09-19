@@ -4,6 +4,7 @@ pub mod notify;
 use std::sync::Arc;
 
 use pazari_proto::GuestMessage;
+use pazari_types::Clock;
 use tokio::{
     signal::unix::{SignalKind, signal},
     sync::watch,
@@ -15,8 +16,8 @@ use crate::{
     config::Config,
     engine::{BootInfo, Engine, Event},
     runtime::{
-        AnyCgroup, Applier, Cgroup, Clock, HotplugListener, Limit, Preflight, RuntimeConfig,
-        Severity, Snapshots, ThrottleWatcher, Ticker, Topology,
+        AnyCgroup, Applier, Cgroup, HotplugListener, Limit, Preflight, RuntimeConfig, Severity,
+        Snapshots, ThrottleWatcher, Ticker, Topology,
     },
     session::{Geometry, Session},
 };

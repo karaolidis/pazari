@@ -7,14 +7,13 @@ use std::{
     },
 };
 
-use pazari_types::Swappiness;
+use pazari_types::{Clock, Swappiness};
 use tokio::task::JoinHandle;
 
 use crate::{
     engine::Event,
     runtime::{
         cgroup::{Cgroup, Reclaimed},
-        clock::Clock,
         error::RuntimeError,
     },
 };

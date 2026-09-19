@@ -4,13 +4,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use pazari_types::Clock;
 use tokio::io::{Interest, unix::AsyncFd};
 
 use crate::{
     engine::Event,
     runtime::{
         cgroup::{MEMORY_EVENTS, parse},
-        clock::Clock,
         error::RuntimeError,
     },
 };

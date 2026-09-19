@@ -1,12 +1,12 @@
 use std::{num::NonZeroU64, sync::Arc};
 
 use pazari_proto::GuestMessage;
+use pazari_types::Clock;
 
 use crate::{
     engine::Action,
     runtime::{
         cgroup::{Cgroup, Limit},
-        clock::Clock,
         error::RuntimeError,
         reclaim::Reclaimer,
     },

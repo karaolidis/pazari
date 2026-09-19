@@ -1,6 +1,5 @@
 pub mod apply;
 pub mod cgroup;
-pub mod clock;
 pub mod config;
 pub mod error;
 pub mod preflight;
@@ -17,7 +16,6 @@ pub use crate::runtime::{
     cgroup::{
         AnyCgroup, Cgroup, Limit, MemoryEvents, Pressure, RawCgroup, Reclaimed, SystemdCgroup,
     },
-    clock::Clock,
     config::{Backend, Paths, RuntimeConfig},
     error::RuntimeError,
     preflight::{Check, Preflight, Report, Severity},

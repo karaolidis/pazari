@@ -1,6 +1,6 @@
 use std::{io, os::fd::OwnedFd, str};
 
-use pazari_types::Interval;
+use pazari_types::{Clock, Interval};
 use rustix::net::{
     AddressFamily, RecvFlags, SocketFlags, SocketType, bind,
     netlink::{KOBJECT_UEVENT, SocketAddrNetlink},
@@ -10,7 +10,7 @@ use tokio::{io::unix::AsyncFd, time::timeout};
 
 use crate::{
     engine::Event,
-    runtime::{clock::Clock, error::RuntimeError, topology::Topology},
+    runtime::{error::RuntimeError, topology::Topology},
 };
 
 /// The kernel's own uevent multicast group.

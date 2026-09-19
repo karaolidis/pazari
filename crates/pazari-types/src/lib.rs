@@ -12,4 +12,4 @@ pub use duration::{Delay, Interval, MAX_DURATION};
 pub use error::RangeError;
 pub use ratio::{Fraction, Psi};
 pub use swappiness::Swappiness;
-pub use time::Timestamp;
+pub use time::{Clock, Timestamp};

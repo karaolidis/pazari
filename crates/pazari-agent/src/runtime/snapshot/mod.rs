@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use pazari_types::Interval;
+use pazari_types::{Clock, Interval};
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::{
     engine::{Event, Snapshot},
-    runtime::{cgroup::Cgroup, clock::Clock, error::RuntimeError, topology::Topology},
+    runtime::{cgroup::Cgroup, error::RuntimeError, topology::Topology},
 };
 
 /// Composes the engine's view of the guest out of the workload cgroup and

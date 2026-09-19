@@ -9,5 +9,5 @@ pub use crate::{
         HostView, Negotiated, Phase, Policy, Reclaim, Reconcile, Registry, RegistryError, Request,
         Session,
     },
-    runtime::{Actuator, Driver, HostMemory, ProcMemory, RuntimeError},
+    runtime::{Actuator, Driver, HostMemory, Mode, ProcMemory, QmpActuator, RuntimeError},
 };

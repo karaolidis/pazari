@@ -1,3 +1,5 @@
+pub mod qmp;
+
 use std::{
     collections::VecDeque,
     future::{self, Future},

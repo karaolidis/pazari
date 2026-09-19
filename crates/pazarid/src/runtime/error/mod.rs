@@ -3,6 +3,8 @@ use std::{io, path::PathBuf};
 use pazari_types::MemInfoError;
 use thiserror::Error;
 
+use crate::runtime::qmp::QmpError;
+
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("failed to read {}: {source}", .path.display())]
@@ -13,6 +15,9 @@ pub enum RuntimeError {
 
     #[error("the memory device refused a size of {bytes}: {reason}")]
     Device { bytes: u64, reason: String },
+
+    #[error(transparent)]
+    Qmp(#[from] QmpError),
 }
 
 #[cfg(test)]

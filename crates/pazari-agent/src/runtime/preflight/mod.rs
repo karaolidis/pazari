@@ -56,6 +56,36 @@ impl fmt::Display for Check {
     }
 }
 
+/// One check's name, so the severities it can reach do not each have to carry it.
+#[derive(Debug, Clone, Copy)]
+struct Named(&'static str);
+
+impl Named {
+    const fn pass(self, detail: String) -> Check {
+        Check {
+            name: self.0,
+            severity: Severity::Pass,
+            detail,
+        }
+    }
+
+    const fn warn(self, detail: String) -> Check {
+        Check {
+            name: self.0,
+            severity: Severity::Warn,
+            detail,
+        }
+    }
+
+    const fn fail(self, detail: String) -> Check {
+        Check {
+            name: self.0,
+            severity: Severity::Fail,
+            detail,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     checks: Vec<Check>,
@@ -124,34 +154,28 @@ impl<'a> Preflight<'a> {
     }
 
     fn cgroup_v2(self) -> Check {
-        const NAME: &str = "cgroup v2";
+        let check = Named("cgroup v2");
 
         let root = &self.config.paths.cgroup_root;
         let controllers = root.join(CONTROLLERS);
 
         if controllers.is_file() {
-            return pass(NAME, format!("{} is a unified hierarchy", root.display()));
+            return check.pass(format!("{} is a unified hierarchy", root.display()));
         }
 
-        fail(
-            NAME,
-            format!(
-                "{} carries no {CONTROLLERS}: cgroup v2 is not mounted there",
-                root.display()
-            ),
-        )
+        check.fail(format!(
+            "{} carries no {CONTROLLERS}: cgroup v2 is not mounted there",
+            root.display()
+        ))
     }
 
     fn workload_cgroup(self) -> Check {
-        const NAME: &str = "workload cgroup";
+        let check = Named("workload cgroup");
 
         let cgroup = &self.config.cgroup;
 
         if !cgroup.is_dir() {
-            return fail(
-                NAME,
-                format!("{} is not a cgroup directory", cgroup.display()),
-            );
+            return check.fail(format!("{} is not a cgroup directory", cgroup.display()));
         }
 
         let mut faults = Vec::new();
@@ -169,20 +193,17 @@ impl<'a> Preflight<'a> {
         }
 
         if faults.is_empty() {
-            return pass(
-                NAME,
-                format!(
-                    "{} has every memory.* file the agent uses",
-                    cgroup.display()
-                ),
-            );
+            return check.pass(format!(
+                "{} has every memory.* file the agent uses",
+                cgroup.display()
+            ));
         }
 
-        fail(NAME, format!("{}: {}", cgroup.display(), faults.join("; ")))
+        check.fail(format!("{}: {}", cgroup.display(), faults.join("; ")))
     }
 
     fn agent_cgroup(self) -> Check {
-        const NAME: &str = "agent cgroup";
+        let check = Named("agent cgroup");
 
         let path = &self.config.paths.self_cgroup;
         let workload = &self.config.cgroup;
@@ -190,7 +211,7 @@ impl<'a> Preflight<'a> {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) => {
-                return warn(NAME, format!("cannot read {}: {error}", path.display()));
+                return check.warn(format!("cannot read {}: {error}", path.display()));
             }
         };
 
@@ -199,24 +220,18 @@ impl<'a> Preflight<'a> {
             .find_map(|line| line.strip_prefix(UNIFIED_ENTRY))
             .map(str::trim)
         else {
-            return warn(
-                NAME,
-                format!(
-                    "{} carries no {UNIFIED_ENTRY} line: the agent cannot tell which cgroup it is in",
-                    path.display()
-                ),
-            );
+            return check.warn(format!(
+                "{} carries no {UNIFIED_ENTRY} line: the agent cannot tell which cgroup it is in",
+                path.display()
+            ));
         };
 
         if own == "/" {
-            return warn(
-                NAME,
-                format!(
-                    "{} reports the hierarchy root, which is what a cgroup namespace reports too: the agent cannot tell it is outside {}",
-                    path.display(),
-                    workload.display()
-                ),
-            );
+            return check.warn(format!(
+                "{} reports the hierarchy root, which is what a cgroup namespace reports too: the agent cannot tell it is outside {}",
+                path.display(),
+                workload.display()
+            ));
         }
 
         let own = self
@@ -226,47 +241,35 @@ impl<'a> Preflight<'a> {
             .join(own.trim_start_matches('/'));
 
         if !own.is_dir() {
-            return warn(
-                NAME,
-                format!(
-                    "{} is not a cgroup directory: the agent is in a cgroup namespace and cannot tell it is outside {}",
-                    own.display(),
-                    workload.display()
-                ),
-            );
+            return check.warn(format!(
+                "{} is not a cgroup directory: the agent is in a cgroup namespace and cannot tell it is outside {}",
+                own.display(),
+                workload.display()
+            ));
         }
 
         if own.starts_with(workload) {
-            return fail(
-                NAME,
-                format!(
-                    "the agent runs in {}, inside the cgroup it brakes: memory.high would throttle the process that has to lift it",
-                    own.display()
-                ),
-            );
+            return check.fail(format!(
+                "the agent runs in {}, inside the cgroup it brakes: memory.high would throttle the process that has to lift it",
+                own.display()
+            ));
         }
 
-        pass(
-            NAME,
-            format!(
-                "the agent runs in {}, outside {}",
-                own.display(),
-                workload.display()
-            ),
-        )
+        check.pass(format!(
+            "the agent runs in {}, outside {}",
+            own.display(),
+            workload.display()
+        ))
     }
 
     fn memory_controller(self) -> Check {
-        const NAME: &str = "memory controller";
+        let check = Named("memory controller");
 
         let Some(parent) = self.config.cgroup.parent() else {
-            return fail(
-                NAME,
-                format!(
-                    "{} is a hierarchy root and has no parent to delegate the controller",
-                    self.config.cgroup.display()
-                ),
-            );
+            return check.fail(format!(
+                "{} is a hierarchy root and has no parent to delegate the controller",
+                self.config.cgroup.display()
+            ));
         };
 
         let control = parent.join(SUBTREE_CONTROL);
@@ -274,63 +277,57 @@ impl<'a> Preflight<'a> {
         let enabled = match fs::read_to_string(&control) {
             Ok(text) => text,
             Err(error) => {
-                return fail(NAME, format!("cannot read {}: {error}", control.display()));
+                return check.fail(format!("cannot read {}: {error}", control.display()));
             }
         };
 
         if enabled.split_whitespace().any(|name| name == "memory") {
-            return pass(
-                NAME,
-                format!("{} delegates memory to its children", parent.display()),
-            );
+            return check.pass(format!(
+                "{} delegates memory to its children",
+                parent.display()
+            ));
         }
 
-        fail(
-            NAME,
-            format!(
+        check.fail(format!(
                 "{} does not list memory in {SUBTREE_CONTROL}: the workload cgroup gets no memory.* files",
                 parent.display()
-            ),
-        )
+            ))
     }
 
     fn memmap_on_memory(self) -> Check {
-        const NAME: &str = "memmap_on_memory";
+        let check = Named("memmap_on_memory");
 
         let path = &self.config.paths.memmap_on_memory;
 
         let value = match fs::read_to_string(path) {
             Ok(text) => text.trim().to_owned(),
             Err(error) => {
-                return fail(NAME, format!("cannot read {}: {error}", path.display()));
+                return check.fail(format!("cannot read {}: {error}", path.display()));
             }
         };
 
         match value.as_str() {
-            "Y" | "1" => pass(NAME, "a hotplugged range carries its own memmap".to_owned()),
-            "N" | "0" => fail(
-                NAME,
-                format!(
-                    "{} is {value}: a hotplugged range takes its memmap out of the memory the guest already has",
-                    path.display()
-                ),
-            ),
-            _ => fail(
-                NAME,
-                format!("{} holds {value:?}, which is not Y or N", path.display()),
-            ),
+            "Y" | "1" => check.pass("a hotplugged range carries its own memmap".to_owned()),
+            "N" | "0" => check.fail(format!(
+                "{} is {value}: a hotplugged range takes its memmap out of the memory the guest already has",
+                path.display()
+            )),
+            _ => check.fail(format!(
+                "{} holds {value:?}, which is not Y or N",
+                path.display()
+            )),
         }
     }
 
     fn transparent_hugepages(self) -> Check {
-        const NAME: &str = "transparent hugepages";
+        let check = Named("transparent hugepages");
 
         let path = &self.config.paths.transparent_hugepage;
 
         let value = match fs::read_to_string(path) {
             Ok(text) => text.trim().to_owned(),
             Err(error) => {
-                return fail(NAME, format!("cannot read {}: {error}", path.display()));
+                return check.fail(format!("cannot read {}: {error}", path.display()));
             }
         };
 
@@ -339,14 +336,14 @@ impl<'a> Preflight<'a> {
             .find_map(|token| token.strip_prefix('[')?.strip_suffix(']'));
 
         let Some(mode) = mode else {
-            return fail(
-                NAME,
-                format!("{} holds {value:?}, which selects no mode", path.display()),
-            );
+            return check.fail(format!(
+                "{} holds {value:?}, which selects no mode",
+                path.display()
+            ));
         };
 
         if mode != "always" {
-            return pass(NAME, format!("the mode is {mode}"));
+            return check.pass(format!("the mode is {mode}"));
         }
 
         let detail = format!(
@@ -355,44 +352,38 @@ impl<'a> Preflight<'a> {
         );
 
         if self.config.thp_always_fatal {
-            fail(NAME, detail)
+            check.fail(detail)
         } else {
-            warn(NAME, detail)
+            check.warn(detail)
         }
     }
 
     fn block_size(self) -> Check {
-        const NAME: &str = "block size";
+        let check = Named("block size");
 
         let path = &self.config.paths.block_size;
 
         let value = match fs::read_to_string(path) {
             Ok(text) => text.trim().to_owned(),
             Err(error) => {
-                return fail(NAME, format!("cannot read {}: {error}", path.display()));
+                return check.fail(format!("cannot read {}: {error}", path.display()));
             }
         };
 
         match u64::from_str_radix(&value, 16) {
-            Ok(bytes) if bytes > 0 => pass(NAME, format!("blocks are {bytes} bytes")),
-            _ => fail(
-                NAME,
-                format!(
-                    "{} holds {value:?}, which is not a positive hexadecimal byte count",
-                    path.display()
-                ),
-            ),
+            Ok(bytes) if bytes > 0 => check.pass(format!("blocks are {bytes} bytes")),
+            _ => check.fail(format!(
+                "{} holds {value:?}, which is not a positive hexadecimal byte count",
+                path.display()
+            )),
         }
     }
 
     fn swap(self, swappiness: Option<Swappiness>) -> Check {
-        const NAME: &str = "swap";
+        let check = Named("swap");
 
         if swappiness == Some(Swappiness::NONE) {
-            return pass(
-                NAME,
-                "reclaim runs at swappiness=0 and never swaps".to_owned(),
-            );
+            return check.pass("reclaim runs at swappiness=0 and never swaps".to_owned());
         }
 
         let intent = swappiness.map_or_else(
@@ -408,15 +399,15 @@ impl<'a> Preflight<'a> {
                 rest.split_whitespace().next()?.parse().ok()
             }),
             Err(error) => {
-                return warn(NAME, format!("cannot read {}: {error}", meminfo.display()));
+                return check.warn(format!("cannot read {}: {error}", meminfo.display()));
             }
         };
 
         if total == Some(0) || total.is_none() {
-            return warn(
-                NAME,
-                format!("{intent}, and {} reports no swap", meminfo.display()),
-            );
+            return check.warn(format!(
+                "{intent}, and {} reports no swap",
+                meminfo.display()
+            ));
         }
 
         let path = self.config.cgroup.join(MEMORY_SWAP_MAX);
@@ -424,44 +415,17 @@ impl<'a> Preflight<'a> {
         if let Ok(text) = fs::read_to_string(&path)
             && parse::limit(&path, &text).ok().and_then(Limit::bytes) == Some(0)
         {
-            return warn(NAME, format!("{intent}, and {} is 0", path.display()));
+            return check.warn(format!("{intent}, and {} is 0", path.display()));
         }
 
         if !self.config.cgroup.join(MEMORY_SWAP_CURRENT).is_file() {
-            return warn(
-                NAME,
-                format!(
-                    "{intent}, and {} has no {MEMORY_SWAP_CURRENT}: swap accounting is off and the agent cannot see what it freed",
-                    self.config.cgroup.display()
-                ),
-            );
+            return check.warn(format!(
+                "{intent}, and {} has no {MEMORY_SWAP_CURRENT}: swap accounting is off and the agent cannot see what it freed",
+                self.config.cgroup.display()
+            ));
         }
 
-        pass(NAME, format!("{intent}, and the guest has swap to use"))
-    }
-}
-
-const fn pass(name: &'static str, detail: String) -> Check {
-    Check {
-        name,
-        severity: Severity::Pass,
-        detail,
-    }
-}
-
-const fn warn(name: &'static str, detail: String) -> Check {
-    Check {
-        name,
-        severity: Severity::Warn,
-        detail,
-    }
-}
-
-const fn fail(name: &'static str, detail: String) -> Check {
-    Check {
-        name,
-        severity: Severity::Fail,
-        detail,
+        check.pass(format!("{intent}, and the guest has swap to use"))
     }
 }
 
@@ -759,8 +723,8 @@ mod tests {
     fn a_report_prints_one_line_a_check() {
         let report = Report {
             checks: vec![
-                pass("cgroup v2", "a unified hierarchy".to_owned()),
-                warn("swap", "no swap".to_owned()),
+                Named("cgroup v2").pass("a unified hierarchy".to_owned()),
+                Named("swap").warn("no swap".to_owned()),
             ],
         };
 

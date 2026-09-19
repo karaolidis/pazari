@@ -5,9 +5,11 @@ pub mod duration;
 pub mod error;
 pub mod ratio;
 pub mod swappiness;
+pub mod time;
 
 pub use bounded::Bounded;
 pub use duration::{Delay, Interval, MAX_DURATION};
 pub use error::RangeError;
 pub use ratio::{Fraction, Psi};
 pub use swappiness::Swappiness;
+pub use time::Timestamp;

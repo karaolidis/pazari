@@ -4,11 +4,10 @@ use std::{
 };
 
 use pazari_proto::{GrantReason, GuestMessage, HostMessage, Urgency};
-use pazari_types::{Delay, Interval, Psi, Swappiness};
+use pazari_types::{Delay, Interval, Psi, Swappiness, Timestamp};
 
 use crate::engine::{
     Action, BootInfo, Engine, EngineConfig, Event, ExhaustionMode, IdleThreshold, Mode, Snapshot,
-    Timestamp,
 };
 
 pub const MIB: u64 = 1 << 20;

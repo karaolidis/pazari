@@ -1,6 +1,6 @@
 use std::{fmt, time::Duration};
 
-/// Milliseconds since the agent started.
+/// Milliseconds since a state machine started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Timestamp(u64);
 
@@ -38,7 +38,6 @@ impl fmt::Display for Timestamp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::testing::at;
 
     #[test]
     fn timestamps_saturate_rather_than_wrap() {
@@ -47,17 +46,23 @@ mod tests {
         assert_eq!(Timestamp::START.as_millis(), 0);
         assert_eq!(
             Timestamp::START.saturating_add(Duration::from_secs(5)),
-            at(5)
+            Timestamp::from_millis(5_000)
         );
         assert_eq!(last.saturating_add(Duration::from_secs(1)), last);
         assert_eq!(Timestamp::START.saturating_add(Duration::MAX), last);
         assert_eq!(
-            at(2).saturating_duration_since(Timestamp::from_millis(500)),
+            Timestamp::from_millis(2_000).saturating_duration_since(Timestamp::from_millis(500)),
             Duration::from_millis(1_500)
         );
         assert_eq!(
-            Timestamp::START.saturating_duration_since(at(5)),
+            Timestamp::START.saturating_duration_since(Timestamp::from_millis(5_000)),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn a_timestamp_displays_its_milliseconds() {
+        assert_eq!(Timestamp::from_millis(1_500).to_string(), "1500ms");
+        assert_eq!(Timestamp::START.to_string(), "0ms");
     }
 }

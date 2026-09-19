@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::engine::Timestamp;
+use pazari_types::Timestamp;
 
 /// The agent's own clock. Milliseconds since it started.
 #[derive(Debug, Clone, Copy)]

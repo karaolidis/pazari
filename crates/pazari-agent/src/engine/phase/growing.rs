@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use pazari_proto::{DenyReason, GrantReason, GuestMessage, Urgency};
+use pazari_types::Timestamp;
 
 use crate::engine::{
     context::Context,
     limits::Band,
     phase::{Phase, State, exhausted::Exhausted, steady::Steady},
-    time::Timestamp,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,7 +2,6 @@ pub mod action;
 pub mod config;
 pub mod error;
 pub mod event;
-pub mod time;
 
 mod context;
 mod counters;
@@ -16,13 +15,13 @@ pub(crate) mod testing;
 use std::time::Duration;
 
 use pazari_proto::HostMessage;
+use pazari_types::Timestamp;
 
 pub use crate::engine::{
     action::Action,
     config::{EngineConfig, ExhaustionMode, IdleThreshold},
     error::EngineError,
     event::{BootInfo, Event, Snapshot},
-    time::Timestamp,
 };
 use crate::engine::{context::Context, limits::Band, phase::Phase};
 

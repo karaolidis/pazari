@@ -1,6 +1,8 @@
 use std::{num::NonZeroU32, time::Duration};
 
-use crate::engine::{config::IdleThreshold, time::Timestamp};
+use pazari_types::Timestamp;
+
+use crate::engine::config::IdleThreshold;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IdleTracker {

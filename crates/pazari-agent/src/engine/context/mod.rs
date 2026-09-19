@@ -1,6 +1,7 @@
 use std::{mem, num::NonZeroU64, time::Duration};
 
 use pazari_proto::GuestMessage;
+use pazari_types::Timestamp;
 
 use crate::engine::{
     action::Action,
@@ -9,7 +10,6 @@ use crate::engine::{
     event::{BootInfo, Snapshot},
     idle::IdleTracker,
     limits::{Band, Limits},
-    time::Timestamp,
 };
 
 #[derive(Debug, Clone)]

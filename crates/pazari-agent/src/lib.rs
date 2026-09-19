@@ -10,7 +10,7 @@ pub use crate::{
     config::{Config, ConfigError},
     engine::{
         Action, BootInfo, Engine, EngineConfig, EngineError, Event, ExhaustionMode, IdleThreshold,
-        Mode, Snapshot, Timestamp,
+        Mode, Snapshot,
     },
     run::{Notifier, RunError},
     runtime::{

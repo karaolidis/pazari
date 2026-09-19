@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use pazari_proto::DenyReason;
+use pazari_types::Timestamp;
 
 use crate::engine::{
     context::Context,
     phase::{Phase, State, growing::Growing, steady::Steady},
-    time::Timestamp,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

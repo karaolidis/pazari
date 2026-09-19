@@ -2,7 +2,7 @@ use std::{num::NonZeroU64, time::Duration};
 
 use pazari_proto::HostMessage;
 
-use crate::engine::time::Timestamp;
+use pazari_types::Timestamp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootInfo {

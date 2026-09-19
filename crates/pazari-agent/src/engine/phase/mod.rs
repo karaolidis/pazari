@@ -7,6 +7,7 @@ mod titrating;
 use std::time::Duration;
 
 use pazari_proto::DenyReason;
+use pazari_types::Timestamp;
 
 use crate::engine::{
     Mode,
@@ -15,7 +16,6 @@ use crate::engine::{
         exhausted::Exhausted, growing::Growing, releasing::Releasing, steady::Steady,
         titrating::Titrating,
     },
-    time::Timestamp,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

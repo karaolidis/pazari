@@ -6,6 +6,19 @@ use serde_with::{DurationMilliSeconds, serde_as};
 #[cfg(test)]
 pub(crate) mod fixtures;
 
+/// One reading of the guest's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Status {
+    pub plugged: u64,
+    pub available: u64,
+    pub high_events: u64,
+    pub max_events: u64,
+    pub psi_some10: f32,
+    pub psi_full10: f32,
+    pub swap_used: u64,
+    pub workload_usage: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GuestMessage {
@@ -41,16 +54,7 @@ pub enum GuestMessage {
         reason: String,
     },
 
-    Status {
-        plugged: u64,
-        available: u64,
-        high_events: u64,
-        max_events: u64,
-        psi_some10: f32,
-        psi_full10: f32,
-        swap_used: u64,
-        workload_usage: u64,
-    },
+    Status(Status),
 
     Bye {},
 }

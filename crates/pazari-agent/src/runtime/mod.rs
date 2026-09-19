@@ -22,5 +22,5 @@ pub use crate::runtime::{
     reclaim::{ReclaimHandle, Reclaimer},
     snapshot::{Snapshots, Ticker},
     throttle::ThrottleWatcher,
-    topology::{Hotplug, HotplugListener, MemInfo, Topology},
+    topology::{Hotplug, HotplugListener, Topology},
 };

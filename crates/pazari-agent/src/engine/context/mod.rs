@@ -1,6 +1,6 @@
 use std::{mem, num::NonZeroU64, time::Duration};
 
-use pazari_proto::GuestMessage;
+use pazari_proto::{GuestMessage, Status};
 use pazari_types::Timestamp;
 
 use crate::engine::{
@@ -136,7 +136,7 @@ impl Context {
 
         let counters = self.counters.seen();
 
-        self.send(GuestMessage::Status {
+        self.send(GuestMessage::Status(Status {
             plugged: self.limits.plugged(),
             available: self.last.available,
             high_events: counters.high,
@@ -145,7 +145,7 @@ impl Context {
             psi_full10: self.last.psi_full10,
             swap_used: self.last.swap_used,
             workload_usage: self.last.workload_usage,
-        });
+        }));
     }
 
     pub const fn round_up(&self, value: u64) -> u64 {

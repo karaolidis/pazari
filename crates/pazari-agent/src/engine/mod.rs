@@ -259,7 +259,7 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    use pazari_proto::{DenyReason, GuestMessage, HostMessage};
+    use pazari_proto::{DenyReason, GuestMessage, HostMessage, Status};
     use proptest::prelude::*;
 
     use super::*;
@@ -323,14 +323,14 @@ mod tests {
         let actions = connect(&mut engine, at(0), CEILING, Duration::from_secs(5));
         assert!(matches!(
             actions.as_slice(),
-            [Action::Send(GuestMessage::Status { .. })]
+            [Action::Send(GuestMessage::Status(..))]
         ));
 
         assert_eq!(tick(&mut engine, at(4), snap(BOOT, BUSY, 0)), vec![]);
 
         assert_eq!(
             tick(&mut engine, at(5), snap(BOOT, 1234 * MIB, 0)),
-            vec![Action::Send(GuestMessage::Status {
+            vec![Action::Send(GuestMessage::Status(Status {
                 plugged: BOOT,
                 available: BOOT - 1234 * MIB,
                 high_events: 0,
@@ -339,7 +339,7 @@ mod tests {
                 psi_full10: 0.0,
                 swap_used: 0,
                 workload_usage: 1234 * MIB,
-            })]
+            }))]
         );
     }
 
@@ -361,7 +361,7 @@ mod tests {
 
         assert_eq!(
             actions[0],
-            Action::Send(GuestMessage::Status {
+            Action::Send(GuestMessage::Status(Status {
                 plugged: BOOT,
                 available: BOOT - BUSY,
                 high_events: 9,
@@ -370,7 +370,7 @@ mod tests {
                 psi_full10: 0.0,
                 swap_used: 0,
                 workload_usage: BUSY,
-            })
+            }))
         );
     }
 
@@ -417,7 +417,7 @@ mod tests {
 
         assert!(matches!(
             actions.as_slice(),
-            [Action::Send(GuestMessage::Status { .. }), _]
+            [Action::Send(GuestMessage::Status(..)), _]
         ));
         assert_eq!(actions[1], request(1, BOOT, 2560 * MIB));
         assert_eq!(engine.pending_request(), Some(1));
@@ -432,7 +432,7 @@ mod tests {
 
         assert!(matches!(
             actions.as_slice(),
-            [Action::Send(GuestMessage::Status { .. })]
+            [Action::Send(GuestMessage::Status(..))]
         ));
         assert_eq!(engine.mode(), Mode::Steady);
     }

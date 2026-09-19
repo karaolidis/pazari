@@ -13,3 +13,16 @@ workspace = true
 [[bin]]
 name = "pazarid"
 path = "src/main.rs"
+
+[dependencies]
+pazari-proto = { path = "../pazari-proto" }
+pazari-transport = { path = "../pazari-transport" }
+pazari-types = { path = "../pazari-types" }
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", default-features = false, features = ["fs", "rt"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+proptest = "1.11.0"
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", default-features = false, features = ["macros", "rt"] }

@@ -8,7 +8,9 @@ pub mod message;
 
 pub use codec::{Codec, Decoder, JsonLinesCodec, JsonLinesDecoder};
 pub use error::{DecodeError, EncodeError};
-pub use message::{DenyReason, GrantReason, Guest, GuestMessage, Host, HostMessage, Peer, Urgency};
+pub use message::{
+    DenyReason, GrantReason, Guest, GuestMessage, Host, HostMessage, Peer, Status, Urgency,
+};
 
 pub const PROTOCOL_VERSION: u16 = 1;
 

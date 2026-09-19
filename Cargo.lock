@@ -931,6 +931,16 @@ dependencies = [
 [[package]]
 name = "pazarid"
 version = "0.1.0"
+dependencies = [
+ "pazari-proto",
+ "pazari-transport",
+ "pazari-types",
+ "proptest",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "pin-project-lite"

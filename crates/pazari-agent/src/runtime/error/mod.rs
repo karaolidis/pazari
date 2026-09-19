@@ -1,5 +1,6 @@
 use std::{io, path::PathBuf};
 
+use pazari_types::MemInfoError;
 use thiserror::Error;
 use tokio::task::JoinError;
 
@@ -49,6 +50,9 @@ pub enum RuntimeError {
 
     #[error("the reclaim task died: {source}")]
     ReclaimLost { source: JoinError },
+
+    #[error(transparent)]
+    MemInfo(#[from] MemInfoError),
 }
 
 #[cfg(test)]

@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use proptest::prelude::*;
 
-use crate::{DenyReason, GrantReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Urgency};
+use crate::{
+    DenyReason, GrantReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status, Urgency,
+};
 
 pub fn guest_messages() -> Vec<GuestMessage> {
     vec![
@@ -47,7 +49,7 @@ pub fn guest_messages() -> Vec<GuestMessage> {
             id: 8,
             reason: "workload working set is pinned".to_owned(),
         },
-        GuestMessage::Status {
+        GuestMessage::Status(Status {
             plugged: 4_294_967_296,
             available: 1_073_741_824,
             high_events: 12,
@@ -56,7 +58,7 @@ pub fn guest_messages() -> Vec<GuestMessage> {
             psi_full10: 0.25,
             swap_used: 0,
             workload_usage: 3_221_225_472,
-        },
+        }),
         GuestMessage::Bye {},
     ]
 }
@@ -193,7 +195,7 @@ pub fn guest_message() -> impl Strategy<Value = GuestMessage> {
                     psi_full10,
                     swap_used,
                     workload_usage,
-                )| GuestMessage::Status {
+                )| GuestMessage::Status(Status {
                     plugged,
                     available,
                     high_events,
@@ -202,7 +204,7 @@ pub fn guest_message() -> impl Strategy<Value = GuestMessage> {
                     psi_full10,
                     swap_used,
                     workload_usage,
-                }
+                })
             ),
         Just(GuestMessage::Bye {}),
     ]

@@ -186,7 +186,7 @@ mod tests {
         time::Duration,
     };
 
-    use pazari_proto::{Host, HostMessage, JsonLinesCodec, PROTOCOL_VERSION};
+    use pazari_proto::{Host, HostMessage, JsonLinesCodec, PROTOCOL_VERSION, Status};
     use pazari_transport::{AnyConnector, Listener, MessageStream, UnixConnector, UnixListener};
     use pazari_types::{Delay, Interval, Psi};
     use tempfile::TempDir;
@@ -444,7 +444,7 @@ mod tests {
         assert!(
             matches!(
                 hear(&mut host).await,
-                GuestMessage::Status { plugged: BOOT, .. }
+                GuestMessage::Status(Status { plugged: BOOT, .. })
             ),
             "the engine did not greet the host with its state"
         );

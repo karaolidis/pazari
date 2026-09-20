@@ -31,6 +31,10 @@ pub enum Event {
     HostAvailable {
         now: Timestamp,
         bytes: u64,
+        swap_free: u64,
+
+        /// Absent where the kernel carries no `/proc/pressure/memory`.
+        psi: Option<f32>,
     },
 
     Reclaim {

@@ -10,6 +10,16 @@ pub enum RuntimeError {
     #[error("failed to read {}: {source}", .path.display())]
     Read { path: PathBuf, source: io::Error },
 
+    #[error("{} holds {value:?}, which is not {expected}", .path.display())]
+    Malformed {
+        path: PathBuf,
+        value: String,
+        expected: &'static str,
+    },
+
+    #[error("{} carries no {key} line", .path.display())]
+    Absent { path: PathBuf, key: &'static str },
+
     #[error(transparent)]
     MemInfo(#[from] MemInfoError),
 

@@ -103,7 +103,7 @@ impl Negotiated {
     }
 }
 
-/// A `reclaim_request` the host is waiting on.
+/// A `reclaim_request` the host asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reclaim {
     pub id: u64,
@@ -114,6 +114,8 @@ pub struct Reclaim {
 
     /// What the guest committed to free, once it has acked.
     pub committed: Option<u64>,
+
+    pub refused: bool,
 }
 
 #[cfg(test)]

@@ -9,9 +9,10 @@ the value is whatever that crate declares.
 
 ## Transport
 
-The protocol is a bidirectional, ordered, reliable byte stream. The protocol itself makes no other demand
-of the transport and carries no framing, addressing, or authentication of its
-own: it assumes the transport already identifies the peer.
+The protocol is a bidirectional, ordered, reliable byte stream. The protocol
+itself makes no other demand of the transport and carries no framing,
+addressing, or authentication of its own: it assumes the transport already
+identifies the peer.
 
 Each connection is one independent protocol session. Nothing is shared between
 connections.
@@ -22,7 +23,7 @@ Messages are newline-delimited JSON. Each message is a single JSON object,
 serialised in UTF-8 with no interior line terminators, followed by one `LF`
 (`0x0A`). There is no other whitespace between messages.
 
-- A *line* is the bytes between terminators, excluding the terminating `LF`.
+- A _line_ is the bytes between terminators, excluding the terminating `LF`.
 - A line MUST NOT exceed `MAX_FRAME_BYTES`, excluding its terminator. A line of
   exactly `MAX_FRAME_BYTES` is legal.
 - `CR` (`0x0D`) is never a framing character. CRLF line endings are not
@@ -41,63 +42,61 @@ the initial implementation.
 
 ## Encoding conventions
 
-**Tagging.** Every message is a JSON object with an internal discriminator
-field named `type`, whose value is the message name in `snake_case`, for
-example `grant_request`. The tag is the first member of the object as emitted,
-though a receiver MUST NOT depend on member order.
+**Tagging.** Every message is a JSON object with an internal discriminator field
+named `type`, whose value is the message name in `snake_case`, for example
+`grant_request`. The tag is the first member of the object as emitted, though a
+receiver MUST NOT depend on member order.
 
 **Memory quantities.** Every memory quantity is a count of bytes, encoded as a
 JSON integer in the `u64` range.
 
-**Durations.** Every duration is an integer count of milliseconds, and the
-field name ends in `_ms`. The value MUST be a JSON integer in the `u64` range.
+**Durations.** Every duration is an integer count of milliseconds, and the field
+name ends in `_ms`. The value MUST be a JSON integer in the `u64` range.
 
 **Absolute values.** Every message is idempotent and carries absolute values.
 
 **Optional fields.** A field documented as optional MAY be absent or explicitly
 `null`; both mean "not supplied". Senders omit the field.
 
-**Unknown fields.** A receiver MUST ignore object members it does not
-recognise.
+**Unknown fields.** A receiver MUST ignore object members it does not recognise.
 
-**Unknown messages.** An unknown `type` value is NOT forward-compatible and is
-a protocol violation.
+**Unknown messages.** An unknown `type` value is NOT forward-compatible and is a
+protocol violation.
 
 ## Protocol version
 
 There is no version negotiation. Each peer has one compiled-in
 `PROTOCOL_VERSION` and accepts nothing else.
 
-The guest opens the connection and sends `hello` carrying its
-`PROTOCOL_VERSION` in `protocol`. The host closes the connection if that value
-differs from its own constant. Otherwise it answers `welcome` carrying its own
-`PROTOCOL_VERSION` in `protocol`, and the guest applies the same equality test
-in the other direction, closing the connection on a mismatch.
+The guest opens the connection and sends `hello` carrying its `PROTOCOL_VERSION`
+in `protocol`. The host closes the connection if that value differs from its own
+constant. Otherwise it answers `welcome` carrying its own `PROTOCOL_VERSION` in
+`protocol`, and the guest applies the same equality test in the other direction,
+closing the connection on a mismatch.
 
-There is no reject message. If the versions differ, or the guest is not a VM
-the host manages, or the handshake is otherwise unacceptable, the host closes
-the connection without sending anything. A guest that sees the connection close
-before `welcome` MUST treat the host as unavailable and retry later; it MUST
-NOT interpret the close as a grant, a denial, or a ceiling.
+There is no reject message. If the versions differ, or the guest is not a VM the
+host manages, or the handshake is otherwise unacceptable, the host closes the
+connection without sending anything. A guest that sees the connection close
+before `welcome` MUST treat the host as unavailable and retry later; it MUST NOT
+interpret the close as a grant, a denial, or a ceiling.
 
 ## Identifier semantics
 
 There are two independent identifier spaces on a connection.
 
-**Guest-initiated ids** appear in `grant_request` and `offer_release`. The
-guest chooses them, monotonically increasing within the connection, and the
-host answers each exactly once with a `grant` or a `deny` carrying the same
-`id`.
+**Guest-initiated ids** appear in `grant_request` and `offer_release`. The guest
+chooses them, monotonically increasing within the connection, and the host
+answers each exactly once with a `grant` or a `deny` carrying the same `id`.
 
 **Host-initiated ids** appear in `reclaim_request`. The host chooses them,
 monotonically increasing within the connection, and the guest answers each
 exactly once with a `reclaim_ack` or a `reclaim_nak` carrying the same `id`.
 
 Ids are connection-scoped and reset on every new connection. There is no
-requirement that they start at any particular value, only that they increase.
-On reconnect every in-flight request from the previous connection is dead: the
-initiator MUST NOT expect an answer to it, and MUST re-issue the request under
-a fresh id if it still wants the thing.
+requirement that they start at any particular value, only that they increase. On
+reconnect every in-flight request from the previous connection is dead: the
+initiator MUST NOT expect an answer to it, and MUST re-issue the request under a
+fresh id if it still wants the thing.
 
 Replying twice to the same id, or replying to an id that was never issued, is a
 protocol violation, and so is issuing a request with an id that is not greater
@@ -131,19 +130,18 @@ guest                                   host
    `status` every `status_interval_ms` as advertised in `welcome`; the host
    treats the absence of `status` as evidence the guest is gone. The host may
    send `ceiling` at any time.
-4. **Close.** The guest sends `bye` and closes. `bye` is a courtesy; it lets
-   the host distinguish an orderly shutdown from a crash. Either side may close
-   at any time without it.
+4. **Close.** The guest sends `bye` and closes. `bye` is a courtesy; it lets the
+   host distinguish an orderly shutdown from a crash. Either side may close at
+   any time without it.
 
 ### Crash-only design
 
 Neither side keeps durable protocol state. There is no session resumption, no
-replay log, no acknowledgement of anything but requests, and nothing on the
-wire that must survive a restart.
+replay log, no acknowledgement of anything but requests, and nothing on the wire
+that must survive a restart.
 
-On reconnect each side re-derives its view from its own ground source and
-starts talking again; it never needs to know what was said on the previous
-connection.
+On reconnect each side re-derives its view from its own ground source and starts
+talking again; it never needs to know what was said on the previous connection.
 
 The consequence is that **reconnect is the only recovery mechanism**, and it is
 always sufficient.
@@ -166,16 +164,15 @@ There is no error message and no in-band error reporting. A peer that detects a
 violation MUST close the connection. It MUST NOT attempt to resynchronise by
 skipping to the next line.
 
-After a close, a guest reconnects with backoff and begins a fresh handshake.
-A host waits to be reconnected to.
+After a close, a guest reconnects with backoff and begins a fresh handshake. A
+host waits to be reconnected to.
 
 ## Message catalogue
 
 Types in the tables below are JSON types.
 
-`uint` means a JSON integer in the
-`u64` range unless stated otherwise; `bytes` means a `uint` counting bytes;
-`ms` means a `uint` counting milliseconds.
+`uint` means a JSON integer in the `u64` range unless stated otherwise; `bytes`
+means a `uint` counting bytes; `ms` means a `uint` counting milliseconds.
 
 ### Guest to host
 
@@ -232,7 +229,7 @@ a `grant` names the new lower plugged size.
 | `type`       | `"offer_release"` | Message tag.                                            |
 | `id`         | uint              | Guest-chosen request id.                                |
 | `current`    | bytes             | Plugged size at the time of the offer.                  |
-| `releasable` | bytes             | Bytes the guest has *already* freed and can unplug now. |
+| `releasable` | bytes             | Bytes the guest has _already_ freed and can unplug now. |
 
 #### `reclaim_ack`
 
@@ -304,7 +301,8 @@ A runtime policy change of this guest's ceiling. Replaces the value from
 
 #### `grant`
 
-Answers a `grant_request` or an `offer_release`. Means actuation toward `target` is underway.
+Answers a `grant_request` or an `offer_release`. Means actuation toward `target`
+is underway.
 
 | Field    | Type      | Meaning                                                                                                                                                                                                      |
 | -------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

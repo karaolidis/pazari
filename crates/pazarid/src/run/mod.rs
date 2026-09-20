@@ -1,33 +1,35 @@
 pub mod error;
+pub mod host;
 pub mod peers;
-
-use std::sync::Arc;
+pub mod supervisor;
 
 use pazari_systemd::Notifier;
 use pazari_transport::{AnyConnection, AnyListener, Listener, PeerId, TransportError};
-use pazari_types::Clock;
+use pazari_types::{Backoff, Clock, Timestamp};
 use tokio::{
     signal::unix::{SignalKind, signal},
-    sync::mpsc,
+    sync::{mpsc, watch},
     time::{self, MissedTickBehavior},
 };
 use tracing::{info, warn};
 
 pub use crate::run::{
     error::RunError,
+    host::Demand,
     peers::{Peers, Report},
+    supervisor::{Connect, Supervisor},
 };
 use crate::{
     broker::{Action, Broker, Event},
     config::Config,
-    runtime::{Driver, HostMemory, ProcMemory, QmpActuator, RuntimeError},
+    runtime::{HostMemory, ProcMemory, RuntimeError},
 };
 
 const SIZE_DEPTH: usize = 64;
 
 const ACCEPT_DEPTH: usize = 64;
 
-type Device = Arc<Driver<QmpActuator>>;
+type Target = watch::Sender<Option<u64>>;
 
 #[derive(Debug)]
 enum Step {
@@ -35,7 +37,7 @@ enum Step {
 
     Reported(Report),
 
-    Sized(Result<Event, RuntimeError>),
+    Sized(Event),
 
     Tick,
 
@@ -55,6 +57,44 @@ pub async fn run(config: Config) -> Result<(), RunError> {
         devices,
     } = config;
 
+    let memory = ProcMemory::new();
+
+    host::survey(&memory, &policy, &registry).await?;
+
+    let (sizes, mut resized) = mpsc::channel(SIZE_DEPTH);
+    let mut targets = Vec::with_capacity(devices.len());
+    let mut supervisors = Vec::with_capacity(devices.len());
+
+    for ((guest, spec), qmp) in registry.iter().zip(devices) {
+        let (target, targeted) = watch::channel(None);
+
+        info!(
+            guest = spec.name.as_str(),
+            device = qmp.device.as_str(),
+            ceiling = spec.ceiling,
+            "the daemon is taking a guest on",
+        );
+
+        let backoff = Backoff::new(qmp.retry_min.get(), qmp.retry_max.get());
+
+        supervisors.push(tokio::spawn(
+            Supervisor::new(
+                guest,
+                spec.name.clone(),
+                qmp,
+                clock,
+                sizes.clone(),
+                targeted,
+                backoff,
+            )
+            .run(),
+        ));
+
+        targets.push(target);
+    }
+
+    drop(sizes);
+
     let (connections, mut accepted) = mpsc::channel(ACCEPT_DEPTH);
     let mut acceptors = Vec::with_capacity(listeners.len());
 
@@ -68,38 +108,8 @@ pub async fn run(config: Config) -> Result<(), RunError> {
 
     drop(connections);
 
-    let mut drivers: Vec<Device> = Vec::with_capacity(devices.len());
-
-    for ((guest, spec), qmp) in registry.iter().zip(devices) {
-        let actuator = QmpActuator::connect(qmp.path, qmp.device, qmp.mode, qmp.deadline).await?;
-
-        info!(
-            guest = spec.name.as_str(),
-            device = actuator.device(),
-            boot_mem = actuator.boot(),
-            ceiling = spec.ceiling,
-            "the guest's memory device",
-        );
-
-        drivers.push(Arc::new(Driver::new(guest, actuator, clock)));
-    }
-
     let mut broker = Broker::new(policy, registry);
-    let memory = ProcMemory::new();
-
     let (mut peers, mut reports) = Peers::new();
-    let (sizes, mut resized) = mpsc::channel(SIZE_DEPTH);
-    let mut watchers = Vec::with_capacity(drivers.len());
-
-    for driver in &drivers {
-        let seed = driver.seed().await?;
-
-        drive(&mut broker, &mut peers, &drivers, seed).await?;
-
-        watchers.push(tokio::spawn(watch(Arc::clone(driver), sizes.clone())));
-    }
-
-    drop(sizes);
 
     let mut ticker = time::interval(tick_interval.get());
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -138,32 +148,24 @@ pub async fn run(config: Config) -> Result<(), RunError> {
                     peer,
                 };
 
-                drive(&mut broker, &mut peers, &drivers, connected).await?;
+                dispatch(&mut peers, &targets, &broker.handle(connected));
             }
             Step::Accepted(Err(error)) => warn!(%error, "failed to take on a connection"),
             Step::Reported(report) => {
                 if let Some(event) = peers.digest(report, clock.now()) {
-                    drive(&mut broker, &mut peers, &drivers, event).await?;
+                    dispatch(&mut peers, &targets, &broker.handle(event));
                 }
             }
-            Step::Sized(sized) => drive(&mut broker, &mut peers, &drivers, sized?).await?,
+            Step::Sized(sized) => dispatch(&mut peers, &targets, &broker.handle(sized)),
             Step::Tick => {
                 let now = clock.now();
 
-                match memory.available().await {
-                    Ok(bytes) => {
-                        drive(
-                            &mut broker,
-                            &mut peers,
-                            &drivers,
-                            Event::HostAvailable { now, bytes },
-                        )
-                        .await?;
-                    }
+                match reading(&memory, now).await {
+                    Ok(event) => dispatch(&mut peers, &targets, &broker.handle(event)),
                     Err(error) => warn!(%error, "failed to read the host's memory"),
                 }
 
-                drive(&mut broker, &mut peers, &drivers, Event::Tick { now }).await?;
+                dispatch(&mut peers, &targets, &broker.handle(Event::Tick { now }));
             }
             Step::Ping => notifier.ping(),
             Step::Stop => break,
@@ -179,8 +181,8 @@ pub async fn run(config: Config) -> Result<(), RunError> {
         acceptor.abort();
     }
 
-    for watcher in watchers {
-        watcher.abort();
+    for supervisor in supervisors {
+        supervisor.abort();
     }
 
     Ok(())
@@ -197,36 +199,121 @@ async fn serve(
     }
 }
 
-async fn drive(
-    broker: &mut Broker,
-    peers: &mut Peers,
-    drivers: &[Device],
-    event: Event,
-) -> Result<(), RunError> {
-    let actions = broker.handle(event);
+async fn reading<M: HostMemory>(memory: &M, now: Timestamp) -> Result<Event, RuntimeError> {
+    let info = memory.meminfo().await?;
+    let pressure = memory.pressure().await?;
 
-    for action in &actions {
+    Ok(Event::HostAvailable {
+        now,
+        bytes: info.available,
+        swap_free: info.swap_free,
+        psi: pressure.map(|pressure| pressure.some10),
+    })
+}
+
+fn dispatch(peers: &mut Peers, targets: &[Target], actions: &[Action]) {
+    for action in actions {
         match action {
             Action::Send { peer, message } => peers.send(peer, message.clone()),
             Action::Close { peer } => peers.close(peer),
-            Action::SetRequested { .. } => {}
+            Action::SetRequested { guest, bytes } => {
+                if let Some(target) = targets.get(guest.index()) {
+                    target.send_replace(Some(*bytes));
+                }
+            }
         }
     }
-
-    for driver in drivers {
-        driver.apply(&actions).await?;
-    }
-
-    Ok(())
 }
 
-async fn watch(driver: Device, sizes: mpsc::Sender<Result<Event, RuntimeError>>) {
-    loop {
-        let changed = driver.changed().await;
-        let failed = changed.is_err();
+#[cfg(test)]
+mod tests {
+    use pazari_proto::HostMessage;
 
-        if sizes.send(changed).await.is_err() || failed {
-            return;
-        }
+    use super::*;
+    use crate::{
+        broker::{
+            GuestId,
+            testing::{BOOT, MIB, ONE, vsock},
+        },
+        runtime::testing::{MockMemory, meminfo},
+    };
+
+    #[tokio::test]
+    async fn a_reading_carries_the_whole_host_at_one_instant() {
+        let memory = MockMemory::new(meminfo(8 << 30, 4 << 30, 2 << 30)).pressured(12.5);
+
+        let event = reading(&memory, Timestamp::START)
+            .await
+            .expect("the mock answers");
+
+        let Event::HostAvailable {
+            bytes,
+            swap_free,
+            psi,
+            ..
+        } = event
+        else {
+            panic!("the daemon read {event:?}");
+        };
+
+        assert_eq!((bytes, swap_free), (4 << 30, 2 << 30));
+        assert_eq!(psi, Some(12.5));
+    }
+
+    #[tokio::test]
+    async fn a_host_without_pressure_accounting_reads_as_much_as_it_can() {
+        let memory = MockMemory::new(meminfo(8 << 30, 4 << 30, 0));
+
+        let event = reading(&memory, Timestamp::START)
+            .await
+            .expect("the mock answers");
+
+        assert!(matches!(event, Event::HostAvailable { psi: None, .. }));
+    }
+
+    #[test]
+    fn one_guest_that_cannot_be_actuated_does_not_swallow_the_batch() {
+        let (mut peers, _reports) = Peers::new();
+
+        let (one, deaf) = watch::channel(None);
+        let (two, mut listening) = watch::channel(None);
+
+        drop(deaf);
+
+        dispatch(
+            &mut peers,
+            &[one, two],
+            &[
+                Action::SetRequested {
+                    guest: GuestId::from_index(0),
+                    bytes: BOOT,
+                },
+                Action::Send {
+                    peer: vsock(ONE),
+                    message: HostMessage::Ceiling { ceiling: BOOT },
+                },
+                Action::SetRequested {
+                    guest: GuestId::from_index(1),
+                    bytes: 3072 * MIB,
+                },
+                Action::Close { peer: vsock(ONE) },
+            ],
+        );
+
+        assert_eq!(*listening.borrow_and_update(), Some(3072 * MIB));
+    }
+
+    #[test]
+    fn a_size_for_a_guest_with_no_device_is_let_go_of() {
+        let (mut peers, _reports) = Peers::new();
+
+        dispatch(
+            &mut peers,
+            &[],
+            &[Action::SetRequested {
+                guest: GuestId::from_index(7),
+                bytes: BOOT,
+            }],
+        );
     }
 }

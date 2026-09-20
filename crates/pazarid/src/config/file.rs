@@ -5,7 +5,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroU64},
     path::PathBuf,
     time::Duration,
 };
@@ -14,15 +14,18 @@ use bytesize::ByteSize;
 use doku::Document;
 use pazari_proto::DEFAULT_VSOCK_PORT;
 use pazari_transport::{PeerId, adapter::vsock::VMADDR_CID_ANY};
-use pazari_types::Interval;
+use pazari_types::{Interval, Psi};
 use serde::Deserialize;
 use serde_inline_default::serde_inline_default;
 
 use crate::{
-    broker::{GuestSpec, Policy, Registry},
+    broker::{GuestSpec, Policy, Registry, Revocation},
     config::{Config, Qmp, Transport, error::ConfigError},
     runtime::Mode,
 };
+
+const RETRY_MIN: Duration = Duration::from_millis(500);
+const RETRY_MAX: Duration = Duration::from_secs(30);
 
 #[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
@@ -155,6 +158,16 @@ pub struct PolicySection {
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "30s")]
     reclaim_deadline: Duration,
+
+    /// Whether free host swap counts towards what a grow may be granted out
+    /// of.
+    #[serde_inline_default(false)]
+    #[doku(example = "false")]
+    grant_swap: bool,
+
+    /// How the host takes memory back when it comes under pressure itself.
+    #[serde(default)]
+    revocation: Option<RevocationSection>,
 }
 
 impl PolicySection {
@@ -189,6 +202,42 @@ impl PolicySection {
                     field: "policy.reclaim_deadline".to_owned(),
                     source,
                 }
+            })?,
+            grant_swap: self.grant_swap,
+            revocation: self
+                .revocation
+                .map(RevocationSection::resolve)
+                .transpose()?,
+        })
+    }
+}
+
+/// How the host takes memory back when it comes under pressure itself.
+#[serde_inline_default]
+#[derive(Debug, Deserialize, Document)]
+#[serde(deny_unknown_fields)]
+pub struct RevocationSection {
+    /// The host memory pressure, in percent of wall time, at which the daemon
+    /// starts asking guests for memory back. Set me.
+    #[doku(example = "20.0")]
+    psi: f64,
+
+    /// How much memory one such request asks a guest for.
+    #[serde_inline_default(ByteSize::mib(256))]
+    #[doku(as = "String", example = "256MiB")]
+    step: ByteSize,
+}
+
+impl RevocationSection {
+    fn resolve(self) -> Result<Revocation, ConfigError> {
+        Ok(Revocation {
+            psi: Psi::try_new(self.psi).map_err(|source| ConfigError::Range {
+                field: "policy.revocation.psi".to_owned(),
+                source,
+            })?,
+            step: NonZeroU64::new(self.step.as_u64()).ok_or_else(|| ConfigError::Zero {
+                field: "policy.revocation.step".to_owned(),
+                what: "byte count",
             })?,
         })
     }
@@ -261,6 +310,18 @@ pub struct QmpSection {
     #[doku(as = "String", example = "5s")]
     deadline: Duration,
 
+    /// The first delay before a device that did not answer is opened again.
+    #[serde_inline_default(RETRY_MIN)]
+    #[serde(deserialize_with = "humantime_serde::deserialize")]
+    #[doku(as = "String", example = "500ms")]
+    retry_min: Duration,
+
+    /// The cap that delay doubles towards.
+    #[serde_inline_default(RETRY_MAX)]
+    #[serde(deserialize_with = "humantime_serde::deserialize")]
+    #[doku(as = "String", example = "30s")]
+    retry_max: Duration,
+
     /// How the daemon uses the QMP socket.
     #[serde_inline_default(ModeSection::Held {})]
     #[doku(example = "kind = \"held\"")]
@@ -269,6 +330,24 @@ pub struct QmpSection {
 
 impl QmpSection {
     fn resolve(self, prefix: &str) -> Result<Qmp, ConfigError> {
+        let retry_min = Interval::try_new(self.retry_min).map_err(|source| ConfigError::Range {
+            field: format!("{prefix}.qmp.retry_min"),
+            source,
+        })?;
+        let retry_max = Interval::try_new(self.retry_max).map_err(|source| ConfigError::Range {
+            field: format!("{prefix}.qmp.retry_max"),
+            source,
+        })?;
+
+        if retry_min > retry_max {
+            return Err(ConfigError::order(
+                format!("{prefix}.qmp.retry_min"),
+                &retry_min.get(),
+                format!("{prefix}.qmp.retry_max"),
+                &retry_max.get(),
+            ));
+        }
+
         Ok(Qmp {
             path: self.path,
             device: self.device,
@@ -277,6 +356,8 @@ impl QmpSection {
                 field: format!("{prefix}.qmp.deadline"),
                 source,
             })?,
+            retry_min,
+            retry_max,
         })
     }
 }

@@ -14,7 +14,7 @@ use crate::{
     runtime::Mode,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub tick_interval: Interval,
 
@@ -60,14 +60,41 @@ impl Config {
         let printed = doku::to_toml_fmt::<File>(&formatting);
 
         // doku pads the blank comment lines between enum variant fields.
-        let mut template = printed
-            .lines()
-            .map(str::trim_end)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut lines = printed.lines().map(str::trim_end).collect::<Vec<_>>();
+
+        spaced(&mut lines);
+
+        let mut template = lines.join("\n");
         template.push('\n');
 
         template
+    }
+}
+
+/// Puts a table's own comment under the blank line that separates it from the
+/// field before it, rather than over it, which doku does for optional tables
+/// and which reads as though the comment belonged to that field.
+fn spaced(lines: &mut Vec<&str>) {
+    let mut index = 1;
+
+    while index + 1 < lines.len() {
+        let header = lines[index].is_empty()
+            && lines[index + 1].starts_with('[')
+            && lines[index - 1].starts_with('#');
+
+        if header {
+            let start = lines[..index]
+                .iter()
+                .rposition(|line| !line.starts_with('#'))
+                .map_or(0, |last| last + 1);
+
+            if start > 0 {
+                lines.remove(index);
+                lines.insert(start, "");
+            }
+        }
+
+        index += 1;
     }
 }
 
@@ -96,6 +123,9 @@ pub struct Qmp {
     pub mode: Mode,
 
     pub deadline: Interval,
+
+    pub retry_min: Interval,
+    pub retry_max: Interval,
 }
 
 #[cfg(test)]
@@ -104,11 +134,16 @@ mod tests {
 
     use pazari_proto::DEFAULT_VSOCK_PORT;
     use pazari_transport::{Listener, PeerId, adapter::vsock::VMADDR_CID_ANY};
+    use pazari_types::Psi;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::broker::{GuestSpec, testing::count};
+    use crate::broker::{
+        GuestSpec, Revocation,
+        testing::{count, step},
+    };
 
+    const MIB: u64 = 1 << 20;
     const GIB: u64 = 1 << 30;
 
     const FIXTURE: &str = "pazarid.toml";
@@ -126,6 +161,11 @@ mod tests {
         shrink_revert = false
         stale_after = 5
         reclaim_deadline = "20s"
+        grant_swap = true
+
+        [policy.revocation]
+        psi = 30.0
+        step = "512MiB"
 
         [guests.example]
         ceiling = "8GiB"
@@ -138,6 +178,8 @@ mod tests {
         path = "/run/pazari/example.qmp"
         device = "vm0"
         deadline = "2s 500ms"
+        retry_min = "2s"
+        retry_max = "60s"
 
         [guests.example.qmp.mode]
         kind = "per_operation"
@@ -197,9 +239,20 @@ mod tests {
 
     #[test]
     fn the_example_file_carries_the_defaults_it_stands_in_for() {
+        let defaults = parse(MINIMAL);
+
         assert_eq!(
             parse(EXAMPLE),
-            parse(MINIMAL),
+            Config {
+                policy: Policy {
+                    revocation: Some(Revocation {
+                        psi: Psi::try_new(20.0).expect("20% is a psi"),
+                        step: step(256 * MIB),
+                    }),
+                    ..defaults.policy
+                },
+                ..defaults
+            },
             "the template's example values have drifted from the defaults they print"
         );
     }
@@ -225,6 +278,11 @@ mod tests {
                 shrink_revert: false,
                 stale_after: count(5),
                 reclaim_deadline: interval(Duration::from_secs(20)),
+                grant_swap: true,
+                revocation: Some(Revocation {
+                    psi: Psi::try_new(30.0).expect("30% is a psi"),
+                    step: step(512 * MIB),
+                }),
             }
         );
         assert_eq!(
@@ -236,6 +294,8 @@ mod tests {
                     poll: interval(Duration::from_millis(250)),
                 },
                 deadline: interval(Duration::from_millis(2_500)),
+                retry_min: interval(Duration::from_secs(2)),
+                retry_max: interval(Duration::from_secs(60)),
             }]
         );
 
@@ -275,6 +335,8 @@ mod tests {
                 shrink_revert: true,
                 stale_after: count(3),
                 reclaim_deadline: interval(Duration::from_secs(30)),
+                grant_swap: false,
+                revocation: None,
             }
         );
         assert_eq!(
@@ -284,6 +346,8 @@ mod tests {
                 device: "vm0".to_owned(),
                 mode: Mode::Held,
                 deadline: interval(Duration::from_secs(5)),
+                retry_min: interval(Duration::from_millis(500)),
+                retry_max: interval(Duration::from_secs(30)),
             }]
         );
         assert!(config.registry.lookup(&PeerId::Vsock { cid: 3 }).is_some());
@@ -490,6 +554,53 @@ mod tests {
         assert_eq!(
             error,
             "guests.example.qmp.deadline: Interval rejects 0ns: expected (0s, 24h]"
+        );
+    }
+
+    #[test]
+    fn a_file_that_asks_for_no_revocation_gets_none() {
+        assert_eq!(parse(MINIMAL).policy.revocation, None);
+        assert!(!parse(MINIMAL).policy.grant_swap);
+    }
+
+    #[test]
+    fn a_revocation_table_without_a_threshold_names_the_field() {
+        let error = rejects(&FULL.replace("psi = 30.0\n", ""));
+
+        assert!(error.contains("psi"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_revocation_table_takes_the_default_step() {
+        let config = parse(&FULL.replace("step = \"512MiB\"\n", ""));
+
+        assert_eq!(
+            config.policy.revocation.map(|revocation| revocation.step),
+            Some(step(256 * MIB))
+        );
+    }
+
+    #[test]
+    fn a_revocation_threshold_outside_its_range_is_refused() {
+        assert_eq!(
+            rejects(&FULL.replace("psi = 30.0", "psi = 101.0")),
+            "policy.revocation.psi: Psi rejects 101.0: expected (0, 100]"
+        );
+    }
+
+    #[test]
+    fn a_revocation_that_asks_for_nothing_is_refused() {
+        assert_eq!(
+            rejects(&FULL.replace(r#"step = "512MiB""#, r#"step = "0B""#)),
+            "policy.revocation.step rejects 0: expected a positive byte count"
+        );
+    }
+
+    #[test]
+    fn a_retry_floor_over_its_own_cap_is_refused() {
+        assert_eq!(
+            rejects(&FULL.replace(r#"retry_min = "2s""#, r#"retry_min = "90s""#)),
+            "guests.example.qmp.retry_min is 90s, over guests.example.qmp.retry_max of 60s"
         );
     }
 

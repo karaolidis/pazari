@@ -3,12 +3,19 @@ pub mod qmp;
 use std::{
     collections::VecDeque,
     future::{self, Future},
+    io,
+    path::PathBuf,
     sync::{Mutex, MutexGuard},
 };
 
+use pazari_types::MemInfo;
 use tokio::task;
 
-use crate::runtime::{actuator::Actuator, error::RuntimeError, memory::HostMemory};
+use crate::runtime::{
+    actuator::Actuator,
+    error::RuntimeError,
+    memory::{self, HostMemory, Pressure},
+};
 
 pub const MEMINFO: &str = "MemTotal:        2096756 kB\n\
                            MemFree:          131072 kB\n\
@@ -18,6 +25,13 @@ pub const MEMINFO: &str = "MemTotal:        2096756 kB\n\
                            SwapCached:            0 kB\n\
                            SwapTotal:       1048572 kB\n\
                            SwapFree:        1048572 kB\n";
+
+pub const PRESSURE: &str = "some avg10=12.50 avg60=3.00 avg300=1.00 total=123456\n\
+                            full avg10=0.25 avg60=0.10 avg300=0.05 total=6543\n";
+
+pub const SWAPS: &str = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n\
+                         /dev/zram0                              partition\t1048572\t\t0\t\t100\n\
+                         /swap/swapfile                          file\t\t2097148\t\t0\t\t-2\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Completion {
@@ -141,29 +155,76 @@ impl Actuator for MockActuator {
     }
 }
 
+#[must_use]
+pub const fn meminfo(total: u64, available: u64, swap_total: u64) -> MemInfo {
+    MemInfo {
+        total,
+        available,
+        swap_total,
+        swap_free: swap_total,
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct MockMemory {
-    available: Mutex<u64>,
+    meminfo: Mutex<MemInfo>,
+    pressure: Option<Pressure>,
+    swaps: Vec<String>,
+    blind: bool,
 }
 
 impl MockMemory {
     #[must_use]
-    pub fn new(available: u64) -> Self {
+    pub fn new(meminfo: MemInfo) -> Self {
         Self {
-            available: Mutex::new(available),
+            meminfo: Mutex::new(meminfo),
+            ..Self::default()
         }
     }
 
-    pub fn set(&self, available: u64) {
-        *self.available.lock().expect("no test poisons the mock") = available;
+    #[must_use]
+    pub const fn pressured(mut self, some10: f32) -> Self {
+        self.pressure = Some(Pressure {
+            some10,
+            full10: 0.0,
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn swapping(mut self, devices: &[&str]) -> Self {
+        self.swaps = devices.iter().map(|device| (*device).to_owned()).collect();
+        self
+    }
+
+    #[must_use]
+    pub const fn unreadable_swaps(mut self) -> Self {
+        self.blind = true;
+        self
+    }
+
+    pub fn set(&self, meminfo: MemInfo) {
+        *self.meminfo.lock().expect("no test poisons the mock") = meminfo;
     }
 }
 
 impl HostMemory for MockMemory {
-    fn available(&self) -> impl Future<Output = Result<u64, RuntimeError>> + Send {
-        future::ready(Ok(*self
-            .available
-            .lock()
-            .expect("no test poisons the mock")))
+    fn meminfo(&self) -> impl Future<Output = Result<MemInfo, RuntimeError>> + Send {
+        future::ready(Ok(*self.meminfo.lock().expect("no test poisons the mock")))
+    }
+
+    fn pressure(&self) -> impl Future<Output = Result<Option<Pressure>, RuntimeError>> + Send {
+        future::ready(Ok(self.pressure))
+    }
+
+    fn swaps(&self) -> impl Future<Output = Result<Vec<String>, RuntimeError>> + Send {
+        future::ready(if self.blind {
+            Err(RuntimeError::Read {
+                path: PathBuf::from(memory::SWAPS),
+                source: io::Error::from(io::ErrorKind::PermissionDenied),
+            })
+        } else {
+            Ok(self.swaps.clone())
+        })
     }
 }

@@ -19,7 +19,7 @@ pub use crate::broker::{
     arbiter::{Arbiter, Ask, Decision, Fcfs, GuestView, HostView, Request},
     event::Event,
     guest::{Guest, Reconcile},
-    policy::Policy,
+    policy::{Policy, Revocation},
     registry::{GuestId, GuestSpec, Registry, RegistryError},
     session::{Negotiated, Phase, Reclaim, Session},
 };
@@ -31,7 +31,7 @@ pub struct Broker<A = Fcfs> {
     registry: Registry,
     arbiter: A,
     guests: Vec<Guest>,
-    available: Option<u64>,
+    host: HostView,
 }
 
 impl Broker<Fcfs> {
@@ -51,10 +51,11 @@ impl<A: Arbiter> Broker<A> {
             registry,
             arbiter,
             guests,
-            available: None,
+            host: HostView::default(),
         }
     }
 
+    #[must_use]
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
         let mut out = Vec::new();
 
@@ -63,7 +64,18 @@ impl<A: Arbiter> Broker<A> {
             Event::Message { now, peer, message } => self.on_message(&mut out, now, &peer, message),
             Event::Disconnected { now, peer } => self.on_disconnected(now, &peer),
             Event::Size { now, guest, size } => self.on_size(now, guest, size),
-            Event::HostAvailable { bytes, .. } => self.available = Some(bytes),
+            Event::HostAvailable {
+                bytes,
+                swap_free,
+                psi,
+                ..
+            } => {
+                self.host = HostView {
+                    available: Some(bytes),
+                    swap_free: Some(swap_free),
+                    psi,
+                };
+            }
             Event::Reclaim {
                 now,
                 guest,
@@ -91,8 +103,13 @@ impl<A: Arbiter> Broker<A> {
     }
 
     #[must_use]
+    pub const fn host(&self) -> HostView {
+        self.host
+    }
+
+    #[must_use]
     pub const fn host_available(&self) -> Option<u64> {
-        self.available
+        self.host.available
     }
 
     #[must_use]
@@ -256,22 +273,44 @@ impl<A: Arbiter> Broker<A> {
                 ..
             } => {
                 let ceiling = self.registry.ceiling(guest);
-                let size = self.size(guest);
                 let target = target.min(ceiling);
 
-                let ask = (target > size).then_some(Ask::Grow {
-                    target,
-                    reason,
-                    urgency,
-                });
+                let ask = self
+                    .size(guest)
+                    .ok_or_else(|| Decision::Deny {
+                        reason: DenyReason::Policy,
+                        retry_after: Some(self.policy.grant_min_interval.get()),
+                    })
+                    .and_then(|size| {
+                        if target > size {
+                            Ok(Ask::Grow {
+                                target,
+                                reason,
+                                urgency,
+                            })
+                        } else {
+                            Err(Decision::Deny {
+                                reason: DenyReason::Ceiling,
+                                retry_after: None,
+                            })
+                        }
+                    });
 
                 self.on_request(out, now, guest, peer, id, ask);
             }
 
             GuestMessage::OfferRelease { id, releasable, .. } => {
-                let target = self.size(guest).saturating_sub(releasable);
+                let ask = self
+                    .size(guest)
+                    .ok_or_else(|| Decision::Deny {
+                        reason: DenyReason::Policy,
+                        retry_after: Some(self.policy.grant_min_interval.get()),
+                    })
+                    .map(|size| Ask::Release {
+                        target: size.saturating_sub(releasable),
+                    });
 
-                self.on_request(out, now, guest, peer, id, Some(Ask::Release { target }));
+                self.on_request(out, now, guest, peer, id, ask);
             }
 
             GuestMessage::ReclaimAck { id, will_release } => {
@@ -298,7 +337,7 @@ impl<A: Arbiter> Broker<A> {
         guest: GuestId,
         peer: &PeerId,
         id: u64,
-        ask: Option<Ask>,
+        ask: Result<Ask, Decision>,
     ) {
         let accepted = self
             .negotiated_mut(guest)
@@ -310,16 +349,12 @@ impl<A: Arbiter> Broker<A> {
             return;
         }
 
-        let Some(ask) = ask else {
-            out.push(Self::answer(
-                peer,
-                id,
-                Decision::Deny {
-                    reason: DenyReason::Ceiling,
-                    retry_after: None,
-                },
-            ));
-            return;
+        let ask = match ask {
+            Ok(ask) => ask,
+            Err(decision) => {
+                out.push(Self::answer(peer, id, decision));
+                return;
+            }
         };
 
         let decision = self.arbitrate(now, guest, ask);
@@ -372,9 +407,7 @@ impl<A: Arbiter> Broker<A> {
             guest: asking,
             ask,
             others: &others,
-            host: HostView {
-                available: self.available,
-            },
+            host: self.host,
             policy: &self.policy,
         };
 
@@ -388,7 +421,11 @@ impl<A: Arbiter> Broker<A> {
             return;
         };
 
-        if target == state.size {
+        let Some(size) = state.size else {
+            return;
+        };
+
+        if target == size {
             if state.reconcile.take().is_some() {
                 out.push(Action::SetRequested {
                     guest,
@@ -401,7 +438,7 @@ impl<A: Arbiter> Broker<A> {
 
         state.reconcile = Some(Reconcile {
             target,
-            from: state.size,
+            from: size,
             deadline,
         });
 
@@ -438,7 +475,8 @@ impl<A: Arbiter> Broker<A> {
             warn!(
                 guest = self.name(guest),
                 outstanding = reclaim.id,
-                "a reclaim request is already outstanding",
+                refused = reclaim.refused,
+                "the guest is not to be asked for memory again yet",
             );
 
             return;
@@ -457,6 +495,7 @@ impl<A: Arbiter> Broker<A> {
             desired,
             deadline: now.saturating_add(deadline_ms),
             committed: None,
+            refused: false,
         });
 
         info!(
@@ -514,8 +553,10 @@ impl<A: Arbiter> Broker<A> {
             return;
         }
 
-        if let Some(session) = self.negotiated_mut(guest) {
-            session.reclaim = None;
+        if let Some(session) = self.negotiated_mut(guest)
+            && let Some(reclaim) = session.reclaim.as_mut()
+        {
+            reclaim.refused = true;
         }
 
         info!(
@@ -548,7 +589,7 @@ impl<A: Arbiter> Broker<A> {
             return;
         };
 
-        state.size = size;
+        state.size = Some(size);
 
         let Some(reconcile) = state.reconcile else {
             return;
@@ -590,6 +631,53 @@ impl<A: Arbiter> Broker<A> {
             self.tick_reclaim(now, guest);
             self.tick_staleness(now, guest);
         }
+
+        self.tick_revocation(out, now);
+    }
+
+    fn tick_revocation(&mut self, out: &mut Vec<Action>, now: Timestamp) {
+        let Some(revocation) = self.policy.revocation else {
+            return;
+        };
+
+        let Some(psi) = self.host.psi else {
+            return;
+        };
+
+        if f64::from(psi) < revocation.psi.get() {
+            return;
+        }
+
+        let mut candidates = Vec::with_capacity(self.registry.len());
+
+        for (id, spec) in self.registry.iter() {
+            let Some(state) = self.guests.get(id.index()) else {
+                continue;
+            };
+
+            let asked = state
+                .session
+                .as_ref()
+                .and_then(Session::negotiated)
+                .is_none_or(|session| session.reclaim.is_some());
+
+            if state.size.is_some() && !asked {
+                candidates.push(view(id, spec, state));
+            }
+        }
+
+        let Some((guest, desired)) = self.arbiter.revoke(&candidates, revocation) else {
+            return;
+        };
+
+        warn!(
+            guest = self.name(guest),
+            psi,
+            threshold = revocation.psi.get(),
+            "the host is under pressure; taking memory back",
+        );
+
+        self.on_reclaim(out, now, guest, desired);
     }
 
     fn tick_reconcile(&mut self, out: &mut Vec<Action>, now: Timestamp, guest: GuestId) {
@@ -610,7 +698,9 @@ impl<A: Arbiter> Broker<A> {
 
         state.reconcile = None;
 
-        let size = state.size;
+        let Some(size) = state.size else {
+            return;
+        };
 
         if !reconcile.is_shrink() {
             info!(
@@ -653,6 +743,16 @@ impl<A: Arbiter> Broker<A> {
         }
 
         session.reclaim = None;
+
+        if reclaim.refused {
+            debug!(
+                guest = self.name(guest),
+                id = reclaim.id,
+                "the guest may be asked for memory again",
+            );
+
+            return;
+        }
 
         warn!(
             guest = self.name(guest),
@@ -726,8 +826,8 @@ impl<A: Arbiter> Broker<A> {
             .is_some_and(|reclaim| reclaim.id == id)
     }
 
-    fn size(&self, guest: GuestId) -> u64 {
-        self.guest(guest).map_or(0, |state| state.size)
+    fn size(&self, guest: GuestId) -> Option<u64> {
+        self.guest(guest).and_then(|state| state.size)
     }
 
     fn negotiated(&self, guest: GuestId) -> Option<&Negotiated> {
@@ -757,7 +857,8 @@ fn view<'a>(id: GuestId, spec: &'a GuestSpec, state: &Guest) -> GuestView<'a> {
     GuestView {
         id,
         spec,
-        size: state.size,
+        boot_mem: negotiated.map(|session| session.boot_mem),
+        size: state.size.unwrap_or(0),
         requested: state.requested(),
         status: negotiated.and_then(|session| session.status),
         stale: negotiated.is_some_and(|session| session.stale),
@@ -903,14 +1004,64 @@ mod tests {
         assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
     }
 
+    fn unsized_guest() -> Broker {
+        let mut broker = Broker::new(policy(), registry());
+
+        let _ = broker.handle(available(at(0), HOST));
+        greet(&mut broker, at(0), ONE);
+
+        broker
+    }
+
+    #[test]
+    fn a_grow_from_a_guest_whose_size_is_unknown_is_denied_once() {
+        let mut broker = unsized_guest();
+
+        assert_eq!(
+            message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB)),
+            vec![retry(ONE, 1, DenyReason::Policy, Duration::from_secs(5))]
+        );
+        assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
+    }
+
+    #[test]
+    fn a_release_from_a_guest_whose_size_is_unknown_is_denied_once() {
+        let mut broker = unsized_guest();
+
+        assert_eq!(
+            message(&mut broker, at(10), ONE, release(1, BOOT, 512 * MIB)),
+            vec![retry(ONE, 1, DenyReason::Policy, Duration::from_secs(5))]
+        );
+        assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
+    }
+
+    #[test]
+    fn a_guest_negotiates_as_soon_as_its_device_reports_a_size() {
+        let mut broker = unsized_guest();
+
+        message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB));
+        sizes(&mut broker, at(11), ONE, BOOT);
+
+        assert_eq!(
+            message(&mut broker, at(12), ONE, ask(2, BOOT, 3072 * MIB)),
+            vec![grant(ONE, 2, 3072 * MIB), requested(ONE, 3072 * MIB)]
+        );
+
+        let mut broker = unsized_guest();
+
+        sizes(&mut broker, at(11), ONE, BOOT);
+
+        assert_eq!(
+            message(&mut broker, at(12), ONE, release(1, BOOT, 512 * MIB)),
+            vec![grant(ONE, 1, 1536 * MIB), requested(ONE, 1536 * MIB)]
+        );
+    }
+
     #[test]
     fn a_grant_that_would_take_the_host_under_its_floor_is_denied() {
         let mut broker = welcomed(ONE);
 
-        broker.handle(Event::HostAvailable {
-            now: at(9),
-            bytes: FLOOR + 512 * MIB,
-        });
+        let _ = broker.handle(available(at(9), FLOOR + 512 * MIB));
 
         assert_eq!(
             message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB)),
@@ -1008,7 +1159,7 @@ mod tests {
         assert_eq!(sizes(&mut broker, at(12), ONE, 3072 * MIB), vec![]);
         assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
         assert_eq!(
-            broker.guest(id(ONE)).map(|guest| guest.size),
+            broker.guest(id(ONE)).and_then(|guest| guest.size),
             Some(3072 * MIB)
         );
     }
@@ -1029,7 +1180,7 @@ mod tests {
         assert_eq!(tick(&mut broker, at(40)), vec![]);
         assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
         assert_eq!(
-            broker.guest(id(ONE)).map(|guest| guest.size),
+            broker.guest(id(ONE)).and_then(|guest| guest.size),
             Some(2560 * MIB)
         );
     }
@@ -1053,13 +1204,8 @@ mod tests {
             ..policy()
         };
 
-        let mut broker = Broker::new(policy, registry());
+        let mut broker = sized_with(policy);
 
-        broker.handle(Event::HostAvailable {
-            now: at(0),
-            bytes: HOST,
-        });
-        sizes(&mut broker, at(0), ONE, BOOT);
         greet(&mut broker, at(0), ONE);
 
         message(&mut broker, at(10), ONE, release(1, BOOT, 512 * MIB));
@@ -1149,6 +1295,18 @@ mod tests {
                 guest: id(ONE),
                 desired: 256 * MIB,
             }),
+            vec![],
+            "a refusal was taken as leave to ask again at once",
+        );
+
+        tick(&mut broker, at(40));
+
+        assert_eq!(
+            broker.handle(Event::Reclaim {
+                now: at(41),
+                guest: id(ONE),
+                desired: 256 * MIB,
+            }),
             vec![Action::Send {
                 peer: vsock(ONE),
                 message: HostMessage::ReclaimRequest {
@@ -1164,7 +1322,7 @@ mod tests {
     fn a_reclaim_the_guest_takes_on_waits_for_the_memory() {
         let mut broker = welcomed(ONE);
 
-        broker.handle(Event::Reclaim {
+        let _ = broker.handle(Event::Reclaim {
             now: at(10),
             guest: id(ONE),
             desired: 512 * MIB,
@@ -1200,7 +1358,7 @@ mod tests {
     fn a_reclaim_that_runs_out_of_time_is_given_up_on() {
         let mut broker = welcomed(ONE);
 
-        broker.handle(Event::Reclaim {
+        let _ = broker.handle(Event::Reclaim {
             now: at(10),
             guest: id(ONE),
             desired: 512 * MIB,
@@ -1242,7 +1400,7 @@ mod tests {
 
         let mut broker = welcomed(ONE);
 
-        broker.handle(Event::Reclaim {
+        let _ = broker.handle(Event::Reclaim {
             now: at(10),
             guest: id(ONE),
             desired: 512 * MIB,
@@ -1267,7 +1425,7 @@ mod tests {
         let mut broker = welcomed(ONE);
 
         message(&mut broker, at(10), ONE, ask(9, BOOT, 3072 * MIB));
-        broker.handle(Event::Reclaim {
+        let _ = broker.handle(Event::Reclaim {
             now: at(11),
             guest: id(ONE),
             desired: 512 * MIB,
@@ -1295,12 +1453,12 @@ mod tests {
         let mut broker = welcomed(ONE);
 
         message(&mut broker, at(10), ONE, ask(9, BOOT, 2560 * MIB));
-        broker.handle(Event::Reclaim {
+        let _ = broker.handle(Event::Reclaim {
             now: at(11),
             guest: id(ONE),
             desired: 512 * MIB,
         });
-        broker.handle(Event::Disconnected {
+        let _ = broker.handle(Event::Disconnected {
             now: at(12),
             peer: vsock(ONE),
         });
@@ -1350,10 +1508,7 @@ mod tests {
         greet(&mut broker, at(0), ONE);
         greet(&mut broker, at(0), TWO);
 
-        broker.handle(Event::HostAvailable {
-            now: at(1),
-            bytes: FLOOR + GIB,
-        });
+        let _ = broker.handle(available(at(1), FLOOR + GIB));
 
         assert_eq!(
             message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB)),
@@ -1371,14 +1526,157 @@ mod tests {
         );
 
         sizes(&mut broker, at(12), ONE, 3072 * MIB);
-        broker.handle(Event::HostAvailable {
-            now: at(13),
-            bytes: FLOOR + GIB,
-        });
+        let _ = broker.handle(available(at(13), FLOOR + GIB));
 
         assert_eq!(
             message(&mut broker, at(14), TWO, ask(2, BOOT, 2560 * MIB)),
             vec![grant(TWO, 2, 2560 * MIB), requested(TWO, 2560 * MIB)]
+        );
+    }
+
+    fn holding(one: u64, two: u64) -> Broker {
+        let mut broker = sized_with(revoking());
+
+        greet(&mut broker, at(0), ONE);
+        greet(&mut broker, at(0), TWO);
+
+        sizes(&mut broker, at(1), ONE, one);
+        sizes(&mut broker, at(1), TWO, two);
+
+        broker
+    }
+
+    fn reclaimed(cid: u32, id: u64, desired: u64) -> Action {
+        Action::Send {
+            peer: vsock(cid),
+            message: HostMessage::ReclaimRequest {
+                id,
+                desired,
+                deadline_ms: Duration::from_secs(30),
+            },
+        }
+    }
+
+    #[test]
+    fn a_pressured_host_takes_memory_back_from_the_guest_holding_the_most() {
+        let mut broker = holding(2560 * MIB, 3072 * MIB);
+
+        let _ = broker.handle(pressured(at(2), HOST, GIB, 25.0));
+
+        assert_eq!(
+            tick(&mut broker, at(3)),
+            vec![reclaimed(TWO, 1, REVOKE_STEP)]
+        );
+    }
+
+    #[test]
+    fn a_host_exactly_on_its_threshold_takes_memory_back() {
+        let mut broker = holding(2560 * MIB, BOOT);
+
+        let _ = broker.handle(pressured(at(2), HOST, GIB, 20.0));
+
+        assert_eq!(
+            tick(&mut broker, at(3)),
+            vec![reclaimed(ONE, 1, REVOKE_STEP)]
+        );
+    }
+
+    #[test]
+    fn a_revocation_asks_for_no_more_than_the_guest_grew_by() {
+        let mut broker = holding(BOOT + 128 * MIB, BOOT);
+
+        let _ = broker.handle(pressured(at(2), HOST, GIB, 25.0));
+
+        assert_eq!(tick(&mut broker, at(3)), vec![reclaimed(ONE, 1, 128 * MIB)]);
+    }
+
+    #[test]
+    fn a_revocation_leaves_a_guest_alone_while_it_is_already_being_asked() {
+        let mut broker = holding(2560 * MIB, 3072 * MIB);
+
+        let _ = broker.handle(pressured(at(2), HOST, GIB, 25.0));
+
+        assert_eq!(
+            tick(&mut broker, at(3)),
+            vec![reclaimed(TWO, 1, REVOKE_STEP)]
+        );
+        assert_eq!(
+            tick(&mut broker, at(4)),
+            vec![reclaimed(ONE, 1, REVOKE_STEP)]
+        );
+        assert_eq!(tick(&mut broker, at(5)), vec![]);
+    }
+
+    #[test]
+    fn a_host_under_its_threshold_takes_nothing_back() {
+        let mut broker = holding(2560 * MIB, 3072 * MIB);
+
+        let _ = broker.handle(pressured(at(2), HOST, GIB, 19.0));
+
+        assert_eq!(tick(&mut broker, at(3)), vec![]);
+    }
+
+    #[test]
+    fn a_host_whose_pressure_is_unread_takes_nothing_back() {
+        let mut broker = holding(2560 * MIB, 3072 * MIB);
+
+        let _ = broker.handle(available(at(2), HOST));
+
+        assert_eq!(tick(&mut broker, at(3)), vec![]);
+    }
+
+    #[test]
+    fn a_guest_still_at_the_memory_it_booted_with_is_never_revoked_from() {
+        let mut broker = holding(BOOT, BOOT);
+
+        let _ = broker.handle(pressured(at(2), HOST, GIB, 25.0));
+
+        assert_eq!(tick(&mut broker, at(3)), vec![]);
+    }
+
+    #[test]
+    fn a_host_that_was_never_asked_to_revoke_takes_nothing_back() {
+        let mut broker = sized_with(policy());
+
+        greet(&mut broker, at(0), ONE);
+        sizes(&mut broker, at(1), ONE, 3072 * MIB);
+
+        let _ = broker.handle(pressured(at(2), HOST, GIB, 90.0));
+
+        assert_eq!(tick(&mut broker, at(3)), vec![]);
+    }
+
+    #[test]
+    fn a_guest_that_refuses_a_reclaim_is_asked_no_sooner_than_one_that_says_nothing() {
+        let mut broker = holding(2560 * MIB, 3072 * MIB);
+
+        let _ = broker.handle(pressured(at(2), HOST, GIB, 25.0));
+
+        assert_eq!(
+            tick(&mut broker, at(3)),
+            vec![reclaimed(TWO, 1, REVOKE_STEP)]
+        );
+
+        message(
+            &mut broker,
+            at(4),
+            TWO,
+            GuestMessage::ReclaimNak {
+                id: 1,
+                reason: "the workload is pinned".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            tick(&mut broker, at(5)),
+            vec![reclaimed(ONE, 1, REVOKE_STEP)],
+            "the refusal stopped the host moving on to the next guest",
+        );
+        assert_eq!(tick(&mut broker, at(32)), vec![]);
+        assert_eq!(
+            tick(&mut broker, at(33)),
+            vec![reclaimed(TWO, 2, REVOKE_STEP)],
+            "the guest that refused was not asked again once its deadline passed",
         );
     }
 
@@ -1391,7 +1689,10 @@ mod tests {
 
         message(&mut broker, at(10), ONE, release(1, u64::MAX, u64::MAX));
 
-        assert_eq!(broker.guest(id(TWO)).map(|guest| guest.size), Some(BOOT));
+        assert_eq!(
+            broker.guest(id(TWO)).and_then(|guest| guest.size),
+            Some(BOOT)
+        );
         assert_eq!(broker.guest(id(TWO)).and_then(Guest::requested), None);
     }
 
@@ -1440,6 +1741,8 @@ mod tests {
         },
         Available {
             bytes: u64,
+            swap_free: u64,
+            psi: Option<f32>,
         },
         Reclaim {
             slot: usize,
@@ -1490,7 +1793,16 @@ mod tests {
                     guest: GuestId::from_index(slot),
                     size,
                 },
-                Self::Available { bytes } => Event::HostAvailable { now, bytes },
+                Self::Available {
+                    bytes,
+                    swap_free,
+                    psi,
+                } => Event::HostAvailable {
+                    now,
+                    bytes,
+                    swap_free,
+                    psi,
+                },
                 Self::Reclaim { slot, desired } => Event::Reclaim {
                     now,
                     guest: GuestId::from_index(slot),
@@ -1542,6 +1854,13 @@ mod tests {
         ]
     }
 
+    fn pressure() -> impl Strategy<Value = Option<f32>> {
+        prop_oneof![
+            1 => Just(None),
+            4 => (0.0_f32..=100.0).prop_map(Some),
+        ]
+    }
+
     fn cid() -> impl Strategy<Value = u32> {
         prop_oneof![
             6 => Just(ONE),
@@ -1566,7 +1885,8 @@ mod tests {
             1 => cid().prop_map(|cid| Step::Bye { cid }),
             2 => cid().prop_map(|cid| Step::Disconnect { cid }),
             4 => (0_usize..3, byte_count()).prop_map(|(slot, size)| Step::Size { slot, size }),
-            3 => byte_count().prop_map(|bytes| Step::Available { bytes }),
+            3 => (byte_count(), byte_count(), pressure())
+                .prop_map(|(bytes, swap_free, psi)| Step::Available { bytes, swap_free, psi }),
             2 => (0_usize..3, byte_count())
                 .prop_map(|(slot, desired)| Step::Reclaim { slot, desired }),
             4 => Just(Step::Tick),
@@ -1680,8 +2000,8 @@ mod tests {
         Ok(())
     }
 
-    fn drive(timeline: &[(u64, Step)]) -> Result<(), TestCaseError> {
-        let mut broker = broker();
+    fn drive(policy: Policy, timeline: &[(u64, Step)]) -> Result<(), TestCaseError> {
+        let mut broker = Broker::new(policy, registry());
         let mut model = Model::default();
         let mut now = Timestamp::START;
 
@@ -1713,7 +2033,12 @@ mod tests {
     proptest! {
         #[test]
         fn the_broker_answers_every_request_exactly_once(timeline in timeline()) {
-            drive(&timeline)?;
+            drive(policy(), &timeline)?;
+        }
+
+        #[test]
+        fn a_revoking_broker_answers_every_request_exactly_once(timeline in timeline()) {
+            drive(revoking(), &timeline)?;
         }
     }
 }

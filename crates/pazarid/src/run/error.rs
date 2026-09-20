@@ -18,4 +18,9 @@ pub enum RunError {
         signal: &'static str,
         source: io::Error,
     },
+
+    #[error(
+        "the daemon was asked to take memory back under pressure, and this host carries no {path} to measure it with"
+    )]
+    Pressureless { path: &'static str },
 }

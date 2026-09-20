@@ -1,13 +1,19 @@
-use std::{num::NonZeroU32, path::PathBuf, sync::LazyLock, time::Duration};
+use std::{
+    num::{NonZeroU32, NonZeroU64},
+    path::PathBuf,
+    sync::LazyLock,
+    time::Duration,
+};
 
 use pazari_proto::{
     DenyReason, GrantReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status, Urgency,
 };
 use pazari_transport::PeerId;
-use pazari_types::{Interval, Timestamp};
+use pazari_types::{Interval, Psi, Timestamp};
 
 use crate::broker::{
     Action, Ask, Broker, Event, GuestId, GuestSpec, GuestView, HostView, Policy, Registry, Request,
+    Revocation,
 };
 
 pub const MIB: u64 = 1 << 20;
@@ -23,7 +29,12 @@ pub const HOST: u64 = 8 * GIB;
 pub const ONE: u32 = 3;
 pub const TWO: u32 = 4;
 
+pub const REVOKE_PSI: f64 = 20.0;
+pub const REVOKE_STEP: u64 = 256 * MIB;
+
 pub static POLICY: LazyLock<Policy> = LazyLock::new(policy);
+
+pub static GRANTING: LazyLock<Policy> = LazyLock::new(granting);
 
 pub fn interval(secs: u64) -> Interval {
     Interval::try_new(Duration::from_secs(secs)).expect("a positive interval under a day")
@@ -31,6 +42,10 @@ pub fn interval(secs: u64) -> Interval {
 
 pub const fn count(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).expect("a positive count")
+}
+
+pub const fn step(value: u64) -> NonZeroU64 {
+    NonZeroU64::new(value).expect("a positive byte count")
 }
 
 pub const fn at(secs: u64) -> Timestamp {
@@ -56,6 +71,25 @@ pub fn policy() -> Policy {
         shrink_revert: true,
         stale_after: count(3),
         reclaim_deadline: interval(30),
+        grant_swap: false,
+        revocation: None,
+    }
+}
+
+pub fn granting() -> Policy {
+    Policy {
+        grant_swap: true,
+        ..policy()
+    }
+}
+
+pub fn revoking() -> Policy {
+    Policy {
+        revocation: Some(Revocation {
+            psi: Psi::try_new(REVOKE_PSI).expect("a fifth of the wall clock is a psi"),
+            step: step(REVOKE_STEP),
+        }),
+        ..policy()
     }
 }
 
@@ -83,20 +117,35 @@ pub fn id(cid: u32) -> GuestId {
     registry().lookup(&vsock(cid)).expect("a registered guest")
 }
 
-pub fn broker() -> Broker {
-    Broker::new(policy(), registry())
+pub const fn available(now: Timestamp, bytes: u64) -> Event {
+    Event::HostAvailable {
+        now,
+        bytes,
+        swap_free: 0,
+        psi: None,
+    }
+}
+
+pub const fn pressured(now: Timestamp, bytes: u64, swap_free: u64, psi: f32) -> Event {
+    Event::HostAvailable {
+        now,
+        bytes,
+        swap_free,
+        psi: Some(psi),
+    }
 }
 
 pub fn sized() -> Broker {
-    let mut broker = broker();
+    sized_with(policy())
+}
 
-    broker.handle(Event::HostAvailable {
-        now: at(0),
-        bytes: HOST,
-    });
+pub fn sized_with(policy: Policy) -> Broker {
+    let mut broker = Broker::new(policy, registry());
+
+    let _ = broker.handle(available(at(0), HOST));
 
     for cid in [ONE, TWO] {
-        broker.handle(Event::Size {
+        let _ = broker.handle(Event::Size {
             now: at(0),
             guest: id(cid),
             size: BOOT,
@@ -255,6 +304,7 @@ pub fn view(spec: &GuestSpec, size: u64, requested: Option<u64>) -> GuestView<'_
     GuestView {
         id: GuestId::from_index(0),
         spec,
+        boot_mem: Some(BOOT),
         size,
         requested,
         status: None,
@@ -280,7 +330,33 @@ pub fn request<'a>(
         guest,
         ask,
         others,
-        host: HostView { available },
+        host: HostView {
+            available,
+            swap_free: None,
+            psi: None,
+        },
         policy: &POLICY,
+    }
+}
+
+pub fn credited<'a>(
+    now: Timestamp,
+    guest: GuestView<'a>,
+    ask: Ask,
+    others: &'a [GuestView<'a>],
+    available: Option<u64>,
+    swap_free: Option<u64>,
+) -> Request<'a> {
+    Request {
+        now,
+        guest,
+        ask,
+        others,
+        host: HostView {
+            available,
+            swap_free,
+            psi: None,
+        },
+        policy: &GRANTING,
     }
 }

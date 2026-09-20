@@ -27,6 +27,19 @@ stale_after = 3
 # How long a guest has to answer a `reclaim_request`.
 reclaim_deadline = "30s"
 
+# Whether free host swap counts towards what a grow may be granted out
+# of.
+grant_swap = false
+
+# How the host takes memory back when it comes under pressure itself.
+[policy.revocation]
+# The host memory pressure, in percent of wall time, at which the daemon
+# starts asking guests for memory back. Set me.
+psi = 20.0
+
+# How much memory one such request asks a guest for.
+step = "256MiB"
+
 # The guests the daemon answers to, one table each.
 [guests.example]
 # The most memory this guest may hold. Set me.
@@ -58,6 +71,12 @@ device = "vm0"
 
 # How long one QMP command is given to finish.
 deadline = "5s"
+
+# The first delay before a device that did not answer is opened again.
+retry_min = "500ms"
+
+# The cap that delay doubles towards.
+retry_max = "30s"
 
 # How the daemon uses the QMP socket.
 [guests.example.qmp.mode]

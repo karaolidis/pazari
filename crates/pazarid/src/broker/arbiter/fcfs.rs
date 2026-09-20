@@ -1,8 +1,15 @@
 use pazari_proto::DenyReason;
 
-use crate::broker::arbiter::{Arbiter, Ask, Decision, Request};
+use crate::broker::{
+    arbiter::{Arbiter, Ask, Decision, GuestView, Request},
+    policy::Revocation,
+    registry::GuestId,
+};
 
 /// First come, first served under a host floor and a per-guest rate limit.
+///
+/// Revocation takes from the guest holding the most over its boot memory;
+/// ties go to the guest declared first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Fcfs;
 
@@ -12,6 +19,28 @@ impl Arbiter for Fcfs {
             Ask::Release { target } => Decision::Grant { target },
             Ask::Grow { target, .. } => Self::grow(request, target),
         }
+    }
+
+    fn revoke(
+        &mut self,
+        candidates: &[GuestView<'_>],
+        revocation: Revocation,
+    ) -> Option<(GuestId, u64)> {
+        let mut most: Option<(GuestId, u64)> = None;
+
+        for candidate in candidates {
+            let Some(boot_mem) = candidate.boot_mem else {
+                continue;
+            };
+
+            let over = candidate.size.saturating_sub(boot_mem);
+
+            if over > 0 && most.is_none_or(|(_, held)| over > held) {
+                most = Some((candidate.id, over));
+            }
+        }
+
+        most.map(|(guest, over)| (guest, over.min(revocation.step.get())))
     }
 }
 
@@ -33,7 +62,7 @@ impl Fcfs {
             }
         }
 
-        let Some(available) = request.host.available else {
+        let Some(available) = request.host.grantable(policy.grant_swap) else {
             let reason = DenyReason::HostPressure;
             return Decision::Deny {
                 reason,
@@ -68,8 +97,12 @@ mod tests {
     use pazari_proto::{GrantReason, Urgency};
 
     use super::*;
-    use crate::broker::testing::{
-        CEILING, FLOOR, GIB, MIB, at, guest, offer, policy, request, view,
+    use crate::broker::{
+        registry::GuestSpec,
+        testing::{
+            BOOT, CEILING, FLOOR, GIB, MIB, REVOKE_STEP, at, credited, guest, offer, policy,
+            request, revoking, view,
+        },
     };
 
     fn grow(target: u64) -> Ask {
@@ -226,6 +259,88 @@ mod tests {
     }
 
     #[test]
+    fn a_grow_only_free_swap_can_cover_is_granted_where_swap_is_granted() {
+        let spec = guest("one", CEILING);
+        let mut arbiter = Fcfs;
+
+        let asking = view(&spec, 2048 * MIB, None);
+
+        let decision = arbiter.decide(&credited(
+            at(100),
+            asking,
+            grow(4096 * MIB),
+            &[],
+            Some(FLOOR + GIB),
+            Some(2 * GIB),
+        ));
+
+        assert_eq!(decision, Decision::Grant { target: 4096 * MIB });
+
+        let decision = arbiter.decide(&request(
+            at(100),
+            asking,
+            grow(4096 * MIB),
+            &[],
+            Some(FLOOR + GIB),
+        ));
+
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: DenyReason::HostPressure,
+                retry_after: Some(policy().grant_min_interval.get()),
+            },
+            "swap was counted for a host that promises only RAM",
+        );
+    }
+
+    #[test]
+    fn a_grow_that_would_eat_the_floor_even_with_the_swap_counted_is_refused() {
+        let spec = guest("one", CEILING);
+        let mut arbiter = Fcfs;
+
+        let decision = arbiter.decide(&credited(
+            at(100),
+            view(&spec, 2048 * MIB, None),
+            grow(4096 * MIB),
+            &[],
+            Some(FLOOR + GIB),
+            Some(512 * MIB),
+        ));
+
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: DenyReason::HostPressure,
+                retry_after: Some(policy().grant_min_interval.get()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_host_granting_swap_it_has_not_read_gives_nothing_away() {
+        let spec = guest("one", CEILING);
+        let mut arbiter = Fcfs;
+
+        let decision = arbiter.decide(&credited(
+            at(100),
+            view(&spec, 2048 * MIB, None),
+            grow(3072 * MIB),
+            &[],
+            Some(8 * GIB),
+            None,
+        ));
+
+        assert_eq!(
+            decision,
+            Decision::Deny {
+                reason: DenyReason::HostPressure,
+                retry_after: Some(policy().grant_min_interval.get()),
+            }
+        );
+    }
+
+    #[test]
     fn a_release_is_taken_whatever_the_host_looks_like() {
         let spec = guest("one", CEILING);
         let mut arbiter = Fcfs;
@@ -236,5 +351,82 @@ mod tests {
         let decision = arbiter.decide(&request(at(100), asking, offer(2048 * MIB), &[], None));
 
         assert_eq!(decision, Decision::Grant { target: 2048 * MIB });
+    }
+
+    fn revocation() -> Revocation {
+        revoking().revocation.expect("the fixture revokes")
+    }
+
+    fn candidate(spec: &GuestSpec, index: usize, size: u64) -> GuestView<'_> {
+        GuestView {
+            id: GuestId::from_index(index),
+            size,
+            ..view(spec, size, None)
+        }
+    }
+
+    #[test]
+    fn revocation_takes_from_the_guest_furthest_over_its_boot() {
+        let spec = guest("one", CEILING);
+        let candidates = [
+            candidate(&spec, 0, BOOT + 64 * MIB),
+            candidate(&spec, 1, BOOT + 128 * MIB),
+        ];
+
+        assert_eq!(
+            Fcfs.revoke(&candidates, revocation()),
+            Some((GuestId::from_index(1), 128 * MIB))
+        );
+    }
+
+    #[test]
+    fn revocation_asks_for_at_most_one_step() {
+        let spec = guest("one", CEILING);
+        let candidates = [candidate(&spec, 0, BOOT + GIB)];
+
+        assert_eq!(
+            Fcfs.revoke(&candidates, revocation()),
+            Some((GuestId::from_index(0), REVOKE_STEP))
+        );
+    }
+
+    #[test]
+    fn revocation_ties_go_to_the_guest_declared_first() {
+        let spec = guest("one", CEILING);
+        let candidates = [
+            candidate(&spec, 0, BOOT + 128 * MIB),
+            candidate(&spec, 1, BOOT + 128 * MIB),
+        ];
+
+        assert_eq!(
+            Fcfs.revoke(&candidates, revocation()),
+            Some((GuestId::from_index(0), 128 * MIB))
+        );
+    }
+
+    #[test]
+    fn a_candidate_without_a_boot_memory_is_passed_over() {
+        let spec = guest("one", CEILING);
+        let unsettled = GuestView {
+            boot_mem: None,
+            ..candidate(&spec, 0, BOOT + GIB)
+        };
+
+        assert_eq!(Fcfs.revoke(&[unsettled], revocation()), None);
+        assert_eq!(
+            Fcfs.revoke(&[unsettled, candidate(&spec, 1, BOOT + MIB)], revocation()),
+            Some((GuestId::from_index(1), MIB))
+        );
+    }
+
+    #[test]
+    fn guests_at_their_boot_memory_are_left_alone() {
+        let spec = guest("one", CEILING);
+
+        assert_eq!(
+            Fcfs.revoke(&[candidate(&spec, 0, BOOT)], revocation()),
+            None
+        );
+        assert_eq!(Fcfs.revoke(&[], revocation()), None);
     }
 }

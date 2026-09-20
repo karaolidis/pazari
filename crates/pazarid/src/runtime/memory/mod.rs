@@ -1,30 +1,55 @@
-use std::{future::Future, path::PathBuf};
+mod pressure;
+
+use std::{
+    future::Future,
+    io,
+    path::{Path, PathBuf},
+};
 
 use pazari_types::MemInfo;
 
 use crate::runtime::error::RuntimeError;
+pub use crate::runtime::memory::pressure::Pressure;
 
 pub const MEMINFO: &str = "/proc/meminfo";
 
+pub const PRESSURE: &str = "/proc/pressure/memory";
+
+pub const SWAPS: &str = "/proc/swaps";
+
 pub trait HostMemory: Send + Sync {
-    fn available(&self) -> impl Future<Output = Result<u64, RuntimeError>> + Send;
+    fn meminfo(&self) -> impl Future<Output = Result<MemInfo, RuntimeError>> + Send;
+
+    /// `None` where the kernel carries no pressure accounting.
+    fn pressure(&self) -> impl Future<Output = Result<Option<Pressure>, RuntimeError>> + Send;
+
+    fn swaps(&self) -> impl Future<Output = Result<Vec<String>, RuntimeError>> + Send;
 }
 
-/// `MemAvailable` out of `/proc/meminfo`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcMemory {
-    path: PathBuf,
+    meminfo: PathBuf,
+    pressure: PathBuf,
+    swaps: PathBuf,
 }
 
 impl ProcMemory {
     #[must_use]
     pub fn new() -> Self {
-        Self::at(MEMINFO)
+        Self {
+            meminfo: PathBuf::from(MEMINFO),
+            pressure: PathBuf::from(PRESSURE),
+            swaps: PathBuf::from(SWAPS),
+        }
     }
 
     #[must_use]
-    pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+    pub fn under(root: &Path) -> Self {
+        Self {
+            meminfo: root.join(MEMINFO.trim_start_matches('/')),
+            pressure: root.join(PRESSURE.trim_start_matches('/')),
+            swaps: root.join(SWAPS.trim_start_matches('/')),
+        }
     }
 }
 
@@ -35,15 +60,51 @@ impl Default for ProcMemory {
 }
 
 impl HostMemory for ProcMemory {
-    async fn available(&self) -> Result<u64, RuntimeError> {
-        let text = tokio::fs::read_to_string(&self.path)
+    async fn meminfo(&self) -> Result<MemInfo, RuntimeError> {
+        let text = tokio::fs::read_to_string(&self.meminfo)
             .await
             .map_err(|source| RuntimeError::Read {
-                path: self.path.clone(),
+                path: self.meminfo.clone(),
                 source,
             })?;
 
-        Ok(MemInfo::parse(&self.path, &text)?.available)
+        Ok(MemInfo::parse(&self.meminfo, &text)?)
+    }
+
+    async fn pressure(&self) -> Result<Option<Pressure>, RuntimeError> {
+        let text = match tokio::fs::read_to_string(&self.pressure).await {
+            Ok(text) => text,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(RuntimeError::Read {
+                    path: self.pressure.clone(),
+                    source,
+                });
+            }
+        };
+
+        Ok(Some(Pressure::parse(&self.pressure, &text)?))
+    }
+
+    async fn swaps(&self) -> Result<Vec<String>, RuntimeError> {
+        let text = match tokio::fs::read_to_string(&self.swaps).await {
+            Ok(text) => text,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(RuntimeError::Read {
+                    path: self.swaps.clone(),
+                    source,
+                });
+            }
+        };
+
+        Ok(text
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            // The header column is a word, not a path.
+            .filter(|device| device.starts_with('/'))
+            .map(str::to_owned)
+            .collect())
     }
 }
 
@@ -51,14 +112,33 @@ impl HostMemory for ProcMemory {
 mod tests {
     use std::fs;
 
+    use pazari_types::meminfo::KB;
     use tempfile::TempDir;
 
-    use std::path::Path;
-
-    use pazari_types::meminfo::KB;
-
     use super::*;
-    use crate::runtime::testing::{MEMINFO as FIXTURE, MockMemory};
+    use crate::runtime::testing::{
+        MEMINFO as MEMINFO_FIXTURE, MockMemory, PRESSURE as PRESSURE_FIXTURE,
+        SWAPS as SWAPS_FIXTURE, meminfo,
+    };
+
+    fn fixture(dir: &TempDir, absolute: &str, text: &str) {
+        let path = dir.path().join(absolute.trim_start_matches('/'));
+
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    fn proc() -> (TempDir, ProcMemory) {
+        let dir = TempDir::new().unwrap();
+
+        fixture(&dir, MEMINFO, MEMINFO_FIXTURE);
+        fixture(&dir, PRESSURE, PRESSURE_FIXTURE);
+        fixture(&dir, SWAPS, SWAPS_FIXTURE);
+
+        let memory = ProcMemory::under(dir.path());
+
+        (dir, memory)
+    }
 
     #[test]
     fn a_parse_failure_reaches_the_caller_naming_the_file() {
@@ -72,35 +152,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_adapter_reads_the_meminfo_it_is_pointed_at() {
+    async fn the_adapter_reads_the_proc_tree_it_is_pointed_at() {
+        let (_dir, memory) = proc();
+
+        let info = memory.meminfo().await.unwrap();
+
+        assert_eq!(info.available, 1_729_396 * KB);
+        assert_eq!(info.total, 2_096_756 * KB);
+        assert_eq!(info.swap_total, 1_048_572 * KB);
+        assert_eq!(info.swap_free, 1_048_572 * KB);
+
+        let pressure = memory.pressure().await.unwrap().expect("a pressure file");
+
+        assert!((pressure.some10 - 12.5).abs() < f32::EPSILON);
+
+        assert_eq!(
+            memory.swaps().await.unwrap(),
+            vec!["/dev/zram0".to_owned(), "/swap/swapfile".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_kernel_without_pressure_accounting_says_nothing_about_it() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("meminfo");
 
-        fs::write(&path, FIXTURE).unwrap();
+        fixture(&dir, MEMINFO, MEMINFO_FIXTURE);
 
-        let memory = ProcMemory::at(&path);
+        let memory = ProcMemory::under(dir.path());
 
-        assert_eq!(memory.available().await.unwrap(), 1_729_396 * KB);
+        assert_eq!(memory.pressure().await.unwrap(), None);
+        assert_eq!(memory.swaps().await.unwrap(), Vec::<String>::new());
     }
 
     #[tokio::test]
     async fn a_meminfo_that_is_not_there_is_an_error() {
         let dir = TempDir::new().unwrap();
 
-        let memory = ProcMemory::at(dir.path().join("meminfo"));
+        let memory = ProcMemory::under(dir.path());
 
-        assert!(memory.available().await.is_err());
+        assert!(memory.meminfo().await.is_err());
         assert_eq!(ProcMemory::new(), ProcMemory::default());
     }
 
     #[tokio::test]
     async fn a_mock_stands_in_for_the_host() {
-        let memory = MockMemory::new(8 << 30);
+        let memory = MockMemory::new(meminfo(8 << 30, 8 << 30, 0));
 
-        assert_eq!(memory.available().await.unwrap(), 8 << 30);
+        assert_eq!(memory.meminfo().await.unwrap().available, 8 << 30);
+        assert_eq!(memory.pressure().await.unwrap(), None);
+        assert_eq!(memory.swaps().await.unwrap(), Vec::<String>::new());
 
-        memory.set(1 << 30);
+        memory.set(meminfo(8 << 30, 1 << 30, 0));
 
-        assert_eq!(memory.available().await.unwrap(), 1 << 30);
+        assert_eq!(memory.meminfo().await.unwrap().available, 1 << 30);
     }
 }

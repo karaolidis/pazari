@@ -4,7 +4,8 @@ use crate::broker::session::Session;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Guest {
-    pub size: u64,
+    /// `None` until the guest's memory device has reported one.
+    pub size: Option<u64>,
 
     pub reconcile: Option<Reconcile>,
 

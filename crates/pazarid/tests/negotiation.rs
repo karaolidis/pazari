@@ -21,7 +21,7 @@ use pazari_transport::{
 use pazari_types::{Clock, Delay, Interval, Psi, Timestamp};
 use pazarid::{
     Action, Actuator, Broker, Driver, Event, Guest, GuestId, GuestSpec, Negotiated, Policy,
-    Registry, RuntimeError, Session as BrokerSession,
+    Registry, Revocation, RuntimeError, Session as BrokerSession,
     run::{Peers, Report},
 };
 use tempfile::TempDir;
@@ -51,6 +51,9 @@ const SHRUNK: u64 = 2304 * MIB;
 const REGROWN: u64 = 3072 * MIB;
 
 const RELEASE: u64 = 256 * MIB;
+
+const REVOKE_PSI: f64 = 20.0;
+const PRESSED: f32 = 25.0;
 
 const STEP: Duration = Duration::from_secs(1);
 
@@ -87,6 +90,18 @@ fn policy() -> Policy {
         shrink_revert: true,
         stale_after: count(3),
         reclaim_deadline: seconds(30),
+        grant_swap: false,
+        revocation: None,
+    }
+}
+
+fn revoking() -> Policy {
+    Policy {
+        revocation: Some(Revocation {
+            psi: Psi::try_new(REVOKE_PSI).expect("a fifth of the wall clock is a psi"),
+            step: bytes(RELEASE),
+        }),
+        ..policy()
     }
 }
 
@@ -251,6 +266,18 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
+        Self::start_with(policy()).await
+    }
+
+    async fn start_with(policy: Policy) -> Self {
+        let mut harness = Self::unseeded(policy);
+
+        harness.seed().await;
+
+        harness
+    }
+
+    fn unseeded(policy: Policy) -> Self {
         let dir = TempDir::new().expect("a temporary directory");
         let path = dir.path().join("host.sock");
 
@@ -304,14 +331,14 @@ impl Harness {
             clock,
         );
 
-        let mut harness = Self {
+        Self {
             _dir: dir,
             now: Timestamp::START,
             listener,
             peer,
             guest,
             accepted: 0,
-            broker: Broker::new(policy(), registry),
+            broker: Broker::new(policy, registry),
             peers,
             reports,
             driver,
@@ -327,17 +354,17 @@ impl Harness {
             taken: Vec::new(),
             emitted,
             heard: Vec::new(),
-        };
+        }
+    }
 
-        let seed = harness
+    async fn seed(&mut self) {
+        let seed = self
             .driver
             .seed()
             .await
             .expect("the device reports its size");
 
-        harness.host(seed).await;
-
-        harness
+        self.host(seed).await;
     }
 
     fn now(&mut self) -> Timestamp {
@@ -456,7 +483,31 @@ impl Harness {
     async fn available(&mut self, bytes: u64) {
         let now = self.now();
 
-        self.host(Event::HostAvailable { now, bytes }).await;
+        self.host(Event::HostAvailable {
+            now,
+            bytes,
+            swap_free: 0,
+            psi: None,
+        })
+        .await;
+    }
+
+    async fn pressured(&mut self, bytes: u64, psi: f32) {
+        let now = self.now();
+
+        self.host(Event::HostAvailable {
+            now,
+            bytes,
+            swap_free: 0,
+            psi: Some(psi),
+        })
+        .await;
+    }
+
+    async fn beat(&mut self) {
+        let now = self.now();
+
+        self.host(Event::Tick { now }).await;
     }
 
     fn tick(&mut self, workload_usage: u64) {
@@ -507,7 +558,7 @@ impl Harness {
     async fn resized(&mut self, mark: Mark, to: u64) {
         self.settle("the grant and the resize", |harness| {
             harness.granted(mark)
-                && harness.size() == to
+                && harness.size() == Some(to)
                 && harness.requested().is_none()
                 && !harness.plugging.is_empty()
         })
@@ -555,8 +606,8 @@ impl Harness {
         self.negotiated().and_then(|session| session.status)
     }
 
-    fn size(&self) -> u64 {
-        self.broker.guest(self.guest).map_or(0, |guest| guest.size)
+    fn size(&self) -> Option<u64> {
+        self.broker.guest(self.guest).and_then(|guest| guest.size)
     }
 
     fn requested(&self) -> Option<u64> {
@@ -663,7 +714,7 @@ async fn a_guest_that_says_hello_is_welcomed_with_its_ceiling() {
     );
 
     assert_eq!(harness.engine.ceiling(), Some(CEILING));
-    assert_eq!(harness.size(), BOOT);
+    assert_eq!(harness.size(), Some(BOOT));
     assert_eq!(
         harness.status().map(|status| status.plugged),
         Some(BOOT),
@@ -684,6 +735,43 @@ async fn a_guest_that_says_hello_is_welcomed_with_its_ceiling() {
         harness.status().map(|status| status.available),
         Some(BOOT - BUSY)
     );
+}
+
+#[tokio::test]
+async fn a_guest_whose_device_has_said_nothing_is_not_negotiated_with_until_it_does() {
+    let mut harness = Harness::unseeded(policy());
+
+    harness.handshake().await;
+    harness.available(PLENTY).await;
+
+    let mark = harness.mark();
+
+    harness.tick(BUSY);
+    harness.wake();
+
+    harness
+        .settle("the denial", |harness| harness.denied(mark))
+        .await;
+
+    assert_eq!(
+        harness.answers(mark, 1),
+        vec![HostMessage::Deny {
+            id: 1,
+            reason: DenyReason::Policy,
+            retry_after_ms: Some(Duration::from_millis(1)),
+        }]
+    );
+    assert_eq!(harness.actuated(mark), Vec::<u64>::new());
+    assert_eq!(harness.size(), None);
+
+    harness.seed().await;
+
+    let seeded = harness.mark();
+
+    harness.tick(BUSY);
+    harness.resized(seeded, GROWN).await;
+
+    assert_eq!(harness.size(), Some(GROWN));
 }
 
 #[tokio::test]
@@ -719,7 +807,7 @@ async fn a_throttled_guest_is_grown_and_recomputes_its_limits() {
 
     assert_eq!(
         harness.size(),
-        GROWN,
+        Some(GROWN),
         "the new size never came back to the host"
     );
     assert_eq!(harness.requested(), None, "the actuation never converged");
@@ -827,7 +915,7 @@ async fn an_idle_guest_offers_memory_back_and_is_shrunk() {
     );
 
     assert_eq!(harness.actuated(mark), vec![SHRUNK]);
-    assert_eq!(harness.size(), SHRUNK);
+    assert_eq!(harness.size(), Some(SHRUNK));
 
     assert_eq!(
         harness.acted(mark),
@@ -845,6 +933,60 @@ async fn an_idle_guest_offers_memory_back_and_is_shrunk() {
     assert_eq!(harness.engine.plugged(), SHRUNK);
     assert_eq!(harness.engine.max(), SHRUNK - SERVICE);
     assert_eq!(harness.engine.high(), SHRUNK - SERVICE - BURST);
+}
+
+#[tokio::test]
+async fn a_host_under_pressure_takes_memory_back() {
+    let mut harness = Harness::start_with(revoking()).await;
+
+    harness.handshake().await;
+    harness.available(PLENTY).await;
+    harness.grow(GROWN).await;
+
+    harness.tick(CALM);
+
+    let mark = harness.mark();
+
+    harness.pressured(PLENTY, PRESSED).await;
+    harness.beat().await;
+
+    harness.resized(mark, SHRUNK).await;
+
+    assert_eq!(
+        harness.sent(mark).first(),
+        Some(&HostMessage::ReclaimRequest {
+            id: 1,
+            desired: RELEASE,
+            deadline_ms: Duration::from_secs(30),
+        }),
+        "the host never asked for its memory back",
+    );
+    assert_eq!(
+        harness.emitted[mark.emitted..]
+            .iter()
+            .filter_map(|action| match action {
+                GuestAction::Send(message @ GuestMessage::ReclaimAck { .. }) =>
+                    Some(message.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![GuestMessage::ReclaimAck {
+            id: 1,
+            will_release: RELEASE,
+        }]
+    );
+
+    assert_eq!(
+        harness.asked(mark),
+        vec![GuestMessage::OfferRelease {
+            id: 2,
+            current: GROWN,
+            releasable: RELEASE,
+        }]
+    );
+    assert_eq!(harness.actuated(mark), vec![SHRUNK]);
+    assert_eq!(harness.size(), Some(SHRUNK));
+    assert_eq!(harness.engine.plugged(), SHRUNK);
 }
 
 #[tokio::test]
@@ -892,7 +1034,7 @@ async fn a_connection_that_drops_is_rebuilt_and_the_next_grow_still_works() {
         "the host did not answer the restarted id space exactly once"
     );
 
-    assert_eq!(harness.size(), REGROWN);
+    assert_eq!(harness.size(), Some(REGROWN));
     assert_eq!(harness.engine.plugged(), REGROWN);
     assert_eq!(harness.engine.max(), REGROWN - SERVICE);
     assert_eq!(harness.engine.high(), REGROWN - SERVICE - BURST);

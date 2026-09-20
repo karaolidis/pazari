@@ -7,7 +7,7 @@ use pazari_types::Timestamp;
 
 pub use crate::broker::arbiter::fcfs::Fcfs;
 use crate::broker::{
-    policy::Policy,
+    policy::{Policy, Revocation},
     registry::{GuestId, GuestSpec},
 };
 
@@ -38,6 +38,8 @@ pub struct GuestView<'a> {
 
     pub spec: &'a GuestSpec,
 
+    pub boot_mem: Option<u64>,
+
     pub size: u64,
 
     pub requested: Option<u64>,
@@ -62,10 +64,29 @@ impl GuestView<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct HostView {
     /// `MemAvailable`.
     pub available: Option<u64>,
+
+    /// `SwapFree`.
+    pub swap_free: Option<u64>,
+
+    /// The `some avg10` of `/proc/pressure/memory`, in percent.
+    pub psi: Option<f32>,
+}
+
+impl HostView {
+    #[must_use]
+    pub fn grantable(&self, grant_swap: bool) -> Option<u64> {
+        let available = self.available?;
+
+        if !grant_swap {
+            return Some(available);
+        }
+
+        Some(available.saturating_add(self.swap_free?))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -97,12 +118,18 @@ pub enum Decision {
 /// The replaceable half of the broker.
 pub trait Arbiter {
     fn decide(&mut self, request: &Request<'_>) -> Decision;
+
+    fn revoke(
+        &mut self,
+        candidates: &[GuestView<'_>],
+        revocation: Revocation,
+    ) -> Option<(GuestId, u64)>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::testing::{MIB, guest, view};
+    use crate::broker::testing::{GIB, MIB, guest, view};
 
     #[test]
     fn an_ask_names_the_size_it_is_after() {
@@ -127,5 +154,40 @@ mod tests {
         assert_eq!(idle.outstanding(), 0);
         assert_eq!(growing.outstanding(), 1024 * MIB);
         assert_eq!(shrinking.outstanding(), 0);
+    }
+
+    #[test]
+    fn a_host_that_grants_no_swap_gives_away_what_it_has_and_nothing_more() {
+        let host = HostView {
+            available: Some(4 * GIB),
+            swap_free: Some(8 * GIB),
+            psi: None,
+        };
+
+        assert_eq!(host.grantable(false), Some(4 * GIB));
+        assert_eq!(HostView::default().grantable(false), None);
+    }
+
+    #[test]
+    fn a_host_that_grants_swap_counts_it_at_face_value() {
+        let host = HostView {
+            available: Some(4 * GIB),
+            swap_free: Some(8 * GIB),
+            psi: None,
+        };
+
+        assert_eq!(host.grantable(true), Some(12 * GIB));
+    }
+
+    #[test]
+    fn a_host_granting_swap_it_has_not_read_gives_nothing_away() {
+        let host = HostView {
+            available: Some(4 * GIB),
+            swap_free: None,
+            psi: None,
+        };
+
+        assert_eq!(host.grantable(true), None);
+        assert_eq!(host.grantable(false), Some(4 * GIB));
     }
 }

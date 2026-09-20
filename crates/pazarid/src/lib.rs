@@ -9,9 +9,11 @@ pub use crate::{
     broker::{
         Action, Arbiter, Ask, Broker, Decision, Event, Fcfs, Guest, GuestId, GuestSpec, GuestView,
         HostView, Negotiated, Phase, Policy, Reclaim, Reconcile, Registry, RegistryError, Request,
-        Session,
+        Revocation, Session,
     },
     config::{Config, ConfigError, Qmp, Transport},
-    run::{Peers, Report, RunError},
-    runtime::{Actuator, Driver, HostMemory, Mode, ProcMemory, QmpActuator, RuntimeError},
+    run::{Connect, Demand, Peers, Report, RunError, Supervisor},
+    runtime::{
+        Actuator, Driver, HostMemory, Mode, Pressure, ProcMemory, QmpActuator, RuntimeError,
+    },
 };

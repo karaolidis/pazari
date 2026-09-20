@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-/// A reconnect delay that doubles up to a cap.
+/// A retry delay that doubles up to a cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Backoff {
     min: Duration,
@@ -53,15 +53,25 @@ mod tests {
     }
 
     #[test]
-    fn every_delay_stays_inside_half_its_step_and_the_step() {
-        let mut backoff = Backoff::new(MIN, MAX);
+    fn every_delay_is_twice_the_one_before_it() {
+        let mut backoff = Backoff::new(MIN, Duration::from_secs(4));
 
-        for _ in 0..64 {
-            let delay = backoff.delay();
-
-            assert!(delay >= MIN / 2, "{delay:?} is under half the floor");
-            assert!(delay <= MAX, "{delay:?} is over the cap");
-        }
+        assert_eq!(
+            [
+                backoff.delay(),
+                backoff.delay(),
+                backoff.delay(),
+                backoff.delay(),
+                backoff.delay(),
+            ],
+            [
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(4),
+            ]
+        );
     }
 
     #[test]

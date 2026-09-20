@@ -12,7 +12,7 @@ pub use crate::{
         Action, BootInfo, Engine, EngineConfig, EngineError, Event, ExhaustionMode, IdleThreshold,
         Mode, Snapshot,
     },
-    run::{Notifier, RunError},
+    run::RunError,
     runtime::{
         AnyCgroup, Applier, Backend, Cgroup, HotplugListener, Preflight, RawCgroup, ReclaimHandle,
         Reclaimer, Report, RuntimeConfig, RuntimeError, Severity, Snapshots, SystemdCgroup,

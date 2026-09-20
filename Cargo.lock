@@ -877,11 +877,11 @@ dependencies = [
  "doku",
  "humantime-serde",
  "pazari-proto",
+ "pazari-systemd",
  "pazari-transport",
  "pazari-types",
  "proptest",
  "rustix",
- "sd-notify",
  "serde",
  "serde-inline-default",
  "tempfile",
@@ -907,6 +907,15 @@ dependencies = [
 [[package]]
 name = "pazari-stress"
 version = "0.1.0"
+
+[[package]]
+name = "pazari-systemd"
+version = "0.1.0"
+dependencies = [
+ "sd-notify",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "pazari-transport"

@@ -1,9 +1,9 @@
 pub mod error;
-pub mod notify;
 
 use std::sync::Arc;
 
 use pazari_proto::GuestMessage;
+use pazari_systemd::Notifier;
 use pazari_types::Clock;
 use tokio::{
     signal::unix::{SignalKind, signal},
@@ -11,7 +11,7 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-pub use crate::run::{error::RunError, notify::Notifier};
+pub use crate::run::error::RunError;
 use crate::{
     config::Config,
     engine::{BootInfo, Engine, Event},

@@ -4,7 +4,6 @@ use sd_notify::NotifyState;
 use tokio::time::{self, MissedTickBehavior};
 use tracing::warn;
 
-/// Talks to the service manager.
 #[derive(Debug)]
 pub struct Notifier {
     watchdog: Option<time::Interval>,
@@ -26,15 +25,21 @@ impl Notifier {
     }
 
     pub fn ready(&self) {
-        tell(&[NotifyState::Ready]);
+        if let Err(error) = sd_notify::notify(&[NotifyState::Ready]) {
+            warn!(%error, "failed to tell the service manager");
+        }
     }
 
     pub fn stopping(&self) {
-        tell(&[NotifyState::Stopping]);
+        if let Err(error) = sd_notify::notify(&[NotifyState::Stopping]) {
+            warn!(%error, "failed to tell the service manager");
+        }
     }
 
     pub fn ping(&self) {
-        tell(&[NotifyState::Watchdog]);
+        if let Err(error) = sd_notify::notify(&[NotifyState::Watchdog]) {
+            warn!(%error, "failed to tell the service manager");
+        }
     }
 
     pub async fn due(&mut self) {
@@ -44,12 +49,6 @@ impl Notifier {
             }
             None => future::pending::<()>().await,
         }
-    }
-}
-
-fn tell(state: &[NotifyState]) {
-    if let Err(error) = sd_notify::notify(state) {
-        warn!(%error, "failed to tell the service manager");
     }
 }
 

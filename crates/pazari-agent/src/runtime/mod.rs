@@ -13,9 +13,7 @@ pub(crate) mod testing;
 
 pub use crate::runtime::{
     apply::Applier,
-    cgroup::{
-        AnyCgroup, Cgroup, Limit, MemoryEvents, Pressure, RawCgroup, Reclaimed, SystemdCgroup,
-    },
+    cgroup::{AnyCgroup, Cgroup, Limit, MemoryEvents, RawCgroup, Reclaimed, SystemdCgroup},
     config::{Backend, Paths, RuntimeConfig},
     error::RuntimeError,
     preflight::{Check, Preflight, Report, Severity},

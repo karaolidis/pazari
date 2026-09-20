@@ -11,5 +11,5 @@ pub use crate::runtime::{
     actuator::{Actuator, Mode, QmpActuator},
     driver::Driver,
     error::RuntimeError,
-    memory::{HostMemory, Pressure, ProcMemory},
+    memory::{HostMemory, ProcMemory},
 };

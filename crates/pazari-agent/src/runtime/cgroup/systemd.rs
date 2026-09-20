@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use pazari_types::Swappiness;
+use pazari_types::{Pressure, Swappiness};
 use zbus::{Connection, proxy, zvariant::Value};
 
 use crate::runtime::{
     cgroup::{
         Cgroup, Reclaimed,
-        parse::{Limit, MemoryEvents, Pressure},
+        parse::{Limit, MemoryEvents},
         raw::RawCgroup,
     },
     error::RuntimeError,

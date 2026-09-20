@@ -1,15 +1,12 @@
-mod pressure;
-
 use std::{
     future::Future,
     io,
     path::{Path, PathBuf},
 };
 
-use pazari_types::MemInfo;
+use pazari_types::{MemInfo, Pressure};
 
 use crate::runtime::error::RuntimeError;
-pub use crate::runtime::memory::pressure::Pressure;
 
 pub const MEMINFO: &str = "/proc/meminfo";
 

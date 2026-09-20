@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use thiserror::Error;
+use crate::error::KernelFileError;
 
 /// Bytes in the kilobyte `/proc/meminfo` counts in.
 pub const KB: u64 = 1024;
@@ -22,7 +22,7 @@ pub struct MemInfo {
 }
 
 impl MemInfo {
-    pub fn parse(path: &Path, text: &str) -> Result<Self, MemInfoError> {
+    pub fn parse(path: &Path, text: &str) -> Result<Self, KernelFileError> {
         let mut total = None;
         let mut available = None;
         let mut swap_total = None;
@@ -45,7 +45,7 @@ impl MemInfo {
                 .split_whitespace()
                 .next()
                 .and_then(|value| value.parse().ok())
-                .ok_or_else(|| MemInfoError::Malformed {
+                .ok_or_else(|| KernelFileError::Malformed {
                     path: path.to_path_buf(),
                     value: line.trim().to_owned(),
                     expected: "a count of kB",
@@ -55,11 +55,11 @@ impl MemInfo {
         }
 
         Ok(Self {
-            total: total.ok_or_else(|| MemInfoError::Absent {
+            total: total.ok_or_else(|| KernelFileError::Absent {
                 path: path.to_path_buf(),
                 key: "MemTotal",
             })?,
-            available: available.ok_or_else(|| MemInfoError::Absent {
+            available: available.ok_or_else(|| KernelFileError::Absent {
                 path: path.to_path_buf(),
                 key: "MemAvailable",
             })?,
@@ -67,19 +67,6 @@ impl MemInfo {
             swap_free: swap_free.unwrap_or(0),
         })
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum MemInfoError {
-    #[error("{} holds {value:?}, which is not {expected}", .path.display())]
-    Malformed {
-        path: PathBuf,
-        value: String,
-        expected: &'static str,
-    },
-
-    #[error("{} carries no {key} line", .path.display())]
-    Absent { path: PathBuf, key: &'static str },
 }
 
 #[cfg(test)]

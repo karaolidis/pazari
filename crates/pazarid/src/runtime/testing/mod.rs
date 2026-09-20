@@ -8,13 +8,13 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use pazari_types::MemInfo;
+use pazari_types::{MemInfo, Pressure};
 use tokio::task;
 
 use crate::runtime::{
     actuator::Actuator,
     error::RuntimeError,
-    memory::{self, HostMemory, Pressure},
+    memory::{self, HostMemory},
 };
 
 pub const MEMINFO: &str = "MemTotal:        2096756 kB\n\

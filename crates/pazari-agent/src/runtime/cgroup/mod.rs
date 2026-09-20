@@ -4,10 +4,10 @@ pub mod systemd;
 
 use std::future::Future;
 
-use pazari_types::Swappiness;
+use pazari_types::{Pressure, Swappiness};
 
 pub use crate::runtime::cgroup::{
-    parse::{Limit, MemoryEvents, Pressure},
+    parse::{Limit, MemoryEvents},
     raw::RawCgroup,
     systemd::SystemdCgroup,
 };

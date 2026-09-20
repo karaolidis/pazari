@@ -48,13 +48,6 @@ pub struct MemoryEvents {
     pub max: u64,
 }
 
-/// The ten-second pressure averages in percent.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Pressure {
-    pub some10: f32,
-    pub full10: f32,
-}
-
 pub fn events(path: &Path, text: &str) -> Result<MemoryEvents, RuntimeError> {
     let mut high = None;
     let mut max = None;
@@ -87,38 +80,6 @@ pub fn events(path: &Path, text: &str) -> Result<MemoryEvents, RuntimeError> {
     })
 }
 
-pub fn pressure(path: &Path, text: &str) -> Result<Pressure, RuntimeError> {
-    let mut some10 = None;
-    let mut full10 = None;
-
-    for line in text.lines() {
-        let mut fields = line.split_whitespace();
-
-        let slot = match fields.next() {
-            Some("some") => &mut some10,
-            Some("full") => &mut full10,
-            _ => continue,
-        };
-
-        let Some(average) = fields.find_map(|field| field.strip_prefix("avg10=")) else {
-            continue;
-        };
-
-        *slot = Some(percent(path, average)?);
-    }
-
-    Ok(Pressure {
-        some10: some10.ok_or_else(|| RuntimeError::Absent {
-            path: path.to_path_buf(),
-            key: "some avg10",
-        })?,
-        full10: full10.ok_or_else(|| RuntimeError::Absent {
-            path: path.to_path_buf(),
-            key: "full avg10",
-        })?,
-    })
-}
-
 pub fn count(path: &Path, text: &str) -> Result<u64, RuntimeError> {
     number(path, text.trim(), "a decimal byte count")
 }
@@ -145,30 +106,12 @@ fn number(path: &Path, text: &str, expected: &'static str) -> Result<u64, Runtim
     })
 }
 
-fn percent(path: &Path, text: &str) -> Result<f32, RuntimeError> {
-    let value: f32 = text.parse().map_err(|_| RuntimeError::Malformed {
-        path: path.to_path_buf(),
-        value: text.to_owned(),
-        expected: "a pressure percentage",
-    })?;
-
-    if !value.is_finite() || value < 0.0 {
-        return Err(RuntimeError::Malformed {
-            path: path.to_path_buf(),
-            value: text.to_owned(),
-            expected: "a pressure percentage",
-        });
-    }
-
-    Ok(value)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::runtime::testing::{EVENTS, PRESSURE};
+    use crate::runtime::testing::EVENTS;
 
     fn path() -> PathBuf {
         PathBuf::from("/sys/fs/cgroup/workload/memory.events")
@@ -193,25 +136,6 @@ mod tests {
 
         assert!(events(&path(), "low 0\nhigh 1\n").is_err());
         assert!(events(&path(), "high wat\nmax 0\n").is_err());
-    }
-
-    #[test]
-    fn memory_pressure_yields_both_ten_second_averages() {
-        let pressure = pressure(&path(), PRESSURE).expect("a real memory.pressure");
-
-        assert!((pressure.some10 - 12.5).abs() < f32::EPSILON);
-        assert!((pressure.full10 - 0.25).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn a_memory_pressure_missing_a_line_is_rejected() {
-        let error = pressure(&path(), "some avg10=1.00 avg60=0.00 avg300=0.00 total=1\n")
-            .expect_err("no full line");
-
-        assert_eq!(
-            error.to_string(),
-            "/sys/fs/cgroup/workload/memory.events carries no full avg10 line"
-        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::{
     sync::Mutex,
 };
 
-use pazari_types::Swappiness;
+use pazari_types::{Pressure, Swappiness};
 use tempfile::TempDir;
 use tokio::task;
 
@@ -16,7 +16,7 @@ use crate::runtime::{
     cgroup::{
         Cgroup, Limit, MEMORY_CURRENT, MEMORY_EVENTS, MEMORY_HIGH, MEMORY_MAX, MEMORY_OOM_GROUP,
         MEMORY_PRESSURE, MEMORY_RECLAIM, MEMORY_SWAP_CURRENT, MEMORY_SWAP_MAX, MemoryEvents,
-        Pressure, Reclaimed,
+        Reclaimed,
     },
     config::{Paths, RuntimeConfig},
     error::RuntimeError,

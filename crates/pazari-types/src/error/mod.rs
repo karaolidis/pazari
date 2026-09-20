@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, path::PathBuf};
 
 use thiserror::Error;
 
@@ -21,9 +21,24 @@ impl RangeError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
+pub enum KernelFileError {
+    #[error("{} holds {value:?}, which is not {expected}", .path.display())]
+    Malformed {
+        path: PathBuf,
+        value: String,
+        expected: &'static str,
+    },
+
+    #[error("{} carries no {key} line", .path.display())]
+    Absent { path: PathBuf, key: &'static str },
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{Fraction, RangeError, Swappiness};
+    use std::path::PathBuf;
+
+    use crate::{Fraction, KernelFileError, RangeError, Swappiness};
 
     #[test]
     fn a_rejection_names_what_was_rejected() {
@@ -51,6 +66,29 @@ mod tests {
                 value: "2.0".to_owned(),
                 bounds: "(0, 1]",
             }
+        );
+    }
+
+    #[test]
+    fn a_kernel_file_names_itself_and_what_it_was_missing() {
+        let path = PathBuf::from("/proc/pressure/memory");
+
+        assert_eq!(
+            KernelFileError::Absent {
+                path: path.clone(),
+                key: "full avg10",
+            }
+            .to_string(),
+            "/proc/pressure/memory carries no full avg10 line"
+        );
+        assert_eq!(
+            KernelFileError::Malformed {
+                path,
+                value: "wat".to_owned(),
+                expected: "a pressure percentage",
+            }
+            .to_string(),
+            "/proc/pressure/memory holds \"wat\", which is not a pressure percentage"
         );
     }
 }

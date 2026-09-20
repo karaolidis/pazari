@@ -1,6 +1,6 @@
 use std::{io, path::PathBuf};
 
-use pazari_types::MemInfoError;
+use pazari_types::KernelFileError;
 use thiserror::Error;
 
 use crate::runtime::qmp::QmpError;
@@ -21,7 +21,7 @@ pub enum RuntimeError {
     Absent { path: PathBuf, key: &'static str },
 
     #[error(transparent)]
-    MemInfo(#[from] MemInfoError),
+    Kernel(#[from] KernelFileError),
 
     #[error("the memory device refused a size of {bytes}: {reason}")]
     Device { bytes: u64, reason: String },

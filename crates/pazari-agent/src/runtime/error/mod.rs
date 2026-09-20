@@ -1,6 +1,6 @@
 use std::{io, path::PathBuf};
 
-use pazari_types::MemInfoError;
+use pazari_types::KernelFileError;
 use thiserror::Error;
 use tokio::task::JoinError;
 
@@ -52,7 +52,7 @@ pub enum RuntimeError {
     ReclaimLost { source: JoinError },
 
     #[error(transparent)]
-    MemInfo(#[from] MemInfoError),
+    Kernel(#[from] KernelFileError),
 }
 
 #[cfg(test)]

@@ -13,7 +13,5 @@ pub use crate::{
     },
     config::{Config, ConfigError, Qmp, Transport},
     run::{Connect, Demand, Peers, Report, RunError, Supervisor},
-    runtime::{
-        Actuator, Driver, HostMemory, Mode, Pressure, ProcMemory, QmpActuator, RuntimeError,
-    },
+    runtime::{Actuator, Driver, HostMemory, Mode, ProcMemory, QmpActuator, RuntimeError},
 };

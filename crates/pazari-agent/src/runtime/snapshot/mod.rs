@@ -75,11 +75,12 @@ impl<C: Cgroup> Ticker<C> {
 mod tests {
     use std::{fs, time::Duration};
 
+    use pazari_types::Pressure;
     use tempfile::TempDir;
 
     use super::*;
     use crate::runtime::{
-        cgroup::{MemoryEvents, Pressure},
+        cgroup::MemoryEvents,
         config::Paths,
         testing::{FakeCgroup, MEMINFO, Reads},
     };

@@ -3,14 +3,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use pazari_types::Swappiness;
+use pazari_types::{Pressure, Swappiness};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 
 use crate::runtime::{
     cgroup::{
         Cgroup, MEMORY_CURRENT, MEMORY_EVENTS, MEMORY_HIGH, MEMORY_MAX, MEMORY_OOM_GROUP,
         MEMORY_PRESSURE, MEMORY_RECLAIM, MEMORY_SWAP_CURRENT, Reclaimed,
-        parse::{self, Limit, MemoryEvents, Pressure},
+        parse::{self, Limit, MemoryEvents},
     },
     error::RuntimeError,
 };
@@ -112,7 +112,7 @@ impl Cgroup for RawCgroup {
     async fn pressure(&self) -> Result<Pressure, RuntimeError> {
         let text = self.read(MEMORY_PRESSURE).await?;
 
-        parse::pressure(&self.path.join(MEMORY_PRESSURE), &text)
+        Ok(Pressure::parse(&self.path.join(MEMORY_PRESSURE), &text)?)
     }
 
     async fn reclaim(

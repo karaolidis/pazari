@@ -1,6 +1,8 @@
 //! pazari host daemon
 
 pub mod broker;
+pub mod config;
+pub mod run;
 pub mod runtime;
 
 pub use crate::{
@@ -9,5 +11,7 @@ pub use crate::{
         HostView, Negotiated, Phase, Policy, Reclaim, Reconcile, Registry, RegistryError, Request,
         Session,
     },
+    config::{Config, ConfigError, Qmp, Transport},
+    run::{Peers, Report, RunError},
     runtime::{Actuator, Driver, HostMemory, Mode, ProcMemory, QmpActuator, RuntimeError},
 };

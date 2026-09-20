@@ -1,0 +1,71 @@
+# How often the daemon reads the host's memory and updates what it knows
+# about its guests.
+tick_interval = "1s"
+
+[policy]
+# How often a guest must send `status`.
+welcome_status_interval = "1s"
+
+# Memory the host keeps for itself. No grow is granted that would take
+# `MemAvailable` under it. Set me.
+host_floor = "2GiB"
+
+# How long a guest waits after a grant before another one.
+grant_min_interval = "5s"
+
+# How long an actuation is given to apply before the host stops waiting
+# for it.
+reconcile_deadline = "30s"
+
+# Whether a shrink that did not apply is taken back to the size the guest
+# still has.
+shrink_revert = true
+
+# Missed `status` intervals before a guest is marked stale.
+stale_after = 3
+
+# How long a guest has to answer a `reclaim_request`.
+reclaim_deadline = "30s"
+
+# The guests the daemon answers to, one table each.
+[guests.example]
+# The most memory this guest may hold. Set me.
+ceiling = "8GiB"
+
+# How this guest reaches the daemon.
+[guests.example.transport]
+# Possible variants:
+# - `AF_VSOCK`.
+#     kind = "vsock"
+#     # The context id the guest dials from. Set me.
+#     cid = 3
+#
+#     # The port the guest dials.
+#     port = 4650
+# - An `AF_UNIX` socket.
+#     kind = "unix"
+#     # The socket this guest dials. Set me.
+#     path = "/run/pazari/example.sock"
+kind = "vsock"
+cid = 3
+
+[guests.example.qmp]
+# The QMP socket of the qemu process running the guest. Set me.
+path = "/run/pazari/example.qmp"
+
+# The `id=` of the guest's virtio-mem device. Set me.
+device = "vm0"
+
+# How long one QMP command is given to finish.
+deadline = "5s"
+
+# How the daemon uses the QMP socket.
+[guests.example.qmp.mode]
+# Possible variants:
+# - One connection held open.
+#     kind = "held"
+# - A fresh connection per command, for a socket shared with other tools.
+#     kind = "per_operation"
+#     # How often the size is resampled while a resize is being processed.
+#     poll = "1s"
+kind = "held"

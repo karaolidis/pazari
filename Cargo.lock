@@ -941,16 +941,26 @@ dependencies = [
 name = "pazarid"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "bytesize",
+ "clap",
+ "doku",
+ "humantime-serde",
+ "pazari-agent",
  "pazari-proto",
+ "pazari-systemd",
  "pazari-transport",
  "pazari-types",
  "proptest",
  "serde",
+ "serde-inline-default",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

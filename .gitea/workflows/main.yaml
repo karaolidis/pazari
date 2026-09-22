@@ -58,3 +58,4 @@ jobs:
           files: |
             target/release/pazarid
             target/release/pazari-agent
+            target/release/pazari-stress

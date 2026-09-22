@@ -176,3 +176,155 @@ appetite is charged to that guest.
 working set, the daemon, the storage stack, and whatever else shares the host.
 It is what the arbiter refuses to grant past, and it is counted into the startup
 warning.
+
+### NixOS modules
+
+The flake carries an overlay and two modules, `nixosModules.host` for the
+daemon and `nixosModules.guest` for the agent.
+
+```nix
+{
+  nixpkgs.overlays = [ inputs.pazari.overlays.default ];
+  imports = [ inputs.pazari.nixosModules.host ];
+}
+```
+
+Both take the schema above as a freeform `settings` attribute set and render it.
+
+`services.pazarid` runs the daemon as the `pazarid` user in the group named by
+`services.pazarid.group`, which defaults to `kvm` because that is the group the
+hypervisor's QMP sockets belong to.
+
+A vsock listener wants the host's module loaded:
+
+```nix
+boot.kernelModules = [ "vhost_vsock" ];
+```
+
+`services.pazari-agent` declares the slice it brakes, keeps systemd-oomd off it,
+boots the guest with the kernel parameters preflight asks for, and runs
+`pazari-agent panic-open` from `ExecStopPost`.
+
+### Giving a guest a device to grow into
+
+```nix
+microvm.vms.example.config.microvm = {
+  mem = 2 * 1024;
+  hotplugMem = 30 * 1024;
+  hotpluggedMem = 0;
+
+  qemu.machine = "q35";
+};
+```
+
+`hotplugMem` is the device's whole capacity and `hotpluggedMem` what it starts
+plugged with.
+
+QEMU's `microvm` machine model carries no virtio-mem, so the model has to be
+`q35`; microvm.nix gives the device the id `vm0`.
+
+### A QMP socket of the daemon's own
+
+microvm.nix drives its own QMP socket, and the daemon holds a connection open.
+Give it a second socket rather than have the two of them share one:
+
+```nix
+{
+  microvm.vms.example.config.microvm.qemu.extraArgs = [
+    "-qmp"
+    "unix:/var/lib/microvms/example/qmp-pazari.sock,server=on,wait=off"
+  ];
+
+  systemd.services."microvm@example".serviceConfig.UMask = "0007";
+}
+```
+
+### Declaring a guest to the daemon
+
+```nix
+services.pazarid = {
+  enable = true;
+
+  settings = {
+    policy.host_floor = "4GiB";
+
+    guests.example = {
+      ceiling = "32GiB";
+
+      transport = {
+        kind = "vsock";
+        cid = 3;
+      };
+
+      qmp = {
+        path = "/var/lib/microvms/example/qmp-pazari.sock";
+        device = "vm0";
+      };
+    };
+  };
+};
+```
+
+The guest's half:
+
+```nix
+services.pazari-agent = {
+  enable = true;
+
+  settings = {
+    engine = {
+      service_reserve = "512MiB";
+      burst_reserve = "256MiB";
+      open_guard = "64MiB";
+    };
+
+    runtime.boot_mem = "2GiB";
+
+    transport.kind = "vsock";
+  };
+};
+```
+
+### Putting the workload in the slice
+
+Memory the agent cannot see is memory it cannot negotiate for. Every workload
+the guest exists to run belongs in the slice, and what puts it there is whatever
+creates its cgroup - which is not always the unit you declared.
+
+A quadlet container is its unit. Quadlet runs podman at `CgroupsMode=split`,
+which puts the container's payload in a sub-cgroup of the unit's own, so the
+unit's slice is the container's slice:
+
+```nix
+virtualisation.quadlet.containers.example.serviceConfig.Slice = "workload.slice";
+```
+
+A container that some daemon starts on the workload's behalf is not. Where the
+workload holds a docker or podman socket and asks for containers through it -
+CI runners are the usual case - the daemon on the other end creates them under
+its own default parent.
+
+Docker on a cgroup v2 host drives systemd and parents its scopes at
+`system.slice`, so those containers land as `system.slice/docker-<id>.scope`:
+charged to the guest's own services, watched by whatever manages `system.slice`,
+and invisible to the agent. Point the daemon at the slice instead:
+
+```nix
+virtualisation.docker.daemon.settings.cgroup-parent = "workload.slice";
+```
+
+The daemon itself stays out of the slice. It is a service of the guest rather
+than the workload, and what it holds belongs in `service_reserve`.
+
+### systemd-oomd and the brake
+
+The module sets, on the slice:
+
+```
+ManagedOOMMemoryPressure=auto
+ManagedOOMSwap=auto
+ManagedOOMPreference=omit
+```
+
+A braked workload sits at `memory.high` and stalls there on purpose, which is
+indistinguishable from a workload in trouble to anything watching pressure.

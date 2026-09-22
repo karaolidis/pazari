@@ -38,6 +38,16 @@
         {
           pazari = pkgs.callPackage ./nix/package.nix { };
         };
+
+      nixosModules = {
+        guest = ./nix/modules/guest.nix;
+        host = ./nix/modules/host.nix;
+
+        default.imports = [
+          inputs.self.nixosModules.guest
+          inputs.self.nixosModules.host
+        ];
+      };
     }
     // (
       let
@@ -88,8 +98,15 @@
             ) inputs.self.devShells.${system};
 
             formatter.formatting = treefmt.config.build.check inputs.self;
+
+            modules = import ./nix/checks/modules.nix {
+              inherit pkgs;
+              inherit (pkgs) lib;
+              inherit (inputs.nixpkgs.lib) nixosSystem;
+              inherit (inputs.self) nixosModules;
+            };
           in
-          packages // devShells // formatter;
+          packages // devShells // formatter // modules;
       }
     );
 }

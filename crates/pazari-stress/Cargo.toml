@@ -9,3 +9,23 @@ authors = [
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "pazari-stress"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+bytesize = "2.7.0"
+clap = { version = "4.6.7", features = ["derive"] }
+humantime = "2.4.0"
+libc = "0.2.189"
+pazari-types = { path = "../pazari-types" }
+rustix = { version = "1.1.5", features = ["mm", "param"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_with = { version = "3.23.0", default-features = false, features = ["macros", "std"] }
+signal-hook = { version = "0.4.4", default-features = false }
+thiserror = "2.0.20"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

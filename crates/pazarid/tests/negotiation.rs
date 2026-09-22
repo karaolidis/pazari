@@ -9,8 +9,11 @@ use std::{
 };
 
 use pazari_agent::{
-    Action as GuestAction, BootInfo, Engine, EngineConfig, Event as GuestEvent, ExhaustionMode,
-    Geometry, IdleThreshold, Mode as GuestMode, Outbound, Session, SessionConfig, Snapshot,
+    engine::{
+        Action as GuestAction, BootInfo, Engine, EngineConfig, Event as GuestEvent, ExhaustionMode,
+        IdleThreshold, Mode as GuestMode, Snapshot,
+    },
+    session::{Geometry, Outbound, Session, SessionConfig},
 };
 use pazari_proto::{
     DenyReason, GrantReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status, Urgency,
@@ -20,9 +23,12 @@ use pazari_transport::{
 };
 use pazari_types::{Clock, Delay, Interval, Psi, Timestamp};
 use pazarid::{
-    Action, Actuator, Broker, Driver, Event, Guest, GuestId, GuestSpec, Negotiated, Policy,
-    Registry, Revocation, RuntimeError, Session as BrokerSession,
+    broker::{
+        Action, Broker, Event, Guest, GuestId, GuestSpec, Negotiated, Policy, Registry, Revocation,
+        Session as BrokerSession,
+    },
     run::{Peers, Report},
+    runtime::{Actuator, Driver, RuntimeError},
 };
 use tempfile::TempDir;
 use tokio::{

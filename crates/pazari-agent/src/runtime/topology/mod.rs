@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use pazari_types::MemInfo;
+use pazari_types::{KernelFileError, MemInfo};
 
 pub use crate::runtime::topology::uevent::{Hotplug, HotplugListener};
 use crate::runtime::{config::Paths, error::RuntimeError};
@@ -49,7 +49,7 @@ impl Topology {
                 source,
             })?;
 
-        parse_block_size(&self.block_size, &text)
+        Ok(parse_block_size(&self.block_size, &text)?)
     }
 }
 
@@ -59,7 +59,7 @@ impl Default for Topology {
     }
 }
 
-fn parse_block_size(path: &Path, text: &str) -> Result<NonZeroU64, RuntimeError> {
+fn parse_block_size(path: &Path, text: &str) -> Result<NonZeroU64, KernelFileError> {
     const EXPECTED: &str = "a positive hexadecimal byte count";
 
     let text = text.trim();
@@ -67,7 +67,7 @@ fn parse_block_size(path: &Path, text: &str) -> Result<NonZeroU64, RuntimeError>
     u64::from_str_radix(text, 16)
         .ok()
         .and_then(NonZeroU64::new)
-        .ok_or_else(|| RuntimeError::Malformed {
+        .ok_or_else(|| KernelFileError::Malformed {
             path: path.to_path_buf(),
             value: text.to_owned(),
             expected: EXPECTED,
@@ -80,7 +80,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use pazari_types::meminfo::KB;
+    use pazari_types::kernel::meminfo::KB;
 
     use super::*;
     use crate::runtime::testing::{BLOCK_SIZE, MEMINFO};

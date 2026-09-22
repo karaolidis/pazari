@@ -1,12 +1,10 @@
-use std::time::Duration;
-
-use pazari_proto::{DenyReason, GuestMessage};
+use pazari_proto::GuestMessage;
 use pazari_types::Timestamp;
 
 use crate::engine::{
     context::Context,
     limits::Band,
-    phase::{Phase, State, growing::Growing, releasing::Releasing},
+    phase::{Phase, State, releasing::Releasing},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,44 +36,21 @@ impl Steady {
 }
 
 impl State for Steady {
-    fn advance(self, _ctx: &mut Context, _now: Timestamp) -> Phase {
+    fn stay(self) -> Phase {
         Phase::Steady(self)
     }
 
-    fn brake(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        Growing::start(ctx, now, None)
-    }
-
-    fn on_plugged(self, ctx: &mut Context, _now: Timestamp, changed: bool) -> Phase {
-        if changed {
-            ctx.reapply_limits();
-        }
-
-        Phase::Steady(self)
-    }
-
-    fn on_grant(self, _ctx: &mut Context, _now: Timestamp, _id: u64, _target: u64) -> Phase {
-        Phase::Steady(self)
-    }
-
-    fn on_deny(
-        self,
-        _ctx: &mut Context,
-        _now: Timestamp,
-        _id: u64,
-        _reason: DenyReason,
-        _retry_after: Option<Duration>,
-    ) -> Phase {
-        Phase::Steady(self)
+    fn busy(self) -> &'static str {
+        "no headroom to release without inducing pressure"
     }
 
     fn on_reclaim_request(self, ctx: &mut Context, id: u64, desired: u64) -> Phase {
         let will_release = ctx.release_budget(desired);
 
         if will_release == 0 {
-            ctx.nak(id, "no headroom to release without inducing pressure");
+            ctx.nak(id, self.busy());
 
-            return Phase::Steady(self);
+            return self.stay();
         }
 
         ctx.send(GuestMessage::ReclaimAck { id, will_release });
@@ -83,44 +58,24 @@ impl State for Steady {
         Releasing::begin(ctx, will_release)
     }
 
-    fn on_reclaim_finished(self, _ctx: &mut Context, _now: Timestamp, _reclaimed: u64) -> Phase {
-        Phase::Steady(self)
-    }
-
     fn on_interval(self, ctx: &mut Context, now: Timestamp, throttled: bool) -> Phase {
         if !ctx.quiet_streak(throttled) {
-            return Phase::Steady(self);
+            return self.stay();
         }
 
         if !ctx.connected || ctx.idle.cooling(now) {
-            return Phase::Steady(self);
+            return self.stay();
         }
 
         let bytes = ctx.release_budget(ctx.config.shrink_step.get());
 
         if bytes == 0 {
-            return Phase::Steady(self);
+            return self.stay();
         }
 
         ctx.idle.reset();
 
         Releasing::begin(ctx, bytes)
-    }
-
-    fn on_ceiling_raised(self, _ctx: &mut Context, _now: Timestamp) -> Option<Phase> {
-        None
-    }
-
-    fn on_connected(self) -> Phase {
-        Phase::Steady(self)
-    }
-
-    fn on_disconnected(self, _ctx: &mut Context, _now: Timestamp) -> Phase {
-        Phase::Steady(self)
-    }
-
-    fn resume(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        Growing::start(ctx, now, None)
     }
 }
 

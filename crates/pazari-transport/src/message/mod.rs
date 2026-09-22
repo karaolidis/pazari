@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use pazari_proto::{Codec, Decoder, Peer};
+use pazari_proto::{Codec, Decoder, Guest, Host, JsonLinesCodec, Peer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{Connection, TransportError};
@@ -72,6 +72,18 @@ where
         self.connection
     }
 }
+
+/// A guest-side stream; sends [`GuestMessage`], receives [`HostMessage`].
+///
+/// [`GuestMessage`]: pazari_proto::GuestMessage
+/// [`HostMessage`]: pazari_proto::HostMessage
+pub type GuestStream<T> = MessageStream<T, JsonLinesCodec, Guest>;
+
+/// A host-side stream; sends [`HostMessage`], receives [`GuestMessage`].
+///
+/// [`GuestMessage`]: pazari_proto::GuestMessage
+/// [`HostMessage`]: pazari_proto::HostMessage
+pub type HostStream<T> = MessageStream<T, JsonLinesCodec, Host>;
 
 #[cfg(test)]
 mod tests {

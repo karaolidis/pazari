@@ -11,6 +11,7 @@ use std::{
 
 use bytesize::ByteSize;
 use doku::Document;
+use pazari_config::{ConfigError, Positive, Ranged, ordered};
 use pazari_proto::DEFAULT_VSOCK_PORT;
 use pazari_transport::{
     AnyConnector, UnixConnector, VsockConnector, adapter::vsock::VMADDR_CID_HOST,
@@ -20,7 +21,7 @@ use serde::Deserialize;
 use serde_inline_default::serde_inline_default;
 
 use crate::{
-    config::{Config, error::ConfigError},
+    config::Config,
     engine::{EngineConfig, ExhaustionMode, IdleThreshold},
     runtime::{Backend, RuntimeConfig},
     session::SessionConfig,
@@ -49,10 +50,7 @@ pub struct File {
 
 impl File {
     pub fn resolve(self) -> Result<Config, ConfigError> {
-        let tick = Interval::try_new(self.tick_interval).map_err(|source| ConfigError::Range {
-            field: "tick_interval",
-            source,
-        })?;
+        let tick = Interval::try_new(self.tick_interval).at("tick_interval")?;
 
         Ok(Config {
             engine: self.engine.resolve(tick)?,
@@ -156,81 +154,34 @@ impl EngineSection {
     fn resolve(self, tick: Interval) -> Result<EngineConfig, ConfigError> {
         Ok(EngineConfig {
             service_reserve: self.service_reserve.as_u64(),
-            burst_reserve: NonZeroU64::new(self.burst_reserve.as_u64()).ok_or(
-                ConfigError::Zero {
-                    field: "engine.burst_reserve",
-                    what: "byte count",
-                },
-            )?,
-            open_guard: NonZeroU64::new(self.open_guard.as_u64()).ok_or(ConfigError::Zero {
-                field: "engine.open_guard",
-                what: "byte count",
-            })?,
+            burst_reserve: NonZeroU64::new(self.burst_reserve.as_u64())
+                .bytes("engine.burst_reserve")?,
+            open_guard: NonZeroU64::new(self.open_guard.as_u64()).bytes("engine.open_guard")?,
 
-            grow_step: NonZeroU64::new(self.grow_step.as_u64()).ok_or(ConfigError::Zero {
-                field: "engine.grow_step",
-                what: "byte count",
-            })?,
-            deny_backoff: Interval::try_new(self.deny_backoff).map_err(|source| {
-                ConfigError::Range {
-                    field: "engine.deny_backoff",
-                    source,
-                }
-            })?,
-            settle_grace: Interval::try_new(self.settle_grace).map_err(|source| {
-                ConfigError::Range {
-                    field: "engine.settle_grace",
-                    source,
-                }
-            })?,
+            grow_step: NonZeroU64::new(self.grow_step.as_u64()).bytes("engine.grow_step")?,
+            deny_backoff: Interval::try_new(self.deny_backoff).at("engine.deny_backoff")?,
+            settle_grace: Interval::try_new(self.settle_grace).at("engine.settle_grace")?,
 
-            idle_threshold: IdleThreshold::try_new(self.idle_threshold).map_err(|source| {
-                ConfigError::Range {
-                    field: "engine.idle_threshold",
-                    source,
-                }
-            })?,
-            idle_intervals: NonZeroU32::new(self.idle_intervals).ok_or(ConfigError::Zero {
-                field: "engine.idle_intervals",
-                what: "count of intervals",
-            })?,
+            idle_threshold: IdleThreshold::try_new(self.idle_threshold)
+                .at("engine.idle_threshold")?,
+            idle_intervals: NonZeroU32::new(self.idle_intervals)
+                .positive("engine.idle_intervals", "count of intervals")?,
 
-            shrink_step: NonZeroU64::new(self.shrink_step.as_u64()).ok_or(ConfigError::Zero {
-                field: "engine.shrink_step",
-                what: "byte count",
-            })?,
-            shrink_cooldown: Delay::try_new(self.shrink_cooldown).map_err(|source| {
-                ConfigError::Range {
-                    field: "engine.shrink_cooldown",
-                    source,
-                }
-            })?,
+            shrink_step: NonZeroU64::new(self.shrink_step.as_u64()).bytes("engine.shrink_step")?,
+            shrink_cooldown: Delay::try_new(self.shrink_cooldown).at("engine.shrink_cooldown")?,
 
             reclaim_swappiness: self
                 .reclaim_swappiness
                 .map(Swappiness::try_new)
                 .transpose()
-                .map_err(|source| ConfigError::Range {
-                    field: "engine.reclaim_swappiness",
-                    source,
-                })?,
+                .at("engine.reclaim_swappiness")?,
 
-            titrate_step: NonZeroU64::new(self.titrate_step.as_u64()).ok_or(ConfigError::Zero {
-                field: "engine.titrate_step",
-                what: "byte count",
-            })?,
-            titrate_interval: Interval::try_new(self.titrate_interval).map_err(|source| {
-                ConfigError::Range {
-                    field: "engine.titrate_interval",
-                    source,
-                }
-            })?,
-            titrate_psi_threshold: Psi::try_new(self.titrate_psi_threshold).map_err(|source| {
-                ConfigError::Range {
-                    field: "engine.titrate_psi_threshold",
-                    source,
-                }
-            })?,
+            titrate_step: NonZeroU64::new(self.titrate_step.as_u64())
+                .bytes("engine.titrate_step")?,
+            titrate_interval: Interval::try_new(self.titrate_interval)
+                .at("engine.titrate_interval")?,
+            titrate_psi_threshold: Psi::try_new(self.titrate_psi_threshold)
+                .at("engine.titrate_psi_threshold")?,
 
             exhaustion: self.exhaustion.resolve()?,
 
@@ -262,10 +213,7 @@ impl ExhaustionSection {
     fn resolve(self) -> Result<ExhaustionMode, ConfigError> {
         match self {
             Self::Stall { timeout } => Ok(ExhaustionMode::Stall {
-                timeout: Interval::try_new(timeout).map_err(|source| ConfigError::Range {
-                    field: "engine.exhaustion.timeout",
-                    source,
-                })?,
+                timeout: Interval::try_new(timeout).at("engine.exhaustion.timeout")?,
             }),
             Self::Kill {} => Ok(ExhaustionMode::Kill),
         }
@@ -313,25 +261,14 @@ impl RuntimeSection {
         Ok(RuntimeConfig {
             backend: self.backend.resolve(),
             tick_interval: tick,
-            hotplug_debounce: Interval::try_new(self.hotplug_debounce).map_err(|source| {
-                ConfigError::Range {
-                    field: "runtime.hotplug_debounce",
-                    source,
-                }
-            })?,
-            reclaim_chunk: NonZeroU64::new(self.reclaim_chunk.as_u64()).ok_or(
-                ConfigError::Zero {
-                    field: "runtime.reclaim_chunk",
-                    what: "byte count",
-                },
-            )?,
+            hotplug_debounce: Interval::try_new(self.hotplug_debounce)
+                .at("runtime.hotplug_debounce")?,
+            reclaim_chunk: NonZeroU64::new(self.reclaim_chunk.as_u64())
+                .bytes("runtime.reclaim_chunk")?,
             thp_always_fatal: self.thp_always_fatal,
             ..RuntimeConfig::new(
                 self.cgroup,
-                NonZeroU64::new(self.boot_mem.as_u64()).ok_or(ConfigError::Zero {
-                    field: "runtime.boot_mem",
-                    what: "byte count",
-                })?,
+                NonZeroU64::new(self.boot_mem.as_u64()).bytes("runtime.boot_mem")?,
             )
         })
     }
@@ -451,34 +388,20 @@ impl TransportSection {
             ),
         };
 
-        let reconnect_min =
-            Interval::try_new(reconnect_min).map_err(|source| ConfigError::Range {
-                field: "transport.reconnect_min",
-                source,
-            })?;
-        let reconnect_max =
-            Interval::try_new(reconnect_max).map_err(|source| ConfigError::Range {
-                field: "transport.reconnect_max",
-                source,
-            })?;
+        let reconnect_min = Interval::try_new(reconnect_min).at("transport.reconnect_min")?;
+        let reconnect_max = Interval::try_new(reconnect_max).at("transport.reconnect_max")?;
 
-        if reconnect_min > reconnect_max {
-            return Err(ConfigError::order(
-                "transport.reconnect_min",
-                &reconnect_min.get(),
-                "transport.reconnect_max",
-                &reconnect_max.get(),
-            ));
-        }
+        ordered(
+            "transport.reconnect_min",
+            reconnect_min,
+            "transport.reconnect_max",
+            reconnect_max,
+        )?;
 
         Ok(SessionConfig {
             connector,
-            handshake_timeout: Interval::try_new(handshake_timeout).map_err(|source| {
-                ConfigError::Range {
-                    field: "transport.handshake_timeout",
-                    source,
-                }
-            })?,
+            handshake_timeout: Interval::try_new(handshake_timeout)
+                .at("transport.handshake_timeout")?,
             reconnect_min,
             reconnect_max,
         })

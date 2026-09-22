@@ -19,7 +19,9 @@ anyhow = "1.0.104"
 bytesize = { version = "2.7.0", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive"] }
 doku = "0.21.2"
+enum_dispatch = "0.3.13"
 humantime-serde = "1.1.1"
+pazari-config = { path = "../pazari-config" }
 pazari-proto = { path = "../pazari-proto" }
 pazari-systemd = { path = "../pazari-systemd" }
 pazari-transport = { path = "../pazari-transport" }

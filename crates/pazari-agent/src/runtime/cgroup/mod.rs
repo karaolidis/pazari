@@ -82,64 +82,29 @@ impl AnyCgroup {
     }
 }
 
+/// Forwards each [`Cgroup`] method to whichever backend is behind the enum.
+macro_rules! forward {
+    ($( $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty; )*) => {
+        $(
+            async fn $name(&self, $($arg: $ty),*) -> Result<$ret, RuntimeError> {
+                match self {
+                    Self::Raw(cgroup) => cgroup.$name($($arg),*).await,
+                    Self::Systemd(cgroup) => cgroup.$name($($arg),*).await,
+                }
+            }
+        )*
+    };
+}
+
 impl Cgroup for AnyCgroup {
-    async fn set_high(&self, limit: Limit) -> Result<(), RuntimeError> {
-        match self {
-            Self::Raw(cgroup) => cgroup.set_high(limit).await,
-            Self::Systemd(cgroup) => cgroup.set_high(limit).await,
-        }
-    }
-
-    async fn set_max(&self, limit: Limit) -> Result<(), RuntimeError> {
-        match self {
-            Self::Raw(cgroup) => cgroup.set_max(limit).await,
-            Self::Systemd(cgroup) => cgroup.set_max(limit).await,
-        }
-    }
-
-    async fn set_oom_group(&self, group: bool) -> Result<(), RuntimeError> {
-        match self {
-            Self::Raw(cgroup) => cgroup.set_oom_group(group).await,
-            Self::Systemd(cgroup) => cgroup.set_oom_group(group).await,
-        }
-    }
-
-    async fn events(&self) -> Result<MemoryEvents, RuntimeError> {
-        match self {
-            Self::Raw(cgroup) => cgroup.events().await,
-            Self::Systemd(cgroup) => cgroup.events().await,
-        }
-    }
-
-    async fn current(&self) -> Result<u64, RuntimeError> {
-        match self {
-            Self::Raw(cgroup) => cgroup.current().await,
-            Self::Systemd(cgroup) => cgroup.current().await,
-        }
-    }
-
-    async fn swap_current(&self) -> Result<u64, RuntimeError> {
-        match self {
-            Self::Raw(cgroup) => cgroup.swap_current().await,
-            Self::Systemd(cgroup) => cgroup.swap_current().await,
-        }
-    }
-
-    async fn pressure(&self) -> Result<Pressure, RuntimeError> {
-        match self {
-            Self::Raw(cgroup) => cgroup.pressure().await,
-            Self::Systemd(cgroup) => cgroup.pressure().await,
-        }
-    }
-
-    async fn reclaim(
-        &self,
-        bytes: u64,
-        swappiness: Option<Swappiness>,
-    ) -> Result<Reclaimed, RuntimeError> {
-        match self {
-            Self::Raw(cgroup) => cgroup.reclaim(bytes, swappiness).await,
-            Self::Systemd(cgroup) => cgroup.reclaim(bytes, swappiness).await,
-        }
+    forward! {
+        set_high(limit: Limit) -> ();
+        set_max(limit: Limit) -> ();
+        set_oom_group(group: bool) -> ();
+        events() -> MemoryEvents;
+        current() -> u64;
+        swap_current() -> u64;
+        pressure() -> Pressure;
+        reclaim(bytes: u64, swappiness: Option<Swappiness>) -> Reclaimed;
     }
 }

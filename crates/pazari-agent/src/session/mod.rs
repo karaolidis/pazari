@@ -1,7 +1,9 @@
 use std::{num::NonZeroU64, time::Duration};
 
-use pazari_proto::{Guest, GuestMessage, HostMessage, JsonLinesCodec, PROTOCOL_VERSION};
-use pazari_transport::{AnyConnection, AnyConnector, Connector, MessageStream, TransportError};
+use pazari_proto::{GuestMessage, HostMessage, PROTOCOL_VERSION};
+use pazari_transport::{
+    self as transport, AnyConnection, AnyConnector, Connector, Ended, GuestStream,
+};
 use pazari_types::{Backoff, Clock, Interval};
 use tokio::{
     sync::{mpsc, watch},
@@ -16,7 +18,7 @@ const EVENT_DEPTH: usize = 64;
 const OUTBOUND_DEPTH: usize = 64;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
-type Stream = MessageStream<AnyConnection, JsonLinesCodec, Guest>;
+type Stream = GuestStream<AnyConnection>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionConfig {
@@ -243,56 +245,42 @@ async fn pump(
     outgoing: &mut mpsc::Receiver<GuestMessage>,
     clock: Clock,
 ) -> Outcome {
-    loop {
-        let step = tokio::select! {
-            incoming = stream.recv() => Step::Incoming(incoming),
-            message = outgoing.recv() => Step::Outgoing(message),
-        };
+    let ended = transport::pump(
+        stream,
+        events,
+        |message| Event::Host {
+            now: clock.now(),
+            message,
+        },
+        outgoing,
+    )
+    .await;
 
-        match step {
-            Step::Incoming(Ok(Some(message))) => {
-                let host = Event::Host {
-                    now: clock.now(),
-                    message,
-                };
-
-                if events.send(host).await.is_err() {
-                    return Outcome::Closed;
-                }
-            }
-            Step::Incoming(Ok(None)) => {
-                info!("the host closed the connection");
-                return Outcome::Retry;
-            }
-            Step::Incoming(Err(error)) => {
-                warn!(%error, "the connection failed");
-                return Outcome::Retry;
-            }
-            Step::Outgoing(Some(message)) => {
-                if let Err(error) = stream.send(&message).await {
-                    warn!(%error, "failed to send to the host");
-                    return Outcome::Retry;
-                }
-            }
-            Step::Outgoing(None) => {
-                debug!("the agent is shutting down");
-                return Outcome::Closed;
-            }
+    match ended {
+        Ended::Closed => {
+            info!("the host closed the connection");
+            Outcome::Retry
+        }
+        Ended::Recv(error) => {
+            warn!(%error, "the connection failed");
+            Outcome::Retry
+        }
+        Ended::Send(error) => {
+            warn!(%error, "failed to send to the host");
+            Outcome::Retry
+        }
+        Ended::Local => {
+            debug!("the agent is shutting down");
+            Outcome::Closed
         }
     }
-}
-
-#[derive(Debug)]
-enum Step {
-    Incoming(Result<Option<HostMessage>, TransportError>),
-    Outgoing(Option<GuestMessage>),
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use pazari_proto::{DenyReason, GrantReason, Host, Urgency};
+    use pazari_proto::{DenyReason, GrantReason, Urgency};
     use pazari_transport::{Listener, UnixConnector, UnixListener};
     use tempfile::TempDir;
     use tokio::{io::AsyncReadExt as _, net::UnixStream};
@@ -304,7 +292,7 @@ mod tests {
     const BLOCK: u64 = 128 * MIB;
     const CEILING: u64 = 4096 * MIB;
 
-    type HostStream = MessageStream<UnixStream, JsonLinesCodec, Host>;
+    type HostStream = pazari_transport::HostStream<UnixStream>;
 
     fn bytes(value: u64) -> NonZeroU64 {
         NonZeroU64::new(value).expect("a positive byte count")

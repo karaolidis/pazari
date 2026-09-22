@@ -12,6 +12,7 @@ use std::{
 
 use bytesize::ByteSize;
 use doku::Document;
+use pazari_config::{Positive, Ranged, ordered};
 use pazari_proto::DEFAULT_VSOCK_PORT;
 use pazari_transport::{PeerId, adapter::vsock::VMADDR_CID_ANY};
 use pazari_types::{Interval, Psi};
@@ -47,11 +48,7 @@ pub struct File {
 
 impl File {
     pub fn resolve(self) -> Result<Config, ConfigError> {
-        let tick_interval =
-            Interval::try_new(self.tick_interval).map_err(|source| ConfigError::Range {
-                field: "tick_interval".to_owned(),
-                source,
-            })?;
+        let tick_interval = Interval::try_new(self.tick_interval).at("tick_interval")?;
 
         let policy = self.policy.resolve()?;
 
@@ -173,36 +170,18 @@ pub struct PolicySection {
 impl PolicySection {
     fn resolve(self) -> Result<Policy, ConfigError> {
         Ok(Policy {
-            welcome_status_interval: Interval::try_new(self.welcome_status_interval).map_err(
-                |source| ConfigError::Range {
-                    field: "policy.welcome_status_interval".to_owned(),
-                    source,
-                },
-            )?,
+            welcome_status_interval: Interval::try_new(self.welcome_status_interval)
+                .at("policy.welcome_status_interval")?,
             host_floor: self.host_floor.as_u64(),
-            grant_min_interval: Interval::try_new(self.grant_min_interval).map_err(|source| {
-                ConfigError::Range {
-                    field: "policy.grant_min_interval".to_owned(),
-                    source,
-                }
-            })?,
-            reconcile_deadline: Interval::try_new(self.reconcile_deadline).map_err(|source| {
-                ConfigError::Range {
-                    field: "policy.reconcile_deadline".to_owned(),
-                    source,
-                }
-            })?,
+            grant_min_interval: Interval::try_new(self.grant_min_interval)
+                .at("policy.grant_min_interval")?,
+            reconcile_deadline: Interval::try_new(self.reconcile_deadline)
+                .at("policy.reconcile_deadline")?,
             shrink_revert: self.shrink_revert,
-            stale_after: NonZeroU32::new(self.stale_after).ok_or_else(|| ConfigError::Zero {
-                field: "policy.stale_after".to_owned(),
-                what: "count of intervals",
-            })?,
-            reclaim_deadline: Interval::try_new(self.reclaim_deadline).map_err(|source| {
-                ConfigError::Range {
-                    field: "policy.reclaim_deadline".to_owned(),
-                    source,
-                }
-            })?,
+            stale_after: NonZeroU32::new(self.stale_after)
+                .positive("policy.stale_after", "count of intervals")?,
+            reclaim_deadline: Interval::try_new(self.reclaim_deadline)
+                .at("policy.reclaim_deadline")?,
             grant_swap: self.grant_swap,
             revocation: self
                 .revocation
@@ -231,14 +210,8 @@ pub struct RevocationSection {
 impl RevocationSection {
     fn resolve(self) -> Result<Revocation, ConfigError> {
         Ok(Revocation {
-            psi: Psi::try_new(self.psi).map_err(|source| ConfigError::Range {
-                field: "policy.revocation.psi".to_owned(),
-                source,
-            })?,
-            step: NonZeroU64::new(self.step.as_u64()).ok_or_else(|| ConfigError::Zero {
-                field: "policy.revocation.step".to_owned(),
-                what: "byte count",
-            })?,
+            psi: Psi::try_new(self.psi).at("policy.revocation.psi")?,
+            step: NonZeroU64::new(self.step.as_u64()).bytes("policy.revocation.step")?,
         })
     }
 }
@@ -330,32 +303,21 @@ pub struct QmpSection {
 
 impl QmpSection {
     fn resolve(self, prefix: &str) -> Result<Qmp, ConfigError> {
-        let retry_min = Interval::try_new(self.retry_min).map_err(|source| ConfigError::Range {
-            field: format!("{prefix}.qmp.retry_min"),
-            source,
-        })?;
-        let retry_max = Interval::try_new(self.retry_max).map_err(|source| ConfigError::Range {
-            field: format!("{prefix}.qmp.retry_max"),
-            source,
-        })?;
+        let retry_min = Interval::try_new(self.retry_min).at(format!("{prefix}.qmp.retry_min"))?;
+        let retry_max = Interval::try_new(self.retry_max).at(format!("{prefix}.qmp.retry_max"))?;
 
-        if retry_min > retry_max {
-            return Err(ConfigError::order(
-                format!("{prefix}.qmp.retry_min"),
-                &retry_min.get(),
-                format!("{prefix}.qmp.retry_max"),
-                &retry_max.get(),
-            ));
-        }
+        ordered(
+            format!("{prefix}.qmp.retry_min"),
+            retry_min,
+            format!("{prefix}.qmp.retry_max"),
+            retry_max,
+        )?;
 
         Ok(Qmp {
             path: self.path,
             device: self.device,
             mode: self.mode.resolve(prefix)?,
-            deadline: Interval::try_new(self.deadline).map_err(|source| ConfigError::Range {
-                field: format!("{prefix}.qmp.deadline"),
-                source,
-            })?,
+            deadline: Interval::try_new(self.deadline).at(format!("{prefix}.qmp.deadline"))?,
             retry_min,
             retry_max,
         })
@@ -384,10 +346,7 @@ impl ModeSection {
         match self {
             Self::Held {} => Ok(Mode::Held),
             Self::PerOperation { poll } => Ok(Mode::PerOperation {
-                poll: Interval::try_new(poll).map_err(|source| ConfigError::Range {
-                    field: format!("{prefix}.qmp.mode.poll"),
-                    source,
-                })?,
+                poll: Interval::try_new(poll).at(format!("{prefix}.qmp.mode.poll"))?,
             }),
         }
     }

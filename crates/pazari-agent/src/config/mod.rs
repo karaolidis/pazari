@@ -1,10 +1,7 @@
-pub mod error;
-
 mod file;
 
-use std::path::{Path, PathBuf};
+pub use pazari_config::{ConfigError, Settings};
 
-pub use crate::config::error::ConfigError;
 use crate::{
     config::file::File, engine::EngineConfig, runtime::RuntimeConfig, session::SessionConfig,
 };
@@ -16,42 +13,19 @@ pub struct Config {
     pub session: SessionConfig,
 }
 
-impl Config {
-    pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
-            path: PathBuf::from(path),
-            source,
-        })?;
+impl Settings for Config {
+    type File = File;
+    type Error = ConfigError;
 
-        Self::parse(path, &text)
-    }
-
-    pub fn parse(path: &Path, text: &str) -> Result<Self, ConfigError> {
-        toml::from_str::<File>(text)
-            .map_err(|source| ConfigError::Syntax {
-                path: PathBuf::from(path),
-                source,
-            })?
-            .resolve()
-    }
-
-    #[must_use]
-    pub fn template() -> String {
-        let formatting = doku::toml::Formatting {
-            auto_comments: doku::toml::AutoComments {
-                optional: false,
-                ..Default::default()
-            },
-            enums_style: doku::toml::EnumsStyle::Commented,
-            ..Default::default()
-        };
-
-        format!("{}\n", doku::to_toml_fmt::<File>(&formatting))
+    fn resolve(file: File) -> Result<Self, ConfigError> {
+        file.resolve()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use std::{
         num::{NonZeroU32, NonZeroU64},
         time::Duration,

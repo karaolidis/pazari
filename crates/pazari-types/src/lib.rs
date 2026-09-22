@@ -2,20 +2,14 @@
 
 pub mod backoff;
 pub mod bounded;
-pub mod duration;
 pub mod error;
-pub mod meminfo;
-pub mod pressure;
-pub mod ratio;
-pub mod swappiness;
+pub mod kernel;
 pub mod time;
+pub mod units;
 
 pub use backoff::Backoff;
 pub use bounded::Bounded;
-pub use duration::{Delay, Interval, MAX_DURATION};
 pub use error::{KernelFileError, RangeError};
-pub use meminfo::MemInfo;
-pub use pressure::Pressure;
-pub use ratio::{Fraction, Psi};
-pub use swappiness::Swappiness;
+pub use kernel::{MemInfo, Pressure};
 pub use time::{Clock, Timestamp};
+pub use units::{Delay, Fraction, Interval, MAX_DURATION, Psi, Swappiness};

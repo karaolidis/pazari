@@ -1,6 +1,3 @@
-use std::time::Duration;
-
-use pazari_proto::DenyReason;
 use pazari_types::Timestamp;
 
 use crate::engine::{
@@ -46,6 +43,14 @@ impl Exhausted {
 }
 
 impl State for Exhausted {
+    fn stay(self) -> Phase {
+        Phase::Exhausted(self)
+    }
+
+    fn busy(self) -> &'static str {
+        "the workload is stalled at its ceiling"
+    }
+
     fn advance(self, ctx: &mut Context, now: Timestamp) -> Phase {
         if let ExhaustionMode::Stall { timeout } = ctx.config.exhaustion
             && now >= self.since.saturating_add(timeout.get())
@@ -61,12 +66,12 @@ impl State for Exhausted {
 
         match self.retry_at {
             Some(at) if now >= at => self.retry(ctx, now),
-            _ => Phase::Exhausted(self),
+            _ => self.stay(),
         }
     }
 
     fn brake(self, _ctx: &mut Context, _now: Timestamp) -> Phase {
-        Phase::Exhausted(self)
+        self.stay()
     }
 
     fn on_plugged(self, ctx: &mut Context, now: Timestamp, changed: bool) -> Phase {
@@ -74,37 +79,12 @@ impl State for Exhausted {
             return Steady::settle(ctx, now);
         }
 
-        Phase::Exhausted(self)
-    }
-
-    fn on_grant(self, _ctx: &mut Context, _now: Timestamp, _id: u64, _target: u64) -> Phase {
-        Phase::Exhausted(self)
-    }
-
-    fn on_deny(
-        self,
-        _ctx: &mut Context,
-        _now: Timestamp,
-        _id: u64,
-        _reason: DenyReason,
-        _retry_after: Option<Duration>,
-    ) -> Phase {
-        Phase::Exhausted(self)
-    }
-
-    fn on_reclaim_request(self, ctx: &mut Context, id: u64, _desired: u64) -> Phase {
-        ctx.nak(id, "the workload is stalled at its ceiling");
-
-        Phase::Exhausted(self)
-    }
-
-    fn on_reclaim_finished(self, _ctx: &mut Context, _now: Timestamp, _reclaimed: u64) -> Phase {
-        Phase::Exhausted(self)
+        self.stay()
     }
 
     fn on_interval(self, ctx: &mut Context, _now: Timestamp, throttled: bool) -> Phase {
         if !ctx.quiet_streak(throttled) {
-            return Phase::Exhausted(self);
+            return self.stay();
         }
 
         ctx.idle.reset();
@@ -114,14 +94,6 @@ impl State for Exhausted {
 
     fn on_ceiling_raised(self, ctx: &mut Context, now: Timestamp) -> Option<Phase> {
         Some(Growing::start(ctx, now, None))
-    }
-
-    fn on_connected(self) -> Phase {
-        Phase::Exhausted(self)
-    }
-
-    fn on_disconnected(self, _ctx: &mut Context, _now: Timestamp) -> Phase {
-        Phase::Exhausted(self)
     }
 
     fn resume(self, ctx: &mut Context, now: Timestamp) -> Phase {

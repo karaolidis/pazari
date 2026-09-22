@@ -16,16 +16,6 @@ pub enum RuntimeError {
         source: io::Error,
     },
 
-    #[error("{} holds {value:?}, which is not {expected}", .path.display())]
-    Malformed {
-        path: PathBuf,
-        value: String,
-        expected: &'static str,
-    },
-
-    #[error("{} carries no {key} line", .path.display())]
-    Absent { path: PathBuf, key: &'static str },
-
     #[error("failed to watch {} for throttle events: {source}", .path.display())]
     Watch { path: PathBuf, source: io::Error },
 
@@ -88,11 +78,11 @@ mod tests {
 
     #[test]
     fn a_malformed_file_quotes_what_it_held() {
-        let error = RuntimeError::Malformed {
+        let error = RuntimeError::from(KernelFileError::Malformed {
             path: PathBuf::from("/sys/devices/system/memory/block_size_bytes"),
             value: "wat".to_owned(),
             expected: "a lowercase hexadecimal byte count",
-        };
+        });
 
         assert_eq!(
             error.to_string(),

@@ -91,6 +91,10 @@ impl Registry {
         self.specs.is_empty()
     }
 
+    pub(crate) fn into_parts(self) -> (Vec<GuestSpec>, HashMap<PeerId, GuestId>) {
+        (self.specs, self.peers)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (GuestId, &GuestSpec)> {
         self.specs
             .iter()

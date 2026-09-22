@@ -1,6 +1,6 @@
 mod fcfs;
 
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use pazari_proto::{DenyReason, GrantReason, Status, Urgency};
 use pazari_types::Timestamp;
@@ -116,7 +116,7 @@ pub enum Decision {
 }
 
 /// The replaceable half of the broker.
-pub trait Arbiter {
+pub trait Arbiter: fmt::Debug + Send {
     fn decide(&mut self, request: &Request<'_>) -> Decision;
 
     fn revoke(

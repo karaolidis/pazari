@@ -25,6 +25,75 @@ pub trait Bounded: Copy + Sized {
     }
 }
 
+/// Declares a [`Bounded`] newtype.
+#[macro_export]
+macro_rules! bounded {
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident($raw:ty);
+
+        const MAX: $max:ty = $ceiling:expr;
+        const BOUNDS: &str = $bounds:literal;
+
+        fn contains($value:ident) -> bool $contains:block
+        fn display($shown:ident, $formatter:ident) -> fmt::Result $display:block
+    ) => {
+        $(#[$attr])*
+        $vis struct $name($raw);
+
+        impl $name {
+            pub const MAX: $max = $ceiling;
+
+            pub fn try_new(value: $raw) -> ::core::result::Result<Self, $crate::RangeError> {
+                <Self as $crate::Bounded>::try_new(value)
+            }
+
+            #[must_use]
+            pub const fn get(self) -> $raw {
+                self.0
+            }
+        }
+
+        impl $crate::Bounded for $name {
+            type Raw = $raw;
+
+            const NAME: &'static str = ::core::stringify!($name);
+            const BOUNDS: &'static str = $bounds;
+
+            fn contains($value: $raw) -> bool $contains
+
+            fn wrap(value: $raw) -> Self {
+                Self(value)
+            }
+
+            fn get(self) -> $raw {
+                self.0
+            }
+        }
+
+        impl ::core::fmt::Display for $name {
+            fn fmt(&self, $formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let $shown = self.0;
+                $display
+            }
+        }
+
+        impl ::core::convert::TryFrom<$raw> for $name {
+            type Error = $crate::RangeError;
+
+            fn try_from(value: $raw) -> ::core::result::Result<Self, Self::Error> {
+                Self::try_new(value)
+            }
+        }
+
+        impl ::core::convert::From<$name> for $raw {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fmt, time::Duration};

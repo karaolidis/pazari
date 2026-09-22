@@ -1,6 +1,6 @@
 use std::{fmt, path::Path};
 
-use crate::runtime::error::RuntimeError;
+use pazari_types::KernelFileError;
 
 /// A `memory.high` or `memory.max` value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,7 +12,7 @@ pub enum Limit {
 }
 
 impl Limit {
-    pub fn parse(path: &Path, text: &str) -> Result<Self, RuntimeError> {
+    pub fn parse(path: &Path, text: &str) -> Result<Self, KernelFileError> {
         let text = text.trim();
 
         if text == "max" {
@@ -63,7 +63,7 @@ pub struct MemoryEvents {
 }
 
 impl MemoryEvents {
-    pub fn parse(path: &Path, text: &str) -> Result<Self, RuntimeError> {
+    pub fn parse(path: &Path, text: &str) -> Result<Self, KernelFileError> {
         let mut high = None;
         let mut max = None;
 
@@ -84,11 +84,11 @@ impl MemoryEvents {
         }
 
         Ok(Self {
-            high: high.ok_or_else(|| RuntimeError::Absent {
+            high: high.ok_or_else(|| KernelFileError::Absent {
                 path: path.to_path_buf(),
                 key: "high",
             })?,
-            max: max.ok_or_else(|| RuntimeError::Absent {
+            max: max.ok_or_else(|| KernelFileError::Absent {
                 path: path.to_path_buf(),
                 key: "max",
             })?,
@@ -96,12 +96,12 @@ impl MemoryEvents {
     }
 }
 
-pub fn count(path: &Path, text: &str) -> Result<u64, RuntimeError> {
+pub fn count(path: &Path, text: &str) -> Result<u64, KernelFileError> {
     number(path, text.trim(), "a decimal byte count")
 }
 
-fn number(path: &Path, text: &str, expected: &'static str) -> Result<u64, RuntimeError> {
-    text.parse().map_err(|_| RuntimeError::Malformed {
+fn number(path: &Path, text: &str, expected: &'static str) -> Result<u64, KernelFileError> {
+    text.parse().map_err(|_| KernelFileError::Malformed {
         path: path.to_path_buf(),
         value: text.to_owned(),
         expected,

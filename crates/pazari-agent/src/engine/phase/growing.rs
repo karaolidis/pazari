@@ -78,18 +78,26 @@ impl Growing {
 }
 
 impl State for Growing {
+    fn stay(self) -> Phase {
+        Phase::Growing(self)
+    }
+
+    fn busy(self) -> &'static str {
+        "a grant request is outstanding"
+    }
+
     fn advance(self, ctx: &mut Context, now: Timestamp) -> Phase {
         match self.state {
             Growth::Backoff { retry_at } if now >= retry_at => {
                 Self::start(ctx, now, self.exhausted_since)
             }
             Growth::Settling { expires, .. } if now >= expires => Steady::settle(ctx, now),
-            _ => Phase::Growing(self),
+            _ => self.stay(),
         }
     }
 
     fn brake(self, _ctx: &mut Context, _now: Timestamp) -> Phase {
-        Phase::Growing(self)
+        self.stay()
     }
 
     fn on_plugged(self, ctx: &mut Context, now: Timestamp, changed: bool) -> Phase {
@@ -102,14 +110,14 @@ impl State for Growing {
                     ctx.reapply_limits();
                 }
 
-                Phase::Growing(self)
+                self.stay()
             }
         }
     }
 
     fn on_grant(self, ctx: &mut Context, now: Timestamp, id: u64, target: u64) -> Phase {
         if !self.answers(id) {
-            return Phase::Growing(self);
+            return self.stay();
         }
 
         let expires = now.saturating_add(ctx.config.settle_grace.get());
@@ -127,7 +135,7 @@ impl State for Growing {
         retry_after: Option<Duration>,
     ) -> Phase {
         if !self.answers(id) {
-            return Phase::Growing(self);
+            return self.stay();
         }
 
         if reason == DenyReason::Ceiling || ctx.grow_target().is_none() {
@@ -144,26 +152,6 @@ impl State for Growing {
         )
     }
 
-    fn on_reclaim_request(self, ctx: &mut Context, id: u64, _desired: u64) -> Phase {
-        ctx.nak(id, "a grant request is outstanding");
-
-        Phase::Growing(self)
-    }
-
-    fn on_reclaim_finished(self, _ctx: &mut Context, _now: Timestamp, _reclaimed: u64) -> Phase {
-        Phase::Growing(self)
-    }
-
-    fn on_interval(self, ctx: &mut Context, _now: Timestamp, _throttled: bool) -> Phase {
-        ctx.idle.reset();
-
-        Phase::Growing(self)
-    }
-
-    fn on_ceiling_raised(self, _ctx: &mut Context, _now: Timestamp) -> Option<Phase> {
-        None
-    }
-
     fn on_connected(self) -> Phase {
         self.blocked()
     }
@@ -174,7 +162,7 @@ impl State for Growing {
 
     fn resume(self, ctx: &mut Context, now: Timestamp) -> Phase {
         match self.state {
-            Growth::Settling { .. } => Phase::Growing(self),
+            Growth::Settling { .. } => self.stay(),
             _ => Self::start(ctx, now, self.exhausted_since),
         }
     }

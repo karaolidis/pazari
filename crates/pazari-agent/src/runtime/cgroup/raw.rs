@@ -77,7 +77,7 @@ impl RawCgroup {
     async fn count(&self, name: &'static str) -> Result<u64, RuntimeError> {
         let text = self.read(name).await?;
 
-        parse::count(&self.path.join(name), &text)
+        Ok(parse::count(&self.path.join(name), &text)?)
     }
 }
 
@@ -98,7 +98,7 @@ impl Cgroup for RawCgroup {
     async fn events(&self) -> Result<MemoryEvents, RuntimeError> {
         let text = self.read(MEMORY_EVENTS).await?;
 
-        MemoryEvents::parse(&self.path.join(MEMORY_EVENTS), &text)
+        Ok(MemoryEvents::parse(&self.path.join(MEMORY_EVENTS), &text)?)
     }
 
     async fn current(&self) -> Result<u64, RuntimeError> {

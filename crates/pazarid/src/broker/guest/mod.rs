@@ -1,8 +1,12 @@
+use std::collections::HashMap;
+
+use pazari_transport::PeerId;
 use pazari_types::Timestamp;
 
 use crate::broker::{
     arbiter::GuestView,
-    registry::{GuestId, GuestSpec},
+    phase::Negotiated,
+    registry::{GuestId, GuestSpec, Registry},
     session::Session,
 };
 
@@ -69,6 +73,133 @@ impl Reconcile {
         } else {
             size >= self.target
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry {
+    pub spec: GuestSpec,
+    pub state: Guest,
+}
+
+impl Entry {
+    #[must_use]
+    pub fn view(&self, id: GuestId) -> GuestView<'_> {
+        self.state.view(id, &self.spec)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Guests {
+    entries: Vec<Entry>,
+    peers: HashMap<PeerId, GuestId>,
+}
+
+impl Guests {
+    #[must_use]
+    pub fn new(registry: Registry) -> Self {
+        let (specs, peers) = registry.into_parts();
+
+        Self {
+            entries: specs
+                .into_iter()
+                .map(|spec| Entry {
+                    spec,
+                    state: Guest::default(),
+                })
+                .collect(),
+            peers,
+        }
+    }
+
+    #[must_use]
+    pub fn lookup(&self, peer: &PeerId) -> Option<GuestId> {
+        self.peers.get(peer).copied()
+    }
+
+    #[must_use]
+    pub fn get(&self, id: GuestId) -> Option<&Entry> {
+        self.entries.get(id.index())
+    }
+
+    pub fn get_mut(&mut self, id: GuestId) -> Option<&mut Entry> {
+        self.entries.get_mut(id.index())
+    }
+
+    #[must_use]
+    pub fn state(&self, id: GuestId) -> Option<&Guest> {
+        self.get(id).map(|entry| &entry.state)
+    }
+
+    pub fn state_mut(&mut self, id: GuestId) -> Option<&mut Guest> {
+        self.get_mut(id).map(|entry| &mut entry.state)
+    }
+
+    #[must_use]
+    pub fn session(&self, id: GuestId) -> Option<&Session> {
+        self.state(id)?.session.as_ref()
+    }
+
+    #[must_use]
+    pub fn negotiated(&self, id: GuestId) -> Option<&Negotiated> {
+        self.session(id)?.negotiated()
+    }
+
+    pub fn session_mut(&mut self, id: GuestId) -> Option<&mut Session> {
+        self.state_mut(id)?.session.as_mut()
+    }
+
+    pub fn negotiated_mut(&mut self, id: GuestId) -> Option<&mut Negotiated> {
+        self.session_mut(id)?.negotiated_mut()
+    }
+
+    #[must_use]
+    pub fn ceiling(&self, id: GuestId) -> u64 {
+        self.get(id).map_or(0, |entry| entry.spec.ceiling)
+    }
+
+    #[must_use]
+    pub fn name(&self, id: GuestId) -> &str {
+        self.get(id).map_or("?", |entry| entry.spec.name.as_str())
+    }
+
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = GuestId> {
+        (0..self.entries.len()).map(GuestId::from_index)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (GuestId, &Entry)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (GuestId::from_index(index), entry))
+    }
+
+    #[must_use]
+    pub fn views(&self, asking: GuestId) -> (Option<GuestView<'_>>, Vec<GuestView<'_>>) {
+        let mut mine = None;
+        let mut others = Vec::with_capacity(self.len());
+
+        for (id, entry) in self.iter() {
+            let view = entry.view(id);
+
+            if id == asking {
+                mine = Some(view);
+            } else {
+                others.push(view);
+            }
+        }
+
+        (mine, others)
     }
 }
 

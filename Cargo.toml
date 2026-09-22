@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/pazari-proto",
     "crates/pazari-types",
+    "crates/pazari-config",
     "crates/pazari-systemd",
     "crates/pazari-transport",
     "crates/pazari-agent",

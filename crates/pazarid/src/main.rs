@@ -2,7 +2,10 @@ use std::{io, path::PathBuf, process::ExitCode};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pazarid::{config::Config, run};
+use pazarid::{
+    config::{Config, Settings},
+    run,
+};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 

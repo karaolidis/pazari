@@ -5,14 +5,11 @@ use std::{
 };
 
 use pazari_proto::{
-    Codec, DenyReason, GrantReason, Guest, GuestMessage, Host, HostMessage, JsonLinesCodec,
-    PROTOCOL_VERSION, Status, Urgency,
+    Codec, DenyReason, GrantReason, GuestMessage, HostMessage, JsonLinesCodec, PROTOCOL_VERSION,
+    Status, Urgency,
 };
 
-use crate::MessageStream;
-
-pub type GuestStream<T> = MessageStream<T, JsonLinesCodec, Guest>;
-pub type HostStream<T> = MessageStream<T, JsonLinesCodec, Host>;
+pub use crate::{GuestStream, HostStream};
 
 static SEQUENCE: AtomicU32 = AtomicU32::new(0);
 

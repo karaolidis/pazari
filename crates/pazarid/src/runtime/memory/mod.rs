@@ -109,7 +109,7 @@ impl HostMemory for ProcMemory {
 mod tests {
     use std::fs;
 
-    use pazari_types::meminfo::KB;
+    use pazari_types::kernel::meminfo::KB;
     use tempfile::TempDir;
 
     use super::*;

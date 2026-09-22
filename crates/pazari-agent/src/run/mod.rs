@@ -25,10 +25,7 @@ use crate::{
 pub async fn run(config: Config) -> Result<(), RunError> {
     let clock = Clock::start();
 
-    let report = {
-        let config: &Config = &config;
-        Preflight::new(&config.runtime).run(config.engine.reclaim_swappiness)
-    };
+    let report = Preflight::new(&config.runtime).run(config.engine.reclaim_swappiness);
 
     if !report.passed() {
         return Err(RunError::Preflight { report });

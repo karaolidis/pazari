@@ -1,11 +1,8 @@
-use std::time::Duration;
-
-use pazari_proto::DenyReason;
 use pazari_types::Timestamp;
 
 use crate::engine::{
     context::Context,
-    phase::{Phase, State, growing::Growing, steady::Steady},
+    phase::{Phase, State, steady::Steady},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -45,71 +42,20 @@ impl Titrating {
 }
 
 impl State for Titrating {
+    fn stay(self) -> Phase {
+        Phase::Titrating(self)
+    }
+
+    fn busy(self) -> &'static str {
+        "still titrating towards the workload's working set"
+    }
+
     fn advance(self, ctx: &mut Context, now: Timestamp) -> Phase {
         match self.next_step {
             None => Self::scheduled(ctx, now),
             Some(at) if now >= at => Self::step(ctx, now),
-            Some(_) => Phase::Titrating(self),
+            Some(_) => self.stay(),
         }
-    }
-
-    fn brake(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        Growing::start(ctx, now, None)
-    }
-
-    fn on_plugged(self, ctx: &mut Context, _now: Timestamp, changed: bool) -> Phase {
-        if changed {
-            ctx.reapply_limits();
-        }
-
-        Phase::Titrating(self)
-    }
-
-    fn on_grant(self, _ctx: &mut Context, _now: Timestamp, _id: u64, _target: u64) -> Phase {
-        Phase::Titrating(self)
-    }
-
-    fn on_deny(
-        self,
-        _ctx: &mut Context,
-        _now: Timestamp,
-        _id: u64,
-        _reason: DenyReason,
-        _retry_after: Option<Duration>,
-    ) -> Phase {
-        Phase::Titrating(self)
-    }
-
-    fn on_reclaim_request(self, ctx: &mut Context, id: u64, _desired: u64) -> Phase {
-        ctx.nak(id, "still titrating towards the workload's working set");
-
-        Phase::Titrating(self)
-    }
-
-    fn on_reclaim_finished(self, _ctx: &mut Context, _now: Timestamp, _reclaimed: u64) -> Phase {
-        Phase::Titrating(self)
-    }
-
-    fn on_interval(self, ctx: &mut Context, _now: Timestamp, _throttled: bool) -> Phase {
-        ctx.idle.reset();
-
-        Phase::Titrating(self)
-    }
-
-    fn on_ceiling_raised(self, _ctx: &mut Context, _now: Timestamp) -> Option<Phase> {
-        None
-    }
-
-    fn on_connected(self) -> Phase {
-        Phase::Titrating(self)
-    }
-
-    fn on_disconnected(self, _ctx: &mut Context, _now: Timestamp) -> Phase {
-        Phase::Titrating(self)
-    }
-
-    fn resume(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        Growing::start(ctx, now, None)
     }
 }
 

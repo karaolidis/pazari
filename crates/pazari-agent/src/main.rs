@@ -2,7 +2,11 @@ use std::{io, path::PathBuf, process::ExitCode};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pazari_agent::{Preflight, config::Config, run};
+use pazari_agent::{
+    config::{Config, Settings},
+    run,
+    runtime::Preflight,
+};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 

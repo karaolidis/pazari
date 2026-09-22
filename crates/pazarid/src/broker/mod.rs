@@ -1,76 +1,68 @@
 pub mod action;
 pub mod arbiter;
+pub mod context;
 pub mod event;
 pub mod guest;
+pub mod phase;
 pub mod policy;
 pub mod registry;
 pub mod session;
 
+mod handle;
+
 #[cfg(test)]
 pub(crate) mod testing;
 
-use pazari_proto::{DenyReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status};
 use pazari_transport::PeerId;
-use pazari_types::Timestamp;
-use tracing::{debug, info, warn};
 
 pub use crate::broker::{
     action::Action,
     arbiter::{Arbiter, Ask, Decision, Fcfs, GuestView, HostView, Request},
+    context::Context,
     event::Event,
-    guest::{Guest, Reconcile},
+    guest::{Entry, Guest, Guests, Reconcile},
+    phase::{AwaitingHello, Negotiated, Phase, Reclaim, Said, State},
     policy::{Policy, Revocation},
     registry::{GuestId, GuestSpec, Registry, RegistryError},
-    session::{Negotiated, Phase, Reclaim, Session},
+    session::Session,
 };
 
-/// The host's negotiation state machine.
-#[derive(Debug, Clone)]
-pub struct Broker<A = Fcfs> {
-    policy: Policy,
-    registry: Registry,
-    arbiter: A,
-    guests: Vec<Guest>,
-    host: HostView,
+#[derive(Debug)]
+pub struct Broker {
+    ctx: Context,
 }
 
-impl Broker<Fcfs> {
+impl Broker {
     #[must_use]
     pub fn new(policy: Policy, guests: Registry) -> Self {
         Self::with_arbiter(policy, guests, Fcfs)
     }
-}
 
-impl<A: Arbiter> Broker<A> {
     #[must_use]
-    pub fn with_arbiter(policy: Policy, registry: Registry, arbiter: A) -> Self {
-        let guests = vec![Guest::default(); registry.len()];
-
+    pub fn with_arbiter(
+        policy: Policy,
+        registry: Registry,
+        arbiter: impl Arbiter + 'static,
+    ) -> Self {
         Self {
-            policy,
-            registry,
-            arbiter,
-            guests,
-            host: HostView::default(),
+            ctx: Context::new(policy, registry, arbiter),
         }
     }
 
     #[must_use]
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
-        let mut out = Vec::new();
-
         match event {
-            Event::Connected { now, peer } => self.on_connected(&mut out, now, peer),
-            Event::Message { now, peer, message } => self.on_message(&mut out, now, &peer, message),
-            Event::Disconnected { now, peer } => self.on_disconnected(now, &peer),
-            Event::Size { now, guest, size } => self.on_size(now, guest, size),
+            Event::Connected { peer, .. } => self.on_connected(peer),
+            Event::Message { now, peer, message } => self.on_message(now, &peer, message),
+            Event::Disconnected { peer, .. } => self.on_disconnected(&peer),
+            Event::Size { guest, size, .. } => self.ctx.settled(guest, size),
             Event::HostAvailable {
                 bytes,
                 swap_free,
                 psi,
                 ..
             } => {
-                self.host = HostView {
+                self.ctx.host = HostView {
                     available: Some(bytes),
                     swap_free: Some(swap_free),
                     psi,
@@ -80,780 +72,67 @@ impl<A: Arbiter> Broker<A> {
                 now,
                 guest,
                 desired,
-            } => self.on_reclaim(&mut out, now, guest, desired),
-            Event::Tick { now } => self.on_tick(&mut out, now),
+            } => self.on_reclaim(now, guest, desired),
+            Event::Tick { now } => self.on_tick(now),
         }
 
-        out
+        self.ctx.drain()
     }
 
     #[must_use]
     pub const fn policy(&self) -> &Policy {
-        &self.policy
+        &self.ctx.policy
     }
 
     #[must_use]
-    pub const fn registry(&self) -> &Registry {
-        &self.registry
+    pub const fn guests(&self) -> &Guests {
+        &self.ctx.guests
     }
 
     #[must_use]
     pub fn guest(&self, guest: GuestId) -> Option<&Guest> {
-        self.guests.get(guest.index())
+        self.ctx.guests.state(guest)
     }
 
     #[must_use]
     pub const fn host(&self) -> HostView {
-        self.host
+        self.ctx.host
     }
 
     #[must_use]
     pub const fn host_available(&self) -> Option<u64> {
-        self.host.available
+        self.ctx.host.available
     }
 
     #[must_use]
     pub fn is_negotiated(&self, peer: &PeerId) -> bool {
-        self.registry
+        self.ctx
+            .guests
             .lookup(peer)
-            .and_then(|guest| self.negotiated(guest))
+            .and_then(|guest| self.ctx.guests.negotiated(guest))
             .is_some()
+    }
+
+    #[cfg(test)]
+    fn negotiated(&self, guest: GuestId) -> Option<&Negotiated> {
+        self.ctx.guests.negotiated(guest)
     }
 
     #[must_use]
     pub fn is_stale(&self, guest: GuestId) -> bool {
-        self.negotiated(guest).is_some_and(|session| session.stale)
-    }
-
-    fn on_connected(&mut self, out: &mut Vec<Action>, _now: Timestamp, peer: PeerId) {
-        let Some(guest) = self.registry.lookup(&peer) else {
-            warn!(%peer, "a connection from a peer no guest answers to");
-            out.push(Action::Close { peer });
-            return;
-        };
-
-        let Some(state) = self.guests.get_mut(guest.index()) else {
-            return;
-        };
-
-        let replaced = state.session.replace(Session::new(peer.clone())).is_some();
-
-        if replaced {
-            info!(guest = self.name(guest), %peer, "the guest connected again over a connection the host still held");
-        } else {
-            debug!(guest = self.name(guest), %peer, "a guest connected");
-        }
-    }
-
-    fn on_message(
-        &mut self,
-        out: &mut Vec<Action>,
-        now: Timestamp,
-        peer: &PeerId,
-        message: GuestMessage,
-    ) {
-        let Some(guest) = self.registry.lookup(peer) else {
-            warn!(%peer, "a message from a peer no guest answers to");
-            out.push(Action::Close { peer: peer.clone() });
-            return;
-        };
-
-        let phase = self
+        self.ctx
             .guests
-            .get(guest.index())
-            .and_then(|state| state.session.as_ref())
-            .map(|session| matches!(session.phase, Phase::AwaitingHello));
-
-        match phase {
-            Some(true) => self.on_hello(out, now, guest, peer, message),
-            Some(false) => self.on_negotiated(out, now, guest, peer, message),
-            None => {
-                warn!(guest = self.name(guest), %peer, "a message on a connection the broker never accepted");
-                out.push(Action::Close { peer: peer.clone() });
-            }
-        }
-    }
-
-    fn on_hello(
-        &mut self,
-        out: &mut Vec<Action>,
-        now: Timestamp,
-        guest: GuestId,
-        peer: &PeerId,
-        message: GuestMessage,
-    ) {
-        let GuestMessage::Hello {
-            protocol,
-            agent_version,
-            boot_mem,
-            block_size,
-            plugged,
-        } = message
-        else {
-            warn!(guest = self.name(guest), %peer, "the guest spoke before it said hello");
-            self.close(out, guest, peer);
-            return;
-        };
-
-        if protocol != PROTOCOL_VERSION {
-            warn!(
-                guest = self.name(guest),
-                %peer,
-                theirs = protocol,
-                ours = PROTOCOL_VERSION,
-                "the guest speaks another protocol",
-            );
-            self.close(out, guest, peer);
-            return;
-        }
-
-        if boot_mem == 0 || block_size == 0 {
-            warn!(
-                guest = self.name(guest),
-                %peer,
-                boot_mem,
-                block_size,
-                "the guest declared a geometry that cannot be true",
-            );
-            self.close(out, guest, peer);
-            return;
-        }
-
-        let ceiling = self.registry.ceiling(guest);
-        let status_interval_ms = self.policy.welcome_status_interval.get();
-
-        if let Some(session) = self
-            .guests
-            .get_mut(guest.index())
-            .and_then(|state| state.session.as_mut())
-        {
-            session.phase = Phase::Negotiated(Negotiated::new(boot_mem, block_size, now));
-        }
-
-        info!(
-            guest = self.name(guest),
-            %peer,
-            agent_version,
-            boot_mem,
-            block_size,
-            plugged,
-            ceiling,
-            "welcoming a guest",
-        );
-
-        out.push(Action::Send {
-            peer: peer.clone(),
-            message: HostMessage::Welcome {
-                protocol: PROTOCOL_VERSION,
-                ceiling,
-                status_interval_ms,
-            },
-        });
-    }
-
-    fn on_negotiated(
-        &mut self,
-        out: &mut Vec<Action>,
-        now: Timestamp,
-        guest: GuestId,
-        peer: &PeerId,
-        message: GuestMessage,
-    ) {
-        match message {
-            GuestMessage::Hello { .. } => {
-                warn!(guest = self.name(guest), %peer, "the guest said hello twice");
-                self.close(out, guest, peer);
-            }
-
-            GuestMessage::GrantRequest {
-                id,
-                target,
-                reason,
-                urgency,
-                ..
-            } => {
-                let ceiling = self.registry.ceiling(guest);
-                let target = target.min(ceiling);
-
-                let ask = self
-                    .size(guest)
-                    .ok_or_else(|| Decision::Deny {
-                        reason: DenyReason::Policy,
-                        retry_after: Some(self.policy.grant_min_interval.get()),
-                    })
-                    .and_then(|size| {
-                        if target > size {
-                            Ok(Ask::Grow {
-                                target,
-                                reason,
-                                urgency,
-                            })
-                        } else {
-                            Err(Decision::Deny {
-                                reason: DenyReason::Ceiling,
-                                retry_after: None,
-                            })
-                        }
-                    });
-
-                self.on_request(out, now, guest, peer, id, ask);
-            }
-
-            GuestMessage::OfferRelease { id, releasable, .. } => {
-                let ask = self
-                    .size(guest)
-                    .ok_or_else(|| Decision::Deny {
-                        reason: DenyReason::Policy,
-                        retry_after: Some(self.policy.grant_min_interval.get()),
-                    })
-                    .map(|size| Ask::Release {
-                        target: size.saturating_sub(releasable),
-                    });
-
-                self.on_request(out, now, guest, peer, id, ask);
-            }
-
-            GuestMessage::ReclaimAck { id, will_release } => {
-                self.on_reclaim_ack(out, guest, peer, id, will_release);
-            }
-
-            GuestMessage::ReclaimNak { id, reason } => {
-                self.on_reclaim_nak(out, guest, peer, id, &reason);
-            }
-
-            GuestMessage::Status(status) => self.on_status(now, guest, status),
-
-            GuestMessage::Bye {} => {
-                debug!(guest = self.name(guest), %peer, "the guest said goodbye");
-                self.close(out, guest, peer);
-            }
-        }
-    }
-
-    fn on_request(
-        &mut self,
-        out: &mut Vec<Action>,
-        now: Timestamp,
-        guest: GuestId,
-        peer: &PeerId,
-        id: u64,
-        ask: Result<Ask, Decision>,
-    ) {
-        let accepted = self
-            .negotiated_mut(guest)
-            .is_some_and(|session| session.accept(id));
-
-        if !accepted {
-            warn!(guest = self.name(guest), %peer, id, "a request id that does not follow the last one");
-            self.close(out, guest, peer);
-            return;
-        }
-
-        let ask = match ask {
-            Ok(ask) => ask,
-            Err(decision) => {
-                out.push(Self::answer(peer, id, decision));
-                return;
-            }
-        };
-
-        let decision = self.arbitrate(now, guest, ask);
-
-        let Decision::Grant { target } = decision else {
-            out.push(Self::answer(peer, id, decision));
-            return;
-        };
-
-        let target = target.min(self.registry.ceiling(guest));
-
-        out.push(Self::answer(peer, id, Decision::Grant { target }));
-
-        if matches!(ask, Ask::Grow { .. })
-            && let Some(state) = self.guests.get_mut(guest.index())
-        {
-            state.granted = Some(now);
-        }
-
-        self.actuate(out, now, guest, target);
-    }
-
-    fn arbitrate(&mut self, now: Timestamp, guest: GuestId, ask: Ask) -> Decision {
-        let mut asking = None;
-        let mut others = Vec::with_capacity(self.registry.len());
-
-        for (id, spec) in self.registry.iter() {
-            let Some(state) = self.guests.get(id.index()) else {
-                continue;
-            };
-
-            let view = state.view(id, spec);
-
-            if id == guest {
-                asking = Some(view);
-            } else {
-                others.push(view);
-            }
-        }
-
-        let Some(asking) = asking else {
-            return Decision::Deny {
-                reason: DenyReason::Policy,
-                retry_after: None,
-            };
-        };
-
-        let request = Request {
-            now,
-            guest: asking,
-            ask,
-            others: &others,
-            host: self.host,
-            policy: &self.policy,
-        };
-
-        self.arbiter.decide(&request)
-    }
-
-    fn actuate(&mut self, out: &mut Vec<Action>, now: Timestamp, guest: GuestId, target: u64) {
-        let deadline = now.saturating_add(self.policy.reconcile_deadline.get());
-
-        let Some(state) = self.guests.get_mut(guest.index()) else {
-            return;
-        };
-
-        let Some(size) = state.size else {
-            return;
-        };
-
-        if target == size {
-            if state.reconcile.take().is_some() {
-                out.push(Action::SetRequested {
-                    guest,
-                    bytes: target,
-                });
-            }
-
-            return;
-        }
-
-        state.reconcile = Some(Reconcile {
-            target,
-            from: size,
-            deadline,
-        });
-
-        out.push(Action::SetRequested {
-            guest,
-            bytes: target,
-        });
-    }
-
-    fn on_reclaim(&mut self, out: &mut Vec<Action>, now: Timestamp, guest: GuestId, desired: u64) {
-        let Some(session) = self
-            .guests
-            .get(guest.index())
-            .and_then(|state| state.session.as_ref())
-        else {
-            warn!(
-                guest = self.name(guest),
-                "nothing to reclaim from: the guest is not connected"
-            );
-            return;
-        };
-
-        let peer = session.peer.clone();
-
-        let Some(negotiated) = session.negotiated() else {
-            warn!(
-                guest = self.name(guest),
-                "nothing to reclaim from: the guest has not said hello"
-            );
-            return;
-        };
-
-        if let Some(reclaim) = negotiated.reclaim {
-            warn!(
-                guest = self.name(guest),
-                outstanding = reclaim.id,
-                refused = reclaim.refused,
-                "the guest is not to be asked for memory again yet",
-            );
-
-            return;
-        }
-
-        let deadline_ms = self.policy.reclaim_deadline.get();
-
-        let Some(session) = self.negotiated_mut(guest) else {
-            return;
-        };
-
-        let id = session.take_reclaim_id();
-
-        session.reclaim = Some(Reclaim {
-            id,
-            desired,
-            deadline: now.saturating_add(deadline_ms),
-            committed: None,
-            refused: false,
-        });
-
-        info!(
-            guest = self.name(guest),
-            id, desired, "asking a guest for memory back"
-        );
-
-        out.push(Action::Send {
-            peer,
-            message: HostMessage::ReclaimRequest {
-                id,
-                desired,
-                deadline_ms,
-            },
-        });
-    }
-
-    fn on_reclaim_ack(
-        &mut self,
-        out: &mut Vec<Action>,
-        guest: GuestId,
-        peer: &PeerId,
-        id: u64,
-        will_release: u64,
-    ) {
-        if !self.answers_reclaim(guest, id) {
-            warn!(guest = self.name(guest), %peer, id, "an answer to a reclaim the host never asked for");
-            self.close(out, guest, peer);
-            return;
-        }
-
-        if let Some(session) = self.negotiated_mut(guest)
-            && let Some(reclaim) = session.reclaim.as_mut()
-        {
-            reclaim.committed = Some(will_release);
-        }
-
-        info!(
-            guest = self.name(guest),
-            id, will_release, "the guest took on a release"
-        );
-    }
-
-    fn on_reclaim_nak(
-        &mut self,
-        out: &mut Vec<Action>,
-        guest: GuestId,
-        peer: &PeerId,
-        id: u64,
-        reason: &str,
-    ) {
-        if !self.answers_reclaim(guest, id) {
-            warn!(guest = self.name(guest), %peer, id, "an answer to a reclaim the host never asked for");
-            self.close(out, guest, peer);
-            return;
-        }
-
-        if let Some(session) = self.negotiated_mut(guest)
-            && let Some(reclaim) = session.reclaim.as_mut()
-        {
-            reclaim.refused = true;
-        }
-
-        info!(
-            guest = self.name(guest),
-            id, reason, "the guest refused a release"
-        );
-    }
-
-    fn on_status(&mut self, now: Timestamp, guest: GuestId, status: Status) {
-        let Some(session) = self.negotiated_mut(guest) else {
-            return;
-        };
-
-        let returned = session.stale;
-
-        session.stale = false;
-        session.heard = now;
-        session.status = Some(status);
-
-        if returned {
-            info!(
-                guest = self.name(guest),
-                "the guest is sending status again"
-            );
-        }
-    }
-
-    fn on_size(&mut self, _now: Timestamp, guest: GuestId, size: u64) {
-        let Some(state) = self.guests.get_mut(guest.index()) else {
-            return;
-        };
-
-        state.size = Some(size);
-
-        let Some(reconcile) = state.reconcile else {
-            return;
-        };
-
-        if !reconcile.converged(size) {
-            return;
-        }
-
-        state.reconcile = None;
-
-        debug!(
-            guest = self.name(guest),
-            size,
-            target = reconcile.target,
-            "an actuation completed"
-        );
-    }
-
-    fn on_disconnected(&mut self, _now: Timestamp, peer: &PeerId) {
-        let Some(guest) = self.registry.lookup(peer) else {
-            return;
-        };
-
-        let Some(state) = self.guests.get_mut(guest.index()) else {
-            return;
-        };
-
-        if state.session.take().is_some() {
-            debug!(guest = self.name(guest), %peer, "a guest disconnected");
-        }
-    }
-
-    fn on_tick(&mut self, out: &mut Vec<Action>, now: Timestamp) {
-        for slot in 0..self.guests.len() {
-            let guest = GuestId::from_index(slot);
-
-            self.tick_reconcile(out, now, guest);
-            self.tick_reclaim(now, guest);
-            self.tick_staleness(now, guest);
-        }
-
-        self.tick_revocation(out, now);
-    }
-
-    fn tick_revocation(&mut self, out: &mut Vec<Action>, now: Timestamp) {
-        let Some(revocation) = self.policy.revocation else {
-            return;
-        };
-
-        let Some(psi) = self.host.psi else {
-            return;
-        };
-
-        if f64::from(psi) < revocation.psi.get() {
-            return;
-        }
-
-        let mut candidates = Vec::with_capacity(self.registry.len());
-
-        for (id, spec) in self.registry.iter() {
-            let Some(state) = self.guests.get(id.index()) else {
-                continue;
-            };
-
-            let asked = state
-                .session
-                .as_ref()
-                .and_then(Session::negotiated)
-                .is_none_or(|session| session.reclaim.is_some());
-
-            if state.size.is_some() && !asked {
-                candidates.push(state.view(id, spec));
-            }
-        }
-
-        let Some((guest, desired)) = self.arbiter.revoke(&candidates, revocation) else {
-            return;
-        };
-
-        warn!(
-            guest = self.name(guest),
-            psi,
-            threshold = revocation.psi.get(),
-            "the host is under pressure; taking memory back",
-        );
-
-        self.on_reclaim(out, now, guest, desired);
-    }
-
-    fn tick_reconcile(&mut self, out: &mut Vec<Action>, now: Timestamp, guest: GuestId) {
-        let revert = self.policy.shrink_revert;
-        let ceiling = self.registry.ceiling(guest);
-
-        let Some(state) = self.guests.get_mut(guest.index()) else {
-            return;
-        };
-
-        let Some(reconcile) = state.reconcile else {
-            return;
-        };
-
-        if now < reconcile.deadline {
-            return;
-        }
-
-        state.reconcile = None;
-
-        let Some(size) = state.size else {
-            return;
-        };
-
-        if !reconcile.is_shrink() {
-            info!(
-                guest = self.name(guest),
-                target = reconcile.target,
-                size,
-                "a grow did not finish in time; taking the size it reached",
-            );
-
-            return;
-        }
-
-        if revert {
-            out.push(Action::SetRequested {
-                guest,
-                bytes: size.min(ceiling),
-            });
-        }
-
-        warn!(
-            guest = self.name(guest),
-            target = reconcile.target,
-            size,
-            reverted = revert,
-            "a shrink did not finish in time",
-        );
-    }
-
-    fn tick_reclaim(&mut self, now: Timestamp, guest: GuestId) {
-        let Some(session) = self.negotiated_mut(guest) else {
-            return;
-        };
-
-        let Some(reclaim) = session.reclaim else {
-            return;
-        };
-
-        if now < reclaim.deadline {
-            return;
-        }
-
-        session.reclaim = None;
-
-        if reclaim.refused {
-            debug!(
-                guest = self.name(guest),
-                id = reclaim.id,
-                "the guest may be asked for memory again",
-            );
-
-            return;
-        }
-
-        warn!(
-            guest = self.name(guest),
-            id = reclaim.id,
-            desired = reclaim.desired,
-            committed = ?reclaim.committed,
-            "a reclaim ran out of time",
-        );
-    }
-
-    fn tick_staleness(&mut self, now: Timestamp, guest: GuestId) {
-        let window = self
-            .policy
-            .welcome_status_interval
-            .get()
-            .saturating_mul(self.policy.stale_after.get());
-
-        let Some(session) = self.negotiated_mut(guest) else {
-            return;
-        };
-
-        if session.stale {
-            return;
-        }
-
-        let quiet = now.saturating_duration_since(session.heard);
-
-        if quiet <= window {
-            return;
-        }
-
-        session.stale = true;
-
-        warn!(
-            guest = self.name(guest),
-            ?quiet,
-            "the guest has stopped sending status"
-        );
-    }
-
-    fn close(&mut self, out: &mut Vec<Action>, guest: GuestId, peer: &PeerId) {
-        if let Some(state) = self.guests.get_mut(guest.index()) {
-            state.session = None;
-        }
-
-        out.push(Action::Close { peer: peer.clone() });
-    }
-
-    fn answer(peer: &PeerId, id: u64, decision: Decision) -> Action {
-        let message = match decision {
-            Decision::Grant { target } => HostMessage::Grant { id, target },
-            Decision::Deny {
-                reason,
-                retry_after,
-            } => HostMessage::Deny {
-                id,
-                reason,
-                retry_after_ms: retry_after,
-            },
-        };
-
-        Action::Send {
-            peer: peer.clone(),
-            message,
-        }
-    }
-
-    fn answers_reclaim(&self, guest: GuestId, id: u64) -> bool {
-        self.negotiated(guest)
-            .and_then(|session| session.reclaim)
-            .is_some_and(|reclaim| reclaim.id == id)
-    }
-
-    fn size(&self, guest: GuestId) -> Option<u64> {
-        self.guest(guest).and_then(|state| state.size)
-    }
-
-    fn negotiated(&self, guest: GuestId) -> Option<&Negotiated> {
-        self.guests
-            .get(guest.index())
-            .and_then(|state| state.session.as_ref())
-            .and_then(Session::negotiated)
-    }
-
-    fn negotiated_mut(&mut self, guest: GuestId) -> Option<&mut Negotiated> {
-        self.guests
-            .get_mut(guest.index())
-            .and_then(|state| state.session.as_mut())
-            .and_then(Session::negotiated_mut)
-    }
-
-    fn name(&self, guest: GuestId) -> &str {
-        self.registry
-            .spec(guest)
-            .map_or("?", |spec| spec.name.as_str())
+            .negotiated(guest)
+            .is_some_and(|session| session.stale)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    use pazari_proto::{DenyReason, HostMessage, PROTOCOL_VERSION};
+    use pazari_types::Timestamp;
 
     use pazari_proto::GuestMessage;
     use proptest::prelude::*;
@@ -1916,7 +1195,7 @@ mod tests {
 
                     if let HostMessage::ReclaimRequest { id, .. } = message {
                         let slot = broker
-                            .registry()
+                            .guests()
                             .lookup(peer)
                             .expect("a welcomed guest is registered")
                             .index();
@@ -1932,7 +1211,7 @@ mod tests {
                 }
 
                 Action::SetRequested { guest, bytes } => {
-                    let ceiling = broker.registry().ceiling(*guest);
+                    let ceiling = broker.guests().ceiling(*guest);
 
                     prop_assert!(
                         *bytes <= ceiling,
@@ -1999,7 +1278,7 @@ mod tests {
             if matches!(*step, Step::Connect { cid } if cid == ONE || cid == TWO) {
                 let slot = step
                     .cid()
-                    .and_then(|cid| broker.registry().lookup(&vsock(cid)))
+                    .and_then(|cid| broker.guests().lookup(&vsock(cid)))
                     .expect("a known guest")
                     .index();
 

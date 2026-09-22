@@ -89,7 +89,7 @@ fn reread(file: &mut File, path: &Path) -> Result<MemoryEvents, RuntimeError> {
             source,
         })?;
 
-    MemoryEvents::parse(path, &text)
+    Ok(MemoryEvents::parse(path, &text)?)
 }
 
 #[cfg(test)]

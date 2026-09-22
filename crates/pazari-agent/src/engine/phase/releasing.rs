@@ -53,17 +53,25 @@ impl Releasing {
 }
 
 impl State for Releasing {
+    fn stay(self) -> Phase {
+        Phase::Releasing(self)
+    }
+
+    fn busy(self) -> &'static str {
+        "a release is already in progress"
+    }
+
     fn advance(self, ctx: &mut Context, now: Timestamp) -> Phase {
         match self {
             Self::Settling { expires, .. } if now >= expires => Self::finish(ctx, now),
-            _ => Phase::Releasing(self),
+            _ => self.stay(),
         }
     }
 
     fn brake(self, ctx: &mut Context, now: Timestamp) -> Phase {
         match self {
             Self::Reclaiming { .. } => Growing::start(ctx, now, None),
-            _ => Phase::Releasing(self),
+            _ => self.stay(),
         }
     }
 
@@ -77,19 +85,19 @@ impl State for Releasing {
                     ctx.reapply_limits();
                 }
 
-                Phase::Releasing(self)
+                self.stay()
             }
         }
     }
 
     fn on_grant(self, ctx: &mut Context, now: Timestamp, id: u64, target: u64) -> Phase {
         if !self.answers(id) {
-            return Phase::Releasing(self);
+            return self.stay();
         }
 
         let expires = now.saturating_add(ctx.config.settle_grace.get());
 
-        Phase::Releasing(Self::Settling { target, expires }).on_plugged(ctx, now, false)
+        Self::Settling { target, expires }.on_plugged(ctx, now, false)
     }
 
     fn on_deny(
@@ -101,21 +109,15 @@ impl State for Releasing {
         _retry_after: Option<Duration>,
     ) -> Phase {
         if !self.answers(id) {
-            return Phase::Releasing(self);
+            return self.stay();
         }
 
         Self::finish(ctx, now)
     }
 
-    fn on_reclaim_request(self, ctx: &mut Context, id: u64, _desired: u64) -> Phase {
-        ctx.nak(id, "a release is already in progress");
-
-        Phase::Releasing(self)
-    }
-
     fn on_reclaim_finished(self, ctx: &mut Context, now: Timestamp, reclaimed: u64) -> Phase {
         let Self::Reclaiming { bytes } = self else {
-            return Phase::Releasing(self);
+            return self.stay();
         };
 
         if !ctx.connected {
@@ -144,26 +146,12 @@ impl State for Releasing {
         })
     }
 
-    fn on_interval(self, ctx: &mut Context, _now: Timestamp, _throttled: bool) -> Phase {
-        ctx.idle.reset();
-
-        Phase::Releasing(self)
-    }
-
-    fn on_ceiling_raised(self, _ctx: &mut Context, _now: Timestamp) -> Option<Phase> {
-        None
-    }
-
     fn on_connected(self) -> Phase {
         Phase::Steady(Steady)
     }
 
     fn on_disconnected(self, ctx: &mut Context, now: Timestamp) -> Phase {
         Self::finish(ctx, now)
-    }
-
-    fn resume(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        Growing::start(ctx, now, None)
     }
 }
 

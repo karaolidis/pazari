@@ -2,7 +2,7 @@ pub mod error;
 
 mod file;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use pazari_transport::{AnyListener, TransportError, UnixListener, VsockListener};
 use pazari_types::Interval;
@@ -13,6 +13,7 @@ use crate::{
     config::file::File,
     runtime::Mode,
 };
+pub use pazari_config::Settings;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -27,74 +28,21 @@ pub struct Config {
     pub devices: Vec<Qmp>,
 }
 
-impl Config {
-    pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
-            path: PathBuf::from(path),
-            source,
-        })?;
+impl Settings for Config {
+    type File = File;
+    type Error = ConfigError;
 
-        Self::parse(path, &text)
+    fn resolve(file: File) -> Result<Self, ConfigError> {
+        file.resolve()
     }
 
-    pub fn parse(path: &Path, text: &str) -> Result<Self, ConfigError> {
-        toml::from_str::<File>(text)
-            .map_err(|source| ConfigError::Syntax {
-                path: PathBuf::from(path),
-                source,
-            })?
-            .resolve()
-    }
-
-    #[must_use]
-    pub fn template() -> String {
-        let formatting = doku::toml::Formatting {
-            auto_comments: doku::toml::AutoComments {
-                optional: false,
-                ..Default::default()
-            },
-            enums_style: doku::toml::EnumsStyle::Commented,
-            ..Default::default()
-        };
-
-        let printed = doku::to_toml_fmt::<File>(&formatting);
-
+    fn polish(template: String) -> String {
         // doku pads the blank comment lines between enum variant fields.
-        let mut lines = printed.lines().map(str::trim_end).collect::<Vec<_>>();
+        let mut lines = template.lines().map(str::trim_end).collect::<Vec<_>>();
 
         spaced(&mut lines);
 
-        let mut template = lines.join("\n");
-        template.push('\n');
-
-        template
-    }
-}
-
-/// Puts a table's own comment under the blank line that separates it from the
-/// field before it, rather than over it, which doku does for optional tables
-/// and which reads as though the comment belonged to that field.
-fn spaced(lines: &mut Vec<&str>) {
-    let mut index = 1;
-
-    while index + 1 < lines.len() {
-        let header = lines[index].is_empty()
-            && lines[index + 1].starts_with('[')
-            && lines[index - 1].starts_with('#');
-
-        if header {
-            let start = lines[..index]
-                .iter()
-                .rposition(|line| !line.starts_with('#'))
-                .map_or(0, |last| last + 1);
-
-            if start > 0 {
-                lines.remove(index);
-                lines.insert(start, "");
-            }
-        }
-
-        index += 1;
+        lines.join("\n")
     }
 }
 
@@ -128,8 +76,37 @@ pub struct Qmp {
     pub retry_max: Interval,
 }
 
+/// Puts a table's own comment under the blank line that separates it from the
+/// field before it, rather than over it, which doku does for optional tables
+/// and which reads as though the comment belonged to that field.
+fn spaced(lines: &mut Vec<&str>) {
+    let mut index = 1;
+
+    while index + 1 < lines.len() {
+        let header = lines[index].is_empty()
+            && lines[index + 1].starts_with('[')
+            && lines[index - 1].starts_with('#');
+
+        if header {
+            let start = lines[..index]
+                .iter()
+                .rposition(|line| !line.starts_with('#'))
+                .map_or(0, |last| last + 1);
+
+            if start > 0 {
+                lines.remove(index);
+                lines.insert(start, "");
+            }
+        }
+
+        index += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use std::time::Duration;
 
     use pazari_proto::DEFAULT_VSOCK_PORT;

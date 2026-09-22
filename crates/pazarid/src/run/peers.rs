@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use pazari_proto::{GuestMessage, Host, HostMessage, JsonLinesCodec};
-use pazari_transport::{AnyConnection, MessageStream, PeerId, TransportError};
+use pazari_proto::{GuestMessage, HostMessage};
+use pazari_transport::{self as transport, AnyConnection, Ended, HostStream, PeerId};
 use pazari_types::Timestamp;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -11,7 +11,7 @@ use crate::broker::Event;
 const OUTBOUND_DEPTH: usize = 64;
 const REPORT_DEPTH: usize = 256;
 
-type Stream = MessageStream<AnyConnection, JsonLinesCodec, Host>;
+type Stream = HostStream<AnyConnection>;
 
 #[derive(Debug)]
 enum Said {
@@ -124,40 +124,22 @@ async fn pump(
     reports: mpsc::Sender<Report>,
     mut outgoing: mpsc::Receiver<HostMessage>,
 ) {
-    loop {
-        let step = tokio::select! {
-            incoming = stream.recv() => Step::Incoming(incoming),
-            message = outgoing.recv() => Step::Outgoing(message),
-        };
+    let tagged = {
+        let peer = peer.clone();
 
-        match step {
-            Step::Incoming(Ok(Some(message))) => {
-                let report = Report {
-                    link,
-                    peer: peer.clone(),
-                    said: Said::Message(message),
-                };
-
-                if reports.send(report).await.is_err() {
-                    return;
-                }
-            }
-            Step::Incoming(Ok(None)) => {
-                debug!(%peer, "the guest closed the connection");
-                break;
-            }
-            Step::Incoming(Err(error)) => {
-                warn!(%peer, %error, "the connection failed");
-                break;
-            }
-            Step::Outgoing(Some(message)) => {
-                if let Err(error) = stream.send(&message).await {
-                    warn!(%peer, %error, "failed to send to the guest");
-                    break;
-                }
-            }
-            Step::Outgoing(None) => return,
+        move |message| Report {
+            link,
+            peer: peer.clone(),
+            said: Said::Message(message),
         }
+    };
+
+    match transport::pump(&mut stream, &reports, tagged, &mut outgoing).await {
+        Ended::Closed => debug!(%peer, "the guest closed the connection"),
+        Ended::Recv(error) => warn!(%peer, %error, "the connection failed"),
+        Ended::Send(error) => warn!(%peer, %error, "failed to send to the guest"),
+        // The daemon let go of this connection; nobody is left to tell.
+        Ended::Local => return,
     }
 
     let report = Report {
@@ -169,17 +151,11 @@ async fn pump(
     drop(reports.send(report).await);
 }
 
-#[derive(Debug)]
-enum Step {
-    Incoming(Result<Option<GuestMessage>, TransportError>),
-    Outgoing(Option<HostMessage>),
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use pazari_proto::{Guest, PROTOCOL_VERSION};
+    use pazari_proto::PROTOCOL_VERSION;
     use pazari_transport::{AnyConnector, Connector, Listener, UnixConnector, UnixListener};
     use tempfile::TempDir;
     use tokio::time::timeout;
@@ -188,7 +164,7 @@ mod tests {
 
     const PATIENCE: Duration = Duration::from_secs(5);
 
-    type GuestStream = MessageStream<AnyConnection, JsonLinesCodec, Guest>;
+    type GuestStream = pazari_transport::GuestStream<AnyConnection>;
 
     fn at(millis: u64) -> Timestamp {
         Timestamp::from_millis(millis)

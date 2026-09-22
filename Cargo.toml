@@ -5,6 +5,7 @@ members = [
     "crates/pazari-types",
     "crates/pazari-config",
     "crates/pazari-systemd",
+    "crates/pazari-metrics",
     "crates/pazari-transport",
     "crates/pazari-agent",
     "crates/pazarid",

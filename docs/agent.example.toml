@@ -94,6 +94,10 @@ thp_always_fatal = true
 #     unit = "workload.service"
 kind = "cgroupfs"
 
+[metrics]
+# The address the Prometheus endpoint answers scrapes on.
+listen = "127.0.0.1:9651"
+
 [transport]
 # Possible variants:
 # - `AF_VSOCK`.

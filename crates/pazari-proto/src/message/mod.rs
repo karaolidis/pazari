@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_with::{DurationMilliSeconds, serde_as};
@@ -59,6 +59,21 @@ pub enum GuestMessage {
     Bye {},
 }
 
+impl GuestMessage {
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Hello { .. } => "hello",
+            Self::GrantRequest { .. } => "grant_request",
+            Self::OfferRelease { .. } => "offer_release",
+            Self::ReclaimAck { .. } => "reclaim_ack",
+            Self::ReclaimNak { .. } => "reclaim_nak",
+            Self::Status(_) => "status",
+            Self::Bye {} => "bye",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantReason {
@@ -117,6 +132,24 @@ pub enum DenyReason {
     HostPressure,
     RateLimited,
     Policy,
+}
+
+impl DenyReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ceiling => "ceiling",
+            Self::HostPressure => "host_pressure",
+            Self::RateLimited => "rate_limited",
+            Self::Policy => "policy",
+        }
+    }
+}
+
+impl fmt::Display for DenyReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 pub trait Peer {

@@ -2,7 +2,7 @@ pub mod error;
 
 mod file;
 
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use pazari_transport::{AnyListener, TransportError, UnixListener, VsockListener};
 use pazari_types::Interval;
@@ -20,6 +20,8 @@ pub struct Config {
     pub tick_interval: Interval,
 
     pub listeners: Vec<Transport>,
+
+    pub metrics: Option<SocketAddr>,
 
     pub policy: Policy,
 
@@ -107,7 +109,7 @@ fn spaced(lines: &mut Vec<&str>) {
 mod tests {
     use std::path::Path;
 
-    use std::time::Duration;
+    use std::{net::Ipv4Addr, time::Duration};
 
     use pazari_proto::DEFAULT_VSOCK_PORT;
     use pazari_transport::{Listener, PeerId, adapter::vsock::VMADDR_CID_ANY};
@@ -228,6 +230,7 @@ mod tests {
                     }),
                     ..defaults.policy
                 },
+                metrics: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9650))),
                 ..defaults
             },
             "the template's example values have drifted from the defaults they print"
@@ -532,6 +535,40 @@ mod tests {
             error,
             "guests.example.qmp.deadline: Interval rejects 0ns: expected (0s, 24h]"
         );
+    }
+
+    #[test]
+    fn a_file_that_asks_for_no_metrics_binds_nothing() {
+        assert_eq!(parse(MINIMAL).metrics, None);
+    }
+
+    #[test]
+    fn a_metrics_table_binds_the_address_it_names() {
+        assert_eq!(
+            parse(&MINIMAL.replace(
+                "[policy]",
+                "[metrics]\nlisten = \"127.0.0.1:9650\"\n\n[policy]",
+            ))
+            .metrics,
+            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9650)))
+        );
+    }
+
+    #[test]
+    fn a_metrics_address_that_is_not_one_names_the_field_that_carries_it() {
+        let error = rejects(&MINIMAL.replace(
+            "[policy]",
+            "[metrics]\nlisten = \"nowhere in particular\"\n\n[policy]",
+        ));
+
+        assert!(error.contains("listen"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_metrics_table_without_an_address_is_refused() {
+        let error = rejects(&MINIMAL.replace("[policy]", "[metrics]\n\n[policy]"));
+
+        assert!(error.contains("listen"), "unexpected error: {error}");
     }
 
     #[test]

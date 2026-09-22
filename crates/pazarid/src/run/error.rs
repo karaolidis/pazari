@@ -1,5 +1,6 @@
 use std::io;
 
+use pazari_metrics::MetricsError;
 use pazari_transport::TransportError;
 use thiserror::Error;
 
@@ -12,6 +13,9 @@ pub enum RunError {
 
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
+
+    #[error(transparent)]
+    Metrics(#[from] MetricsError),
 
     #[error("failed to install the {signal} handler: {source}")]
     Signal {

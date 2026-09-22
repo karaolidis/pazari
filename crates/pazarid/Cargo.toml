@@ -22,6 +22,7 @@ doku = "0.21.2"
 enum_dispatch = "0.3.13"
 humantime-serde = "1.1.1"
 pazari-config = { path = "../pazari-config" }
+pazari-metrics = { path = "../pazari-metrics" }
 pazari-proto = { path = "../pazari-proto" }
 pazari-systemd = { path = "../pazari-systemd" }
 pazari-transport = { path = "../pazari-transport" }

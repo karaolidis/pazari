@@ -40,8 +40,8 @@ pazari-stress [--interval DURATION] [--arena SIZE] [--no-reserve] [--no-thp]
 
 ## Phase grammar
 
-A phase spec is a kind, an `=`, its target, and then comma-separated
-`key=value` options:
+A phase spec is a kind, an `=`, its target, and then comma-separated `key=value`
+options:
 
 ```
 grow=2GiB[,rate=100MiB/s][,chunk=1MiB]

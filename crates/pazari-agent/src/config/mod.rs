@@ -1,5 +1,7 @@
 mod file;
 
+use std::net::SocketAddr;
+
 pub use pazari_config::{ConfigError, Settings};
 
 use crate::{
@@ -11,6 +13,7 @@ pub struct Config {
     pub engine: EngineConfig,
     pub runtime: RuntimeConfig,
     pub session: SessionConfig,
+    pub metrics: Option<SocketAddr>,
 }
 
 impl Settings for Config {
@@ -27,6 +30,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use std::{
+        net::Ipv4Addr,
         num::{NonZeroU32, NonZeroU64},
         time::Duration,
     };
@@ -147,10 +151,45 @@ mod tests {
                     reclaim_swappiness: Some(Swappiness::NONE),
                     ..defaults.engine
                 },
+                metrics: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9651))),
                 ..defaults
             },
             "the template's example values have drifted from the defaults they print"
         );
+    }
+
+    #[test]
+    fn a_file_that_asks_for_no_metrics_binds_nothing() {
+        assert_eq!(parse(MINIMAL).metrics, None);
+    }
+
+    #[test]
+    fn a_metrics_table_binds_the_address_it_names() {
+        assert_eq!(
+            parse(&MINIMAL.replace(
+                "[transport]",
+                "[metrics]\nlisten = \"127.0.0.1:9651\"\n\n[transport]",
+            ))
+            .metrics,
+            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9651)))
+        );
+    }
+
+    #[test]
+    fn a_metrics_address_that_is_not_one_names_the_field_that_carries_it() {
+        let error = rejects(&MINIMAL.replace(
+            "[transport]",
+            "[metrics]\nlisten = \"nowhere in particular\"\n\n[transport]",
+        ));
+
+        assert!(error.contains("listen"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_metrics_table_without_an_address_is_refused() {
+        let error = rejects(&MINIMAL.replace("[transport]", "[metrics]\n\n[transport]"));
+
+        assert!(error.contains("listen"), "unexpected error: {error}");
     }
 
     #[test]

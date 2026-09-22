@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use crate::{
     broker::{Event, GuestId},
     config::Qmp,
+    run::metrics::DeviceMetrics,
     runtime::{Actuator, Driver, QmpActuator, RuntimeError},
 };
 
@@ -51,6 +52,7 @@ pub struct Supervisor<C> {
     sizes: mpsc::Sender<Event>,
     targets: watch::Receiver<Option<u64>>,
     backoff: Backoff,
+    metrics: DeviceMetrics,
 }
 
 impl<C: Connect> Supervisor<C> {
@@ -63,6 +65,7 @@ impl<C: Connect> Supervisor<C> {
         sizes: mpsc::Sender<Event>,
         targets: watch::Receiver<Option<u64>>,
         backoff: Backoff,
+        metrics: DeviceMetrics,
     ) -> Self {
         Self {
             guest,
@@ -72,11 +75,14 @@ impl<C: Connect> Supervisor<C> {
             sizes,
             targets,
             backoff,
+            metrics,
         }
     }
 
     pub async fn run(mut self) {
-        while self.attach().await {}
+        while self.attach().await {
+            self.metrics.reconnected();
+        }
     }
 
     async fn attach(&mut self) -> bool {
@@ -98,6 +104,8 @@ impl<C: Connect> Supervisor<C> {
                 }
             }
             Err(error) => {
+                self.metrics.seed_failed();
+
                 return self
                     .retry("failed to read the guest's memory size", &error)
                     .await;
@@ -137,6 +145,8 @@ impl<C: Connect> Supervisor<C> {
                     };
 
                     if let Err(error) = driver.actuator().set_requested(bytes).await {
+                        self.metrics.refused();
+
                         warn!(
                             guest = %self.name,
                             bytes,
@@ -169,13 +179,17 @@ mod tests {
         time::Duration,
     };
 
+    use pazari_metrics::{Encoded, Registry};
     use tokio::{
         task,
         time::{Instant, timeout},
     };
 
     use super::*;
-    use crate::broker::testing::{BOOT, GIB, MIB, ONE, id};
+    use crate::{
+        broker::testing::{BOOT, GIB, MIB, ONE, id},
+        run::metrics::Observer,
+    };
 
     const GROWN: u64 = 3072 * MIB;
 
@@ -354,12 +368,14 @@ mod tests {
         sizes: mpsc::Receiver<Event>,
         target: watch::Sender<Option<u64>>,
         supervisor: task::JoinHandle<()>,
+        metrics: Registry,
     }
 
     impl Watched {
         fn start(socket: Socket) -> Self {
             let (sizes, queue) = mpsc::channel(DEPTH);
             let (target, targets) = watch::channel(None);
+            let (observer, metrics) = Observer::new();
 
             let supervisor = tokio::spawn(
                 Supervisor::new(
@@ -370,6 +386,7 @@ mod tests {
                     sizes,
                     targets,
                     Backoff::new(RETRY_MIN, RETRY_MAX),
+                    observer.device("one"),
                 )
                 .run(),
             );
@@ -379,7 +396,15 @@ mod tests {
                 sizes: queue,
                 target,
                 supervisor,
+                metrics,
             }
+        }
+
+        fn counted(&self, series: &str) -> bool {
+            self.metrics
+                .encoded()
+                .expect("a registry encodes")
+                .contains(series)
         }
 
         async fn sized(&mut self) -> u64 {
@@ -505,6 +530,23 @@ mod tests {
         assert_eq!(watched.socket.opens(), 1);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_device_that_misbehaves_is_counted_against_its_guest() {
+        let mut watched = Watched::start(Socket::new(BOOT).refusing_to_be_read(1).refusing_sizes());
+
+        assert_eq!(watched.sized().await, BOOT);
+
+        assert!(watched.counted("pazarid_device_seed_failures_total{guest=\"one\"} 1"));
+        assert!(watched.counted("pazarid_device_reconnects_total{guest=\"one\"} 1"));
+
+        watched.target.send_replace(Some(GROWN));
+        watched
+            .settles("the refused resize", |_| {
+                watched.counted("pazarid_device_refused_actuations_total{guest=\"one\"} 1")
+            })
+            .await;
+    }
+
     #[tokio::test]
     async fn a_supervisor_stops_once_the_daemon_has() {
         let socket = Socket::new(BOOT);
@@ -520,6 +562,7 @@ mod tests {
                 sizes,
                 targets,
                 Backoff::new(RETRY_MIN, RETRY_MAX),
+                DeviceMetrics::default(),
             )
             .run(),
         );

@@ -5,6 +5,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
     num::{NonZeroU32, NonZeroU64},
     path::PathBuf,
     time::Duration,
@@ -40,6 +41,9 @@ pub struct File {
     tick_interval: Duration,
 
     policy: PolicySection,
+
+    #[serde(default)]
+    metrics: Option<MetricsSection>,
 
     #[serde(default)]
     #[doku(as = "GuestsTemplate")]
@@ -104,11 +108,20 @@ impl File {
         Ok(Config {
             tick_interval,
             listeners,
+            metrics: self.metrics.map(|metrics| metrics.listen),
             policy,
             registry,
             devices,
         })
     }
+}
+
+#[derive(Debug, Deserialize, Document)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsSection {
+    /// The address the Prometheus endpoint answers scrapes on.
+    #[doku(as = "String", example = "127.0.0.1:9650")]
+    listen: SocketAddr,
 }
 
 #[serde_inline_default]

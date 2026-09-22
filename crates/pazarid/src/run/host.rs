@@ -1,11 +1,11 @@
-use pazari_types::MemInfo;
+use pazari_types::{MemInfo, Timestamp};
 use tracing::{info, warn};
 
 use crate::{
-    broker::{Policy, Registry},
+    broker::{Event, Policy, Registry},
     run::error::RunError,
     runtime::{
-        HostMemory,
+        HostMemory, RuntimeError,
         memory::{PRESSURE, SWAPS},
     },
 };
@@ -69,6 +69,18 @@ pub async fn survey<M: HostMemory>(
     }
 
     Ok(())
+}
+
+pub async fn reading<M: HostMemory>(memory: &M, now: Timestamp) -> Result<Event, RuntimeError> {
+    let info = memory.meminfo().await?;
+    let pressure = memory.pressure().await?;
+
+    Ok(Event::HostAvailable {
+        now,
+        bytes: info.available,
+        swap_free: info.swap_free,
+        psi: pressure.map(|pressure| pressure.some10),
+    })
 }
 
 async fn zram<M: HostMemory>(memory: &M) {
@@ -251,5 +263,38 @@ mod tests {
         let memory = host(ASKED, GIB).unreadable_swaps();
 
         assert!(survey(&memory, &granting(), &registry()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_reading_carries_the_whole_host_at_one_instant() {
+        let memory = MockMemory::new(meminfo(8 << 30, 4 << 30, 2 << 30)).pressured(12.5);
+
+        let event = reading(&memory, Timestamp::START)
+            .await
+            .expect("the mock answers");
+
+        let Event::HostAvailable {
+            bytes,
+            swap_free,
+            psi,
+            ..
+        } = event
+        else {
+            panic!("the daemon read {event:?}");
+        };
+
+        assert_eq!((bytes, swap_free), (4 << 30, 2 << 30));
+        assert_eq!(psi, Some(12.5));
+    }
+
+    #[tokio::test]
+    async fn a_host_without_pressure_accounting_reads_as_much_as_it_can() {
+        let memory = unmeasured(8 << 30, 0);
+
+        let event = reading(&memory, Timestamp::START)
+            .await
+            .expect("the mock answers");
+
+        assert!(matches!(event, Event::HostAvailable { psi: None, .. }));
     }
 }

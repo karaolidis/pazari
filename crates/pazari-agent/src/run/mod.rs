@@ -1,7 +1,9 @@
 pub mod error;
+pub mod metrics;
 
 use std::sync::Arc;
 
+use pazari_metrics::Exposition;
 use pazari_proto::GuestMessage;
 use pazari_systemd::Notifier;
 use pazari_types::Clock;
@@ -11,7 +13,7 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-pub use crate::run::error::RunError;
+pub use crate::run::{error::RunError, metrics::Observer};
 use crate::{
     config::Config,
     engine::{BootInfo, Engine, Event},
@@ -58,6 +60,18 @@ pub async fn run(config: Config) -> Result<(), RunError> {
 
     let (mut engine, actions) = Engine::try_new(config.engine, boot)?;
 
+    let (mut observer, exposition) = match config.metrics {
+        Some(address) => {
+            let (observer, published) = Observer::new();
+            let exposition = Exposition::bind(address, published).await?;
+
+            info!(%address, "the agent is serving metrics");
+
+            (observer, Some(exposition))
+        }
+        None => (Observer::default(), None),
+    };
+
     let cgroup = Arc::new(AnyCgroup::open(&config.runtime).await?);
 
     let mut applier = Applier::new(Arc::clone(&cgroup), config.runtime.reclaim_chunk, clock);
@@ -97,6 +111,8 @@ pub async fn run(config: Config) -> Result<(), RunError> {
         source,
     })?;
 
+    let endpoint = exposition.map(|exposition| tokio::spawn(exposition.serve()));
+
     let mut notifier = Notifier::new();
     notifier.ready();
 
@@ -123,9 +139,14 @@ pub async fn run(config: Config) -> Result<(), RunError> {
             Step::Stop => break,
         };
 
+        observer.observe_event(&event);
+
         applier.stop_releasing(&event);
 
         let actions = engine.handle(event);
+
+        observer.refresh(&engine);
+        observer.observe_actions(&actions);
 
         plugged.send_replace(engine.plugged());
 
@@ -140,6 +161,10 @@ pub async fn run(config: Config) -> Result<(), RunError> {
     outbound.send(GuestMessage::Bye {});
     session.shutdown(outbound).await;
     cgroup.set_high(Limit::Max).await?;
+
+    if let Some(endpoint) = endpoint {
+        endpoint.abort();
+    }
 
     Ok(())
 }

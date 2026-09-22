@@ -40,6 +40,10 @@ psi = 20.0
 # How much memory one such request asks a guest for.
 step = "256MiB"
 
+[metrics]
+# The address the Prometheus endpoint answers scrapes on.
+listen = "127.0.0.1:9650"
+
 # The guests the daemon answers to, one table each.
 [guests.example]
 # The most memory this guest may hold. Set me.

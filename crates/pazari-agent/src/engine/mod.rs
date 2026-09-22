@@ -12,7 +12,7 @@ mod phase;
 #[cfg(test)]
 pub(crate) mod testing;
 
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use pazari_proto::HostMessage;
 use pazari_types::Timestamp;
@@ -36,6 +36,33 @@ pub enum Mode {
     AwaitingGrant,
     Releasing,
     Exhausted,
+}
+
+impl Mode {
+    pub const ALL: [Self; 5] = [
+        Self::Titrating,
+        Self::Steady,
+        Self::AwaitingGrant,
+        Self::Releasing,
+        Self::Exhausted,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Titrating => "titrating",
+            Self::Steady => "steady",
+            Self::AwaitingGrant => "awaiting_grant",
+            Self::Releasing => "releasing",
+            Self::Exhausted => "exhausted",
+        }
+    }
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone)]

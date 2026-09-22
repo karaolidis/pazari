@@ -386,7 +386,7 @@ impl<A: Arbiter> Broker<A> {
                 continue;
             };
 
-            let view = view(id, spec, state);
+            let view = state.view(id, spec);
 
             if id == guest {
                 asking = Some(view);
@@ -662,7 +662,7 @@ impl<A: Arbiter> Broker<A> {
                 .is_none_or(|session| session.reclaim.is_some());
 
             if state.size.is_some() && !asked {
-                candidates.push(view(id, spec, state));
+                candidates.push(state.view(id, spec));
             }
         }
 
@@ -848,22 +848,6 @@ impl<A: Arbiter> Broker<A> {
         self.registry
             .spec(guest)
             .map_or("?", |spec| spec.name.as_str())
-    }
-}
-
-fn view<'a>(id: GuestId, spec: &'a GuestSpec, state: &Guest) -> GuestView<'a> {
-    let negotiated = state.session.as_ref().and_then(Session::negotiated);
-
-    GuestView {
-        id,
-        spec,
-        boot_mem: negotiated.map(|session| session.boot_mem),
-        size: state.size.unwrap_or(0),
-        requested: state.requested(),
-        status: negotiated.and_then(|session| session.status),
-        stale: negotiated.is_some_and(|session| session.stale),
-        connected: negotiated.is_some(),
-        granted: state.granted,
     }
 }
 

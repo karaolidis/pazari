@@ -98,7 +98,7 @@ impl Cgroup for RawCgroup {
     async fn events(&self) -> Result<MemoryEvents, RuntimeError> {
         let text = self.read(MEMORY_EVENTS).await?;
 
-        parse::events(&self.path.join(MEMORY_EVENTS), &text)
+        MemoryEvents::parse(&self.path.join(MEMORY_EVENTS), &text)
     }
 
     async fn current(&self) -> Result<u64, RuntimeError> {

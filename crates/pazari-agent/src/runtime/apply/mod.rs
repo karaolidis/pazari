@@ -2,9 +2,10 @@ use std::{num::NonZeroU64, sync::Arc};
 
 use pazari_proto::GuestMessage;
 use pazari_types::Clock;
+use tracing::debug;
 
 use crate::{
-    engine::Action,
+    engine::{Action, Event},
     runtime::{
         cgroup::{Cgroup, Limit},
         error::RuntimeError,
@@ -50,6 +51,17 @@ impl<C: Cgroup + 'static> Applier<C> {
         }
 
         Ok(())
+    }
+
+    pub fn stop_releasing(&mut self, event: &Event) {
+        if !matches!(event, Event::ThrottleWake { .. }) {
+            return;
+        }
+
+        if let Some(reclaim) = self.reclaimer().handle() {
+            debug!("cancelling the running release");
+            reclaim.cancel();
+        }
     }
 }
 

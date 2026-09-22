@@ -28,37 +28,39 @@ pub enum Hotplug {
     Offline,
 }
 
-#[must_use]
-pub fn parse(payload: &[u8]) -> Option<Hotplug> {
-    let mut subsystem = None;
-    let mut action = None;
+impl Hotplug {
+    #[must_use]
+    pub fn parse(payload: &[u8]) -> Option<Self> {
+        let mut subsystem = None;
+        let mut action = None;
 
-    for field in payload.split(|byte| *byte == 0).skip(1) {
-        let Ok(field) = str::from_utf8(field) else {
-            continue;
-        };
+        for field in payload.split(|byte| *byte == 0).skip(1) {
+            let Ok(field) = str::from_utf8(field) else {
+                continue;
+            };
 
-        let Some((key, value)) = field.split_once('=') else {
-            continue;
-        };
+            let Some((key, value)) = field.split_once('=') else {
+                continue;
+            };
 
-        match key {
-            "SUBSYSTEM" => subsystem = Some(value),
-            "ACTION" => action = Some(value),
-            _ => {}
+            match key {
+                "SUBSYSTEM" => subsystem = Some(value),
+                "ACTION" => action = Some(value),
+                _ => {}
+            }
         }
-    }
 
-    if subsystem? != "memory" {
-        return None;
-    }
+        if subsystem? != "memory" {
+            return None;
+        }
 
-    match action? {
-        "add" => Some(Hotplug::Add),
-        "remove" => Some(Hotplug::Remove),
-        "online" => Some(Hotplug::Online),
-        "offline" => Some(Hotplug::Offline),
-        _ => None,
+        match action? {
+            "add" => Some(Self::Add),
+            "remove" => Some(Self::Remove),
+            "online" => Some(Self::Online),
+            "offline" => Some(Self::Offline),
+            _ => None,
+        }
     }
 }
 
@@ -114,7 +116,7 @@ impl HotplugListener {
         loop {
             let len = self.recv(&mut payload).await?;
 
-            if parse(&payload[..len]).is_some() {
+            if Hotplug::parse(&payload[..len]).is_some() {
                 break;
             }
         }
@@ -188,10 +190,10 @@ mod tests {
 
     #[test]
     fn every_memory_hotplug_is_recognised() {
-        assert_eq!(parse(&memory("add")), Some(Hotplug::Add));
-        assert_eq!(parse(&memory("remove")), Some(Hotplug::Remove));
-        assert_eq!(parse(&memory("online")), Some(Hotplug::Online));
-        assert_eq!(parse(&memory("offline")), Some(Hotplug::Offline));
+        assert_eq!(Hotplug::parse(&memory("add")), Some(Hotplug::Add));
+        assert_eq!(Hotplug::parse(&memory("remove")), Some(Hotplug::Remove));
+        assert_eq!(Hotplug::parse(&memory("online")), Some(Hotplug::Online));
+        assert_eq!(Hotplug::parse(&memory("offline")), Some(Hotplug::Offline));
     }
 
     #[test]
@@ -206,7 +208,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(parse(&block), None);
+        assert_eq!(Hotplug::parse(&block), None);
     }
 
     #[test]
@@ -220,22 +222,25 @@ mod tests {
             ],
         );
 
-        assert_eq!(parse(&change), None);
+        assert_eq!(Hotplug::parse(&change), None);
     }
 
     #[test]
     fn a_payload_without_the_properties_that_name_it_is_not_a_hotplug() {
-        assert_eq!(parse(b""), None);
-        assert_eq!(parse(b"add@/devices/system/memory/memory42\0"), None);
+        assert_eq!(Hotplug::parse(b""), None);
         assert_eq!(
-            parse(&payload(
+            Hotplug::parse(b"add@/devices/system/memory/memory42\0"),
+            None
+        );
+        assert_eq!(
+            Hotplug::parse(&payload(
                 "add@/devices/system/memory/memory42",
                 &["ACTION=add", "DEVPATH=/devices/system/memory/memory42"],
             )),
             None
         );
         assert_eq!(
-            parse(&payload(
+            Hotplug::parse(&payload(
                 "add@/devices/system/memory/memory42",
                 &["SUBSYSTEM=memory"],
             )),
@@ -259,6 +264,6 @@ mod tests {
         bytes.extend_from_slice(&[0xff, 0xfe]);
         bytes.extend_from_slice(b"\0ACTION=online\0SUBSYSTEM=memory\0");
 
-        assert_eq!(parse(&bytes), Some(Hotplug::Online));
+        assert_eq!(Hotplug::parse(&bytes), Some(Hotplug::Online));
     }
 }

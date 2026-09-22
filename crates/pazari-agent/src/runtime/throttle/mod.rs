@@ -10,7 +10,7 @@ use tokio::io::{Interest, unix::AsyncFd};
 use crate::{
     engine::Event,
     runtime::{
-        cgroup::{MEMORY_EVENTS, parse},
+        cgroup::{MEMORY_EVENTS, parse::MemoryEvents},
         error::RuntimeError,
     },
 };
@@ -74,7 +74,7 @@ impl ThrottleWatcher {
     }
 }
 
-fn reread(file: &mut File, path: &Path) -> Result<parse::MemoryEvents, RuntimeError> {
+fn reread(file: &mut File, path: &Path) -> Result<MemoryEvents, RuntimeError> {
     file.seek(SeekFrom::Start(0))
         .map_err(|source| RuntimeError::Read {
             path: path.to_path_buf(),
@@ -89,7 +89,7 @@ fn reread(file: &mut File, path: &Path) -> Result<parse::MemoryEvents, RuntimeEr
             source,
         })?;
 
-    parse::events(path, &text)
+    MemoryEvents::parse(path, &text)
 }
 
 #[cfg(test)]
@@ -99,7 +99,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::runtime::{cgroup::parse::MemoryEvents, testing::EVENTS};
+    use crate::runtime::testing::EVENTS;
 
     #[test]
     fn a_reread_sees_the_counters_that_moved_since_the_last_one() {

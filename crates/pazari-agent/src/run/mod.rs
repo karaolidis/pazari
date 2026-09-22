@@ -126,7 +126,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
             Step::Stop => break,
         };
 
-        stop_releasing(&event, &mut applier);
+        applier.stop_releasing(&event);
 
         let actions = engine.handle(event);
 
@@ -155,17 +155,6 @@ pub async fn panic_open(config: &RuntimeConfig) -> Result<(), RunError> {
     println!("{}", cgroup.released());
 
     Ok(())
-}
-
-fn stop_releasing<C: Cgroup + 'static>(event: &Event, applier: &mut Applier<C>) {
-    if !matches!(event, Event::ThrottleWake { .. }) {
-        return;
-    }
-
-    if let Some(reclaim) = applier.reclaimer().handle() {
-        debug!("cancelling the running release");
-        reclaim.cancel();
-    }
 }
 
 #[derive(Debug)]
@@ -312,13 +301,10 @@ mod tests {
             .await
             .expect("the release starts");
 
-        stop_releasing(
-            &Event::Tick {
-                now: clock.now(),
-                snapshot: Snapshot::default(),
-            },
-            &mut applier,
-        );
+        applier.stop_releasing(&Event::Tick {
+            now: clock.now(),
+            snapshot: Snapshot::default(),
+        });
 
         assert!(
             !applier
@@ -329,14 +315,11 @@ mod tests {
             "a tick stopped the release"
         );
 
-        stop_releasing(
-            &Event::ThrottleWake {
-                now: clock.now(),
-                high_events: 1,
-                max_events: 0,
-            },
-            &mut applier,
-        );
+        applier.stop_releasing(&Event::ThrottleWake {
+            now: clock.now(),
+            high_events: 1,
+            max_events: 0,
+        });
 
         assert!(
             applier

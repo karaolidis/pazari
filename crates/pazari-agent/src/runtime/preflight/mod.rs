@@ -5,7 +5,7 @@ use pazari_types::Swappiness;
 use crate::runtime::{
     cgroup::{
         Limit, MEMORY_CURRENT, MEMORY_EVENTS, MEMORY_HIGH, MEMORY_MAX, MEMORY_OOM_GROUP,
-        MEMORY_PRESSURE, MEMORY_RECLAIM, MEMORY_SWAP_CURRENT, MEMORY_SWAP_MAX, parse,
+        MEMORY_PRESSURE, MEMORY_RECLAIM, MEMORY_SWAP_CURRENT, MEMORY_SWAP_MAX,
     },
     config::RuntimeConfig,
 };
@@ -413,7 +413,7 @@ impl<'a> Preflight<'a> {
         let path = self.config.cgroup.join(MEMORY_SWAP_MAX);
 
         if let Ok(text) = fs::read_to_string(&path)
-            && parse::limit(&path, &text).ok().and_then(Limit::bytes) == Some(0)
+            && Limit::parse(&path, &text).ok().and_then(Limit::bytes) == Some(0)
         {
             return check.warn(format!("{intent}, and {} is 0", path.display()));
         }

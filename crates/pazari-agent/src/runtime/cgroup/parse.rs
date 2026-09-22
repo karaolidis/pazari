@@ -12,6 +12,20 @@ pub enum Limit {
 }
 
 impl Limit {
+    pub fn parse(path: &Path, text: &str) -> Result<Self, RuntimeError> {
+        let text = text.trim();
+
+        if text == "max" {
+            return Ok(Self::Max);
+        }
+
+        Ok(Self::Bytes(number(
+            path,
+            text,
+            "a decimal byte count or \"max\"",
+        )?))
+    }
+
     #[must_use]
     pub const fn bytes(self) -> Option<u64> {
         match self {
@@ -48,54 +62,42 @@ pub struct MemoryEvents {
     pub max: u64,
 }
 
-pub fn events(path: &Path, text: &str) -> Result<MemoryEvents, RuntimeError> {
-    let mut high = None;
-    let mut max = None;
+impl MemoryEvents {
+    pub fn parse(path: &Path, text: &str) -> Result<Self, RuntimeError> {
+        let mut high = None;
+        let mut max = None;
 
-    for line in text.lines() {
-        let mut fields = line.split_whitespace();
+        for line in text.lines() {
+            let mut fields = line.split_whitespace();
 
-        let (Some(key), Some(value)) = (fields.next(), fields.next()) else {
-            continue;
-        };
+            let (Some(key), Some(value)) = (fields.next(), fields.next()) else {
+                continue;
+            };
 
-        let slot = match key {
-            "high" => &mut high,
-            "max" => &mut max,
-            _ => continue,
-        };
+            let slot = match key {
+                "high" => &mut high,
+                "max" => &mut max,
+                _ => continue,
+            };
 
-        *slot = Some(number(path, value, "a decimal counter")?);
+            *slot = Some(number(path, value, "a decimal counter")?);
+        }
+
+        Ok(Self {
+            high: high.ok_or_else(|| RuntimeError::Absent {
+                path: path.to_path_buf(),
+                key: "high",
+            })?,
+            max: max.ok_or_else(|| RuntimeError::Absent {
+                path: path.to_path_buf(),
+                key: "max",
+            })?,
+        })
     }
-
-    Ok(MemoryEvents {
-        high: high.ok_or_else(|| RuntimeError::Absent {
-            path: path.to_path_buf(),
-            key: "high",
-        })?,
-        max: max.ok_or_else(|| RuntimeError::Absent {
-            path: path.to_path_buf(),
-            key: "max",
-        })?,
-    })
 }
 
 pub fn count(path: &Path, text: &str) -> Result<u64, RuntimeError> {
     number(path, text.trim(), "a decimal byte count")
-}
-
-pub fn limit(path: &Path, text: &str) -> Result<Limit, RuntimeError> {
-    let text = text.trim();
-
-    if text == "max" {
-        return Ok(Limit::Max);
-    }
-
-    Ok(Limit::Bytes(number(
-        path,
-        text,
-        "a decimal byte count or \"max\"",
-    )?))
 }
 
 fn number(path: &Path, text: &str, expected: &'static str) -> Result<u64, RuntimeError> {
@@ -120,22 +122,22 @@ mod tests {
     #[test]
     fn memory_events_yields_the_two_counters_that_matter() {
         assert_eq!(
-            events(&path(), EVENTS).expect("a real memory.events"),
+            MemoryEvents::parse(&path(), EVENTS).expect("a real memory.events"),
             MemoryEvents { high: 37, max: 2 }
         );
     }
 
     #[test]
     fn a_memory_events_without_its_counters_is_rejected() {
-        let error = events(&path(), "low 0\noom 0\n").expect_err("no high line");
+        let error = MemoryEvents::parse(&path(), "low 0\noom 0\n").expect_err("no high line");
 
         assert_eq!(
             error.to_string(),
             "/sys/fs/cgroup/workload/memory.events carries no high line"
         );
 
-        assert!(events(&path(), "low 0\nhigh 1\n").is_err());
-        assert!(events(&path(), "high wat\nmax 0\n").is_err());
+        assert!(MemoryEvents::parse(&path(), "low 0\nhigh 1\n").is_err());
+        assert!(MemoryEvents::parse(&path(), "high wat\nmax 0\n").is_err());
     }
 
     #[test]
@@ -150,13 +152,16 @@ mod tests {
 
     #[test]
     fn a_limit_reads_both_a_count_and_the_sentinel() {
-        assert_eq!(limit(&path(), "max\n").expect("the sentinel"), Limit::Max);
         assert_eq!(
-            limit(&path(), "2147483648\n").expect("a byte count"),
+            Limit::parse(&path(), "max\n").expect("the sentinel"),
+            Limit::Max
+        );
+        assert_eq!(
+            Limit::parse(&path(), "2147483648\n").expect("a byte count"),
             Limit::Bytes(2_147_483_648)
         );
 
-        let error = limit(&path(), "infinity").expect_err("not a limit");
+        let error = Limit::parse(&path(), "infinity").expect_err("not a limit");
 
         assert_eq!(
             error.to_string(),

@@ -1,6 +1,10 @@
 use pazari_types::Timestamp;
 
-use crate::broker::session::Session;
+use crate::broker::{
+    arbiter::GuestView,
+    registry::{GuestId, GuestSpec},
+    session::Session,
+};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Guest {
@@ -20,6 +24,23 @@ impl Guest {
         match self.reconcile {
             Some(reconcile) => Some(reconcile.target),
             None => None,
+        }
+    }
+
+    #[must_use]
+    pub fn view<'a>(&self, id: GuestId, spec: &'a GuestSpec) -> GuestView<'a> {
+        let negotiated = self.session.as_ref().and_then(Session::negotiated);
+
+        GuestView {
+            id,
+            spec,
+            boot_mem: negotiated.map(|session| session.boot_mem),
+            size: self.size.unwrap_or(0),
+            requested: self.requested(),
+            status: negotiated.and_then(|session| session.status),
+            stale: negotiated.is_some_and(|session| session.stale),
+            connected: negotiated.is_some(),
+            granted: self.granted,
         }
     }
 }

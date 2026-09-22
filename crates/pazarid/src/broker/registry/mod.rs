@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroU64};
 
 use pazari_transport::PeerId;
 use thiserror::Error;
@@ -22,7 +22,7 @@ impl GuestId {
 pub struct GuestSpec {
     pub name: String,
 
-    pub ceiling: u64,
+    pub ceiling: NonZeroU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -77,8 +77,8 @@ impl Registry {
     }
 
     #[must_use]
-    pub fn ceiling(&self, id: GuestId) -> u64 {
-        self.spec(id).map_or(0, |spec| spec.ceiling)
+    pub fn ceiling(&self, id: GuestId) -> Option<NonZeroU64> {
+        self.spec(id).map(|spec| spec.ceiling)
     }
 
     #[must_use]
@@ -106,7 +106,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::testing::{CEILING, MIB, guest, unix, vsock};
+    use crate::broker::testing::{CEILING, MIB, bytes, guest, unix, vsock};
 
     #[test]
     fn a_registry_answers_by_address() {
@@ -120,8 +120,8 @@ mod tests {
         assert_eq!(registry.lookup(&vsock(5)), None);
         assert_eq!(registry.lookup(&unix("/run/pazari/one.sock")), None);
 
-        assert_eq!(registry.ceiling(one), CEILING);
-        assert_eq!(registry.ceiling(two), 512 * MIB);
+        assert_eq!(registry.ceiling(one), Some(bytes(CEILING)));
+        assert_eq!(registry.ceiling(two), Some(bytes(512 * MIB)));
         assert_eq!(
             registry.spec(one).map(|spec| spec.name.as_str()),
             Some("one")
@@ -176,7 +176,7 @@ mod tests {
             .insert(vsock(10), guest("stranger", CEILING))
             .unwrap();
 
-        assert_eq!(ours.ceiling(stranger), 0);
+        assert_eq!(ours.ceiling(stranger), None);
         assert_eq!(ours.spec(stranger), None);
     }
 }

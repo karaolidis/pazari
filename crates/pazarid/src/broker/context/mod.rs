@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use pazari_proto::{DenyReason, HostMessage};
 use pazari_transport::PeerId;
 use pazari_types::Timestamp;
@@ -82,8 +84,16 @@ impl Context {
     }
 
     #[must_use]
-    pub fn ceiling(&self, guest: GuestId) -> u64 {
+    pub fn ceiling(&self, guest: GuestId) -> Option<NonZeroU64> {
         self.guests.ceiling(guest)
+    }
+
+    #[must_use]
+    pub const fn unknown_deny(&self) -> Decision {
+        Decision::Deny {
+            reason: DenyReason::Policy,
+            retry_after: None,
+        }
     }
 
     #[must_use]
@@ -98,10 +108,7 @@ impl Context {
         let (asking, others) = self.guests.views(guest);
 
         let Some(asking) = asking else {
-            return Decision::Deny {
-                reason: DenyReason::Policy,
-                retry_after: None,
-            };
+            return self.unknown_deny();
         };
 
         let request = Request {
@@ -139,7 +146,14 @@ impl Context {
             return;
         };
 
-        let target = target.min(self.ceiling(said.guest));
+        let Some(ceiling) = self.ceiling(said.guest) else {
+            let deny = self.unknown_deny();
+            self.answer(said.peer, id, deny);
+
+            return;
+        };
+
+        let target = target.min(ceiling.get());
 
         self.answer(said.peer, id, Decision::Grant { target });
 

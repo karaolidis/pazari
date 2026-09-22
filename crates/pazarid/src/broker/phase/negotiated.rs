@@ -136,12 +136,10 @@ impl State for Negotiated {
             return self.stay();
         };
 
-        let target = target.min(ctx.ceiling(said.guest));
+        let ask = match (ctx.ceiling(said.guest), ctx.size(said.guest)) {
+            (Some(ceiling), Some(size)) => {
+                let target = target.min(ceiling.get());
 
-        let ask = ctx
-            .size(said.guest)
-            .ok_or_else(|| ctx.unsized_deny())
-            .and_then(|size| {
                 if target > size {
                     Ok(Ask::Grow {
                         target,
@@ -154,7 +152,10 @@ impl State for Negotiated {
                         retry_after: None,
                     })
                 }
-            });
+            }
+            (None, _) => Err(ctx.unknown_deny()),
+            (_, None) => Err(ctx.unsized_deny()),
+        };
 
         ctx.request(said, id, ask);
 

@@ -44,7 +44,7 @@ pub const fn count(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).expect("a positive count")
 }
 
-pub const fn step(value: u64) -> NonZeroU64 {
+pub const fn bytes(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).expect("a positive byte count")
 }
 
@@ -87,7 +87,7 @@ pub fn revoking() -> Policy {
     Policy {
         revocation: Some(Revocation {
             psi: Psi::try_new(REVOKE_PSI).expect("a fifth of the wall clock is a psi"),
-            step: step(REVOKE_STEP),
+            step: bytes(REVOKE_STEP),
         }),
         ..policy()
     }
@@ -96,7 +96,7 @@ pub fn revoking() -> Policy {
 pub fn guest(name: &str, ceiling: u64) -> GuestSpec {
     GuestSpec {
         name: name.to_owned(),
-        ceiling,
+        ceiling: bytes(ceiling),
     }
 }
 

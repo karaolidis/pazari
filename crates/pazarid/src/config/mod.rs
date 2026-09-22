@@ -119,7 +119,7 @@ mod tests {
     use super::*;
     use crate::broker::{
         GuestSpec, Revocation,
-        testing::{count, step},
+        testing::{bytes, count},
     };
 
     const MIB: u64 = 1 << 20;
@@ -226,7 +226,7 @@ mod tests {
                 policy: Policy {
                     revocation: Some(Revocation {
                         psi: Psi::try_new(20.0).expect("20% is a psi"),
-                        step: step(256 * MIB),
+                        step: bytes(256 * MIB),
                     }),
                     ..defaults.policy
                 },
@@ -261,7 +261,7 @@ mod tests {
                 grant_swap: true,
                 revocation: Some(Revocation {
                     psi: Psi::try_new(30.0).expect("30% is a psi"),
-                    step: step(512 * MIB),
+                    step: bytes(512 * MIB),
                 }),
             }
         );
@@ -288,7 +288,7 @@ mod tests {
             config.registry.spec(guest),
             Some(&GuestSpec {
                 name: "example".to_owned(),
-                ceiling: 8 * GIB,
+                ceiling: bytes(8 * GIB),
             })
         );
     }
@@ -527,6 +527,16 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_ceiling_names_the_guest_that_carries_it() {
+        let error = rejects(&MINIMAL.replace(r#"ceiling = "8GiB""#, r#"ceiling = "0B""#));
+
+        assert_eq!(
+            error,
+            "guests.example.ceiling rejects 0: expected a positive byte count"
+        );
+    }
+
+    #[test]
     fn a_zero_deadline_names_the_guest_that_carries_it() {
         let error =
             rejects(&MINIMAL.replace(r#"device = "vm0""#, "device = \"vm0\"\ndeadline = \"0s\""));
@@ -590,7 +600,7 @@ mod tests {
 
         assert_eq!(
             config.policy.revocation.map(|revocation| revocation.step),
-            Some(step(256 * MIB))
+            Some(bytes(256 * MIB))
         );
     }
 

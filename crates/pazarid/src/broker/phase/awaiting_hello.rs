@@ -65,7 +65,16 @@ impl State for AwaitingHello {
             return self.stay();
         }
 
-        let ceiling = ctx.ceiling(said.guest);
+        let Some(ceiling) = ctx.ceiling(said.guest) else {
+            warn!(
+                peer = %said.peer,
+                "a hello from a guest the registry does not know",
+            );
+            ctx.close(said.guest, said.peer);
+
+            return self.stay();
+        };
+
         let status_interval_ms = ctx.policy.welcome_status_interval.get();
 
         info!(
@@ -75,7 +84,7 @@ impl State for AwaitingHello {
             boot_mem,
             block_size,
             plugged,
-            ceiling,
+            ceiling = ceiling.get(),
             "welcoming a guest",
         );
 
@@ -83,7 +92,7 @@ impl State for AwaitingHello {
             said.peer,
             HostMessage::Welcome {
                 protocol: PROTOCOL_VERSION,
-                ceiling,
+                ceiling: ceiling.get(),
                 status_interval_ms,
             },
         );

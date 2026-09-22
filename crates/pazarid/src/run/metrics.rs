@@ -122,7 +122,7 @@ impl Observer {
                 .guests
                 .ceiling
                 .get_or_create(&label)
-                .set_saturating(view.spec.ceiling);
+                .set_saturating(view.spec.ceiling.get());
             series
                 .guests
                 .connected

@@ -296,7 +296,7 @@ impl Harness {
                 peer.clone(),
                 GuestSpec {
                     name: "one".to_owned(),
-                    ceiling: CEILING,
+                    ceiling: bytes(CEILING),
                 },
             )
             .expect("the only guest");

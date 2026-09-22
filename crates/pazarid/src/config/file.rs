@@ -85,13 +85,9 @@ impl File {
                 }
             };
 
-            registry.insert(
-                peer,
-                GuestSpec {
-                    name,
-                    ceiling: ceiling.as_u64(),
-                },
-            )?;
+            let ceiling = NonZeroU64::new(ceiling.as_u64()).bytes(format!("{prefix}.ceiling"))?;
+
+            registry.insert(peer, GuestSpec { name, ceiling })?;
 
             devices.push(qmp.resolve(&prefix)?);
         }

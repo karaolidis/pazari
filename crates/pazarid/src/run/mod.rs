@@ -87,7 +87,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
         info!(
             guest = spec.name.as_str(),
             device = qmp.device.as_str(),
-            ceiling = spec.ceiling,
+            ceiling = spec.ceiling.get(),
             "the daemon is taking a guest on",
         );
 

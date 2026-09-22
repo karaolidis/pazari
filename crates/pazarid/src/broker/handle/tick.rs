@@ -92,10 +92,10 @@ impl Broker {
             return;
         }
 
-        if revert {
+        if revert && let Some(ceiling) = ceiling {
             self.ctx.emit(Action::SetRequested {
                 guest,
-                bytes: size.min(ceiling),
+                bytes: size.min(ceiling.get()),
             });
         }
 

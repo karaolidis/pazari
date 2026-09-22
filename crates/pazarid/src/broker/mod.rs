@@ -1211,10 +1211,13 @@ mod tests {
                 }
 
                 Action::SetRequested { guest, bytes } => {
-                    let ceiling = broker.guests().ceiling(*guest);
+                    let ceiling = broker
+                        .guests()
+                        .ceiling(*guest)
+                        .expect("an actuated guest is registered");
 
                     prop_assert!(
-                        *bytes <= ceiling,
+                        *bytes <= ceiling.get(),
                         "actuated {bytes} over a ceiling of {ceiling}",
                     );
                 }

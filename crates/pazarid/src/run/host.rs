@@ -26,7 +26,7 @@ impl Demand {
     pub fn of(policy: &Policy, registry: &Registry, info: &MemInfo) -> Self {
         Self {
             asked: registry.iter().fold(policy.host_floor, |total, (_, spec)| {
-                total.saturating_add(spec.ceiling)
+                total.saturating_add(spec.ceiling.get())
             }),
             have: info.total.saturating_add(info.swap_total),
         }
@@ -119,7 +119,7 @@ mod tests {
     use crate::{
         broker::{
             GuestSpec,
-            testing::{CEILING, FLOOR, GIB, granting, policy, registry, revoking, vsock},
+            testing::{CEILING, FLOOR, GIB, bytes, granting, policy, registry, revoking, vsock},
         },
         runtime::testing::{MockMemory, meminfo},
     };
@@ -145,7 +145,7 @@ mod tests {
                     vsock(cid),
                     GuestSpec {
                         name: format!("guest{index}"),
-                        ceiling: *ceiling,
+                        ceiling: bytes(*ceiling),
                     },
                 )
                 .expect("a guest of its own");

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroU64};
 
 use pazari_transport::PeerId;
 use pazari_types::Timestamp;
@@ -154,8 +154,8 @@ impl Guests {
     }
 
     #[must_use]
-    pub fn ceiling(&self, id: GuestId) -> u64 {
-        self.get(id).map_or(0, |entry| entry.spec.ceiling)
+    pub fn ceiling(&self, id: GuestId) -> Option<NonZeroU64> {
+        self.get(id).map(|entry| entry.spec.ceiling)
     }
 
     #[must_use]

@@ -25,4 +25,6 @@ result-*
 # Ignore automatically generated direnv output
 .direnv
 
+# ---> Custom
 .cargo/
+harness-runs/

@@ -9,6 +9,11 @@
 
     rustfmt.enable = true;
     shellcheck.enable = true;
+
+    ruff = {
+      format = true;
+      check = true;
+    };
   };
 
   settings.global.excludes = [ ".envrc" ];

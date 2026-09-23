@@ -63,8 +63,21 @@
         };
 
         treefmt = inputs.treefmt-nix.lib.evalModule pkgs ./treefmt.nix;
+
+        harness = import ./nix/harness {
+          inherit pkgs;
+          inherit (pkgs) lib;
+          inherit (inputs.nixpkgs.lib) nixosSystem;
+          inherit (inputs.self) nixosModules;
+          microvmModule = inputs.microvm.nixosModules.microvm;
+        };
       in
       {
+        apps.${system}.harness = {
+          type = "app";
+          program = pkgs.lib.getExe harness.app;
+        };
+
         devShells.${system}.default = pkgs.mkShell {
           packages = with pkgs; [
             inputs.fenix.packages.${system}.latest.toolchain
@@ -72,6 +85,12 @@
             cargo-outdated
             cargo-edit
             cargo-expand
+            (python3.withPackages (
+              pkgs: with pkgs; [
+                matplotlib
+                prometheus-client
+              ]
+            ))
           ];
 
           shellHook = ''

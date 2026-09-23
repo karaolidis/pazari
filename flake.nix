@@ -67,17 +67,14 @@
         harness = import ./nix/harness {
           inherit pkgs;
           inherit (pkgs) lib;
+          inherit (pkgs.testers) runNixOSTest;
           inherit (inputs.nixpkgs.lib) nixosSystem;
           inherit (inputs.self) nixosModules;
+          microvmHostModule = inputs.microvm.nixosModules.host;
           microvmModule = inputs.microvm.nixosModules.microvm;
         };
       in
       {
-        apps.${system}.harness = {
-          type = "app";
-          program = pkgs.lib.getExe harness.app;
-        };
-
         devShells.${system}.default = pkgs.mkShell {
           packages = with pkgs; [
             inputs.fenix.packages.${system}.latest.toolchain
@@ -118,6 +115,8 @@
 
             formatter.formatting = treefmt.config.build.check inputs.self;
 
+            tests = pkgs.lib.mapAttrs' (name: pkgs.lib.nameValuePair "test-${name}") harness.tests;
+
             modules = import ./nix/checks/modules.nix {
               inherit pkgs;
               inherit (pkgs) lib;
@@ -125,7 +124,7 @@
               inherit (inputs.self) nixosModules;
             };
           in
-          packages // devShells // formatter // modules;
+          packages // devShells // formatter // modules // tests;
       }
     );
 }

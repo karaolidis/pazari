@@ -5,7 +5,7 @@
   ...
 }:
 let
-  cfg = config.pazari.harness;
+  cfg = config.services.pazari-agent.harness;
 
   stress = lib.getExe' pkgs.pazari "pazari-stress";
 
@@ -15,6 +15,29 @@ let
 
   release = pkgs.writeShellScript "pazari-harness-release" ''
     until [ -e "$1" ]; do
+      ${lib.getExe' pkgs.coreutils "sleep"} 0.1
+    done
+  '';
+
+  courier = pkgs.writeShellScript "pazari-harness-courier" ''
+    control="$1"
+    ${lib.getExe' pkgs.coreutils "mkdir"} -p "$control"
+
+    while :; do
+      for job in "$control"/*.cmd; do
+        if [ ! -e "$job" ] || [ -e "''${job%.cmd}.done" ]; then
+          continue
+        fi
+
+        stem="''${job%.cmd}"
+
+        ${lib.getExe' pkgs.bash "bash"} "$job" > "$stem.out" 2>&1
+        code=$?
+
+        ${lib.getExe' pkgs.coreutils "printf"} '%s\n' "$code" > "$stem.part"
+        ${lib.getExe' pkgs.coreutils "mv"} "$stem.part" "$stem.done"
+      done
+
       ${lib.getExe' pkgs.coreutils "sleep"} 0.1
     done
   '';
@@ -47,7 +70,31 @@ let
   };
 in
 {
-  options.pazari.harness = {
+  options.services.pazari-agent.harness = {
+    name = lib.mkOption {
+      type = lib.types.str;
+      default = "main";
+      description = ''
+        What the scenario and the daemon call this guest.
+      '';
+    };
+
+    index = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 0;
+      description = ''
+        Where this guest sits in the scenario's guest list.
+      '';
+    };
+
+    control = lib.mkOption {
+      type = lib.types.str;
+      default = "control";
+      description = ''
+        The directory in the share the driver leaves commands for the guest in.
+      '';
+    };
+
     share = {
       tag = lib.mkOption {
         type = lib.types.str;
@@ -142,9 +189,19 @@ in
 
     forwardedPort = lib.mkOption {
       type = lib.types.port;
-      default = 19651;
+      default = 19651 + cfg.index;
+      defaultText = lib.literalExpression "19651 + config.services.pazari-agent.harness.index";
       description = ''
         The loopback port on the host `metricsPort` is forwarded to.
+      '';
+    };
+
+    cid = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 4242 + cfg.index;
+      defaultText = lib.literalExpression "4242 + config.services.pazari-agent.harness.index";
+      description = ''
+        The guest's vsock context id.
       '';
     };
 
@@ -192,7 +249,7 @@ in
     system.stateVersion = lib.trivial.release;
 
     networking = {
-      hostName = "pazari-harness";
+      hostName = "pazari-${cfg.name}";
       useNetworkd = true;
     };
 
@@ -212,13 +269,13 @@ in
     microvm = {
       hypervisor = "qemu";
 
-      vcpu = 2;
-      mem = 1536;
-      hotplugMem = 4096;
-      hotpluggedMem = 256;
+      vcpu = lib.mkDefault 2;
+      mem = lib.mkDefault 1536;
+      hotplugMem = lib.mkDefault 4096;
+      hotpluggedMem = lib.mkDefault 256;
       balloon = false;
 
-      vsock.cid = 4242;
+      vsock.cid = cfg.cid;
 
       interfaces = [
         {
@@ -244,13 +301,6 @@ in
       ];
 
       shares = [
-        {
-          source = "/nix/store";
-          mountPoint = "/nix/.ro-store";
-          tag = "ro-store";
-          proto = "9p";
-          readOnly = true;
-        }
         {
           inherit (cfg.share) source mountPoint tag;
           proto = "9p";
@@ -281,6 +331,23 @@ in
 
       services = {
         "serial-getty@ttyS0".enable = false;
+
+        pazari-harness-courier = {
+          description = "pazari harness courier";
+          wantedBy = [ "multi-user.target" ];
+
+          path = [ config.system.path ];
+
+          unitConfig.RequiresMountsFor = cfg.share.mountPoint;
+
+          serviceConfig = {
+            ExecStart = "${courier} ${cfg.share.mountPoint}/${cfg.control}";
+            Slice = "system.slice";
+            SyslogIdentifier = "pazari-harness-courier";
+            Restart = "always";
+            RestartSec = "1s";
+          };
+        };
 
         ${cfg.workload.unit} = {
           description = "pazari harness workload";
@@ -321,7 +388,7 @@ in
 
         engine = engine // cfg.engine;
 
-        runtime.boot_mem = "1536MiB";
+        runtime.boot_mem = "${toString config.microvm.mem}MiB";
 
         transport = {
           kind = "vsock";

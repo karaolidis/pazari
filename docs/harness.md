@@ -3,60 +3,61 @@
 This document describes the VM test harness. The reference implementation is
 `nix/harness`.
 
-## Running one
-
 ```
-nix run .#harness                 # list the scenarios
-nix run .#harness -- grow-burst   # run one
+nix build .#checks.x86_64-linux.test-reconnect -L
 ```
-
-| Option       | Meaning                         |
-| ------------ | ------------------------------- |
-| `--runs DIR` | Where run directories are made. |
-| `--no-plot`  | Skip the SVG.                   |
-
-The host needs `/dev/kvm` and `/dev/vhost-vsock` readable and writable, and the
-two metrics ports free.
-
-A scenario exits non-zero if any assertion did not hold.
 
 ## A scenario
 
 A scenario is one `.nix` file in `nix/harness/scenarios`.
 
-| Attribute     | Meaning                                                    |
-| ------------- | ---------------------------------------------------------- |
-| `description` | One line, shown in the listing.                            |
-| `timeout`     | Seconds the whole run may take before it is failed.        |
-| `daemon`      | What this scenario changes about the host daemon settings. |
-| `guest`       | A NixOS module, merged into the guest.                     |
-| `assertions`  | Python source declaring one `check(run)`.                  |
+| Attribute     | Meaning                                                          |
+| ------------- | ---------------------------------------------------------------- |
+| `description` | One line, printed when the run starts.                           |
+| `timeout`     | Seconds the whole run may take before it is failed.              |
+| `breaches`    | Optional. True when the workload is meant to reach `memory.max`. |
+| `daemon`      | What this scenario changes about the host daemon's settings.     |
+| `guests`      | The guests.                                                      |
+| `host`        | Optional. A NixOS module merged into the outer machine.          |
+| `assertions`  | Python source declaring one `check(run)`.                        |
 
-`guest` usually only sets `pazari.harness.workload.phases`, the `pazari-stress`
-plan the guest is driven with, and `pazari.harness.engine`, what this scenario
-changes about the agent's engine.
+Each guest carries `daemon`, what the scenario changes about that guest's entry
+in the daemon's settings, and `module`, a NixOS module merged into the guest.
+That module usually only sets `services.pazari-agent.harness.workload.phases`,
+the `pazari-stress` plan the guest is driven with, and
+`services.pazari-agent.harness.engine`, what this scenario changes about the
+agent's engine.
 
 `assertions` is written against the vocabulary in
-`nix/harness/driver/checks.py`.
+`nix/harness/driver/checks.py`, over the event series in
+`nix/harness/driver/series.py`.
 
 The workload does not start with the guest. It blocks on a file in the share
-that the driver makes only once it is scraping both endpoints and the guest is
+that the driver makes only once it is scraping every endpoint and every guest is
 past the handshake, so nothing a scenario cares about happens unobserved. The
-workload's own `started` event is the run's `t0`.
+first workload's own `started` event is the run's `t0`.
 
-### Waiting
+## Check tooling
 
-A check never sleeps. It waits on something the run can observe, and every wait
-is anchored so that history cannot satisfy it:
-
-- `counter_rose` waits for a counter to rise past where it stood at `t0`.
-- `gauge_reaches` waits for a scrape from the moment the wait began.
-
-Both take `since` to anchor a wait at some other moment a check has in hand.
+| Name                      | What it is                                                |
+| ------------------------- | --------------------------------------------------------- |
+| `run.daemon`              | The daemon's metrics endpoint.                            |
+| `run.guests[name]`        | One guest.                                                |
+| `run.guest`               | The only guest, for a scenario that has one.              |
+| `run.host`                | The machine the daemon runs on.                           |
+| `guest.agent`             | That guest's metrics endpoint.                            |
+| `guest.workload`          | That guest's `pazari-stress` event stream.                |
+| `guest.labels`            | `{"guest": name}`, for the daemon's per-guest series.     |
+| `guest.shell(...)`        | Runs a command inside the guest and waits for its answer. |
+| `guest.halt(...)`         | Takes that guest's hypervisor away.                       |
+| `run.host.restart_daemon` | Takes the daemon down, and waits for it to answer again.  |
+| `run.host.start`          | `systemctl start` on the outer machine.                   |
+| `run.host.stop`           | `systemctl stop` on the outer machine.                    |
+| `run.host.restart`        | `systemctl restart` on the outer machine.                 |
 
 ## The plot
 
-One SVG per run, five panels on a shared time axis that opens at `t0`. The
+One SVG per guest, five panels on a shared time axis that opens at `t0`. The
 boot and the handshake are not drawn; the captured streams on disk are whole.
 
 | Panel                | What it carries                                                  |
@@ -72,15 +73,16 @@ grant, a deny, an offer, a reclaim.
 
 ## A run directory
 
-`harness-runs/<scenario>-<stamp>/`.
+`/var/lib/pazari-harness` inside the outer machine, copied out into the check's
+result.
 
-| Entry           | What it is                                                      |
-| --------------- | --------------------------------------------------------------- |
-| `scenario.json` | The manifest entry this run was built from.                     |
-| `pazarid.toml`  | The daemon settings, with the QMP socket filled in.             |
-| `samples.jsonl` | Every scrape of both endpoints, one object each.                |
-| `events.jsonl`  | What the driver noted, and when.                                |
-| `result.json`   | The result, and how long it took.                               |
-| `plot.svg`      | The plot.                                                       |
-| `logs/`         | `qemu.log`, the guest's console and journal, and `pazarid.log`. |
-| `share/`        | The 9p share: the workload's event stream, and the gate.        |
+| Entry           | What it is                                                        |
+| --------------- | ----------------------------------------------------------------- |
+| `scenario.json` | The manifest this run was built from.                             |
+| `samples.jsonl` | Every scrape of every endpoint, one object each.                  |
+| `events.jsonl`  | What the driver noted, and when.                                  |
+| `result.json`   | The result, and how long it took.                                 |
+| `plot.svg`      | The plot, or one `<guest>.svg` each where there is more than one. |
+| `logs/`         | `pazarid.log`, and one console per guest.                         |
+| `<guest>/`      | Where that guest's qemu runs: its QMP socket, and its share.      |
+| `<guest>/share` | The 9p share: the workload's stream, the gate, the commands.      |

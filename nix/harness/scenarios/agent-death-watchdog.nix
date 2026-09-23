@@ -3,50 +3,50 @@
 
   timeout = 240;
 
-  daemon = {
-    policy = {
-      host_floor = "2GiB";
-      grant_min_interval = "2s";
-    };
-
-    guest.ceiling = "1792MiB";
+  daemon.policy = {
+    host_floor = "2GiB";
+    grant_min_interval = "2s";
   };
 
-  guest =
-    {
-      config,
-      lib,
-      pkgs,
-      ...
-    }:
-    {
-      pazari.harness = {
-        engine = {
-          burst_reserve = "512MiB";
-          open_guard = "384MiB";
+  guests.main = {
+    daemon.ceiling = "1792MiB";
+
+    module =
+      {
+        config,
+        lib,
+        pkgs,
+        ...
+      }:
+      {
+        services.pazari-agent.harness = {
+          engine = {
+            burst_reserve = "512MiB";
+            open_guard = "384MiB";
+          };
+
+          workload.phases = [
+            "grow=800MiB,rate=384MiB/s"
+            "release=384MiB"
+            "grow=384MiB,rate=384MiB/s"
+            "hold=30s"
+          ];
         };
 
-        workload.phases = [
-          "grow=800MiB,rate=384MiB/s"
-          "release=384MiB"
-          "grow=384MiB,rate=384MiB/s"
-          "hold=30s"
-        ];
-      };
+        systemd.services.pazari-harness-reaper = {
+          description = "pazari harness agent reaper";
+          wantedBy = [ "multi-user.target" ];
+          requires = [ "${config.services.pazari-agent.harness.workload.unit}.service" ];
+          after = [ "${config.services.pazari-agent.harness.workload.unit}.service" ];
 
-      systemd.services.pazari-harness-reaper = {
-        description = "pazari harness agent reaper";
-        wantedBy = [ "multi-user.target" ];
-        requires = [ "${config.pazari.harness.workload.unit}.service" ];
-        after = [ "${config.pazari.harness.workload.unit}.service" ];
-
-        serviceConfig = {
-          Type = "oneshot";
-          ExecStartPre = "${lib.getExe' pkgs.coreutils "sleep"} 20";
-          ExecStart = "${lib.getExe' config.systemd.package "systemctl"} kill --kill-whom=main --signal=KILL pazari-agent.service";
+          serviceConfig = {
+            Type = "oneshot";
+            ExecStartPre = "${lib.getExe' pkgs.coreutils "sleep"} 20";
+            ExecStart = "${lib.getExe' config.systemd.package "systemctl"} kill --kill-whom=main --signal=KILL pazari-agent.service";
+          };
         };
       };
-    };
+  };
 
   assertions = ''
     from pazari_harness.checks import CRAWLING, collapsed, recovered
@@ -54,26 +54,22 @@
     GROW = 0
     REGROW = 2
 
-
     def check(run):
-        guest = {"guest": run.scenario.guest}
+        guest = run.guest
 
-        run.gauge_reaches(
-            "agent",
+        guest.agent.reaches(
             "pazari_agent_band_open",
             lambda value: value == 1,
             120,
             "the brake opened under the throttled workload",
         )
-        run.counter_rose(
-            "agent",
+        guest.agent.rose(
             "pazari_agent_denies_total",
             labels={"reason": "ceiling"},
             timeout=90,
             reason="the ceiling refused the grow, so the workload stays braked",
         )
-        run.gauge_reaches(
-            "agent",
+        guest.agent.reaches(
             "pazari_agent_mode",
             lambda value: value == 1,
             90,
@@ -81,11 +77,10 @@
             {"mode": "exhausted"},
         )
 
-        collapsed(run, GROW, "the braked workload is crawling", share=CRAWLING)
+        collapsed(run, guest, GROW, "the braked workload is crawling", share=CRAWLING)
         braked = run.seen
 
-        died = run.answering(
-            "agent",
+        died = guest.agent.answering(
             120,
             "the agent was killed and its metrics endpoint went away",
             ok=False,
@@ -94,37 +89,35 @@
 
         recovered(
             run,
+            guest,
             REGROW,
             "ExecStopPost released the brake and the workload ran unthrottled",
             since=died,
             timeout=90,
         )
 
-        run.gauge_reaches(
-            "daemon",
+        run.daemon.reaches(
             "pazarid_guest_connected",
             lambda value: value == 0,
             90,
             "the daemon saw the guest drop",
-            guest,
+            guest.labels,
             since=braked,
         )
         dropped = run.seen
 
-        run.answering("agent", 120, "the agent came back", since=died)
+        guest.agent.answering(120, "the agent came back", since=died)
 
-        run.gauge_reaches(
-            "daemon",
+        run.daemon.reaches(
             "pazarid_guest_connected",
             lambda value: value == 1,
             120,
             "the daemon saw the guest reconnect",
-            guest,
+            guest.labels,
             since=dropped,
         )
 
-        run.gauge_reaches(
-            "agent",
+        guest.agent.reaches(
             "pazari_agent_mode",
             lambda value: value == 1,
             90,
@@ -134,8 +127,8 @@
         )
 
         run.require(
-            run.gauge("agent", "pazari_agent_memory_high_bytes")
-            < run.gauge("agent", "pazari_agent_memory_max_bytes"),
+            guest.agent.gauge("pazari_agent_memory_high_bytes")
+            < guest.agent.gauge("pazari_agent_memory_max_bytes"),
             "the brake is back on, under memory.max",
         )
   '';

@@ -3,21 +3,21 @@
 
   timeout = 240;
 
-  daemon = {
-    policy = {
-      host_floor = "2GiB";
-      grant_min_interval = "2s";
-    };
-
-    guest.ceiling = "3GiB";
+  daemon.policy = {
+    host_floor = "2GiB";
+    grant_min_interval = "2s";
   };
 
-  guest = { ... }: {
-    pazari.harness.workload.phases = [
-      "grow=2GiB,rate=384MiB/s"
-      "release=1800MiB"
-      "hold=90s"
-    ];
+  guests.main = {
+    daemon.ceiling = "3GiB";
+
+    module = { ... }: {
+      services.pazari-agent.harness.workload.phases = [
+        "grow=2GiB,rate=384MiB/s"
+        "release=1800MiB"
+        "hold=90s"
+      ];
+    };
   };
 
   assertions = ''
@@ -25,35 +25,31 @@
 
     RETURNED = 512 * 1024 * 1024
 
-
     def check(run):
-        guest = {"guest": run.scenario.guest}
+        guest = run.guest
 
-        size = run.gauge("daemon", "pazarid_guest_size_bytes", guest)
-        booted = run.gauge("agent", "pazari_agent_plugged_bytes")
+        size = run.daemon.gauge("pazarid_guest_size_bytes", guest.labels)
+        booted = guest.agent.gauge("pazari_agent_plugged_bytes")
 
         grew(run, guest, size)
-        followed(run, booted + BLOCK)
+        followed(guest, booted + BLOCK)
 
-        steady(run, "the engine settled after the grow")
+        steady(run, guest, "the engine settled after the grow")
 
-        granted = run.counter("agent", "pazari_agent_grants_total")
+        granted = guest.agent.counter("pazari_agent_grants_total")
 
-        run.counter_rose(
-            "agent",
+        guest.agent.rose(
             "pazari_agent_offers_total",
             timeout=150,
             reason="the idle workload made the agent offer memory back",
         )
-        run.counter_rose(
-            "daemon",
+        run.daemon.rose(
             "pazarid_guest_messages_total",
             labels={"kind": "offer_release"},
             timeout=60,
             reason="the daemon took the offer",
         )
-        run.counter_rose(
-            "agent",
+        guest.agent.rose(
             "pazari_agent_grants_total",
             floor=granted + 1,
             timeout=60,
@@ -61,30 +57,28 @@
             since=run.seen,
         )
 
-        peak = run.daemon.peak("pazarid_guest_size_bytes", guest)
-        plugged = run.agent.peak("pazari_agent_plugged_bytes")
+        peak = run.daemon.peak("pazarid_guest_size_bytes", guest.labels)
+        plugged = guest.agent.peak("pazari_agent_plugged_bytes")
 
         run.require(
             peak - size >= RETURNED,
             "the plug the run gave back was worth watching",
         )
 
-        run.gauge_reaches(
-            "daemon",
+        run.daemon.reaches(
             "pazarid_guest_size_bytes",
             lambda value: value <= size,
             120,
             "the device handed back every block it was given",
-            guest,
+            guest.labels,
         )
-        run.gauge_reaches(
-            "agent",
+        guest.agent.reaches(
             "pazari_agent_plugged_bytes",
             lambda value: value <= plugged - RETURNED,
             60,
             "the guest's MemTotal followed the device down",
         )
 
-        steady(run, "the engine settled at the smaller plug", since=run.seen)
+        steady(run, guest, "the engine settled at the smaller plug", since=run.seen)
   '';
 }

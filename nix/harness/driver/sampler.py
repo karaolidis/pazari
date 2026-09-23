@@ -11,7 +11,7 @@ TIMEOUT = 2.0
 
 
 class Sampler:
-    """One thread scraping every endpoint, keeping the history it writes out."""
+    """A thread per endpoint."""
 
     def __init__(self, endpoints, path, interval, clock):
         self.endpoints = dict(endpoints)
@@ -22,28 +22,38 @@ class Sampler:
         self._lock = threading.Lock()
         self._history = {name: [] for name in self.endpoints}
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._loop, name="sampler", daemon=True)
+        self._threads = [
+            threading.Thread(
+                target=self._loop,
+                args=(name, url),
+                name=f"sampler-{name}",
+                daemon=True,
+            )
+            for name, url in self.endpoints.items()
+        ]
 
     def start(self):
-        self._thread.start()
+        for thread in self._threads:
+            thread.start()
 
     def stop(self):
         self._stop.set()
-        self._thread.join(timeout=5 * self.interval + TIMEOUT)
+
+        for thread in self._threads:
+            thread.join(timeout=5 * self.interval + TIMEOUT)
+
         self._file.close()
 
     def view(self, name):
         return View(self, name)
 
-    def history(self, name):
+    def since(self, name, index):
         with self._lock:
-            return list(self._history[name])
+            return self._history[name][index:]
 
-    def _loop(self):
+    def _loop(self, name, url):
         while not self._stop.is_set():
-            for name, url in self.endpoints.items():
-                self._scrape(name, url)
-
+            self._scrape(name, url)
             self._stop.wait(self.interval)
 
     def _scrape(self, name, url):
@@ -76,10 +86,14 @@ class View:
 
     def __init__(self, sampler, name):
         self._sampler = sampler
+        self._records = []
+        self._series = {}
         self.name = name
 
     def records(self):
-        return self._sampler.history(self.name)
+        self._records += self._sampler.since(self.name, len(self._records))
+
+        return self._records
 
     def answered(self):
         records = self.records()
@@ -108,46 +122,59 @@ class View:
         return 0.0
 
     def series(self, name, labels=None):
-        out = []
-
-        for record in self.records():
-            if not record["ok"]:
-                continue
-
-            found = values(record, name, labels)
-
-            if found:
-                out.append((record["at"], found[0]))
-
-        return out
+        return self._points(
+            ("series", name, key(labels)),
+            lambda record: point(record, name, labels),
+        )
 
     def totals(self, name):
-        return [
-            (record["at"], sum(values(record, name)))
-            for record in self.records()
-            if record["ok"] and record["families"].get(name)
-        ]
+        return self._points(
+            ("totals", name),
+            lambda record: (
+                (record["at"], sum(values(record, name)))
+                if record["families"].get(name)
+                else None
+            ),
+        )
 
-    def winner(self, name, key):
-        out = []
-
-        for record in self.records():
-            if not record["ok"]:
-                continue
-
-            live = [
-                sample["labels"].get(key)
+    def winner(self, name, field):
+        def live(record):
+            held = [
+                sample["labels"].get(field)
                 for sample in record["families"].get(name, [])
                 if sample["value"] == 1
             ]
 
-            if live:
-                out.append((record["at"], live[0]))
+            return (record["at"], held[0]) if held else None
 
-        return out
+        return self._points(("winner", name, field), live)
+
+    def _points(self, reading, pick):
+        points, scanned = self._series.setdefault(reading, ([], 0))
+        records = self.records()
+
+        for record in records[scanned:]:
+            found = pick(record) if record["ok"] else None
+
+            if found is not None:
+                points.append(found)
+
+        self._series[reading] = (points, len(records))
+
+        return points
 
     def peak(self, name, labels=None):
         return max((value for _, value in self.series(name, labels)), default=None)
+
+
+def key(labels):
+    return tuple(sorted((labels or {}).items()))
+
+
+def point(record, name, labels=None):
+    found = values(record, name, labels)
+
+    return (record["at"], found[0]) if found else None
 
 
 def values(record, name, labels=None):

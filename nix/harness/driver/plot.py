@@ -6,6 +6,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
+from .series import rises
 from .units import GIB, MIB
 
 MARKERS = [
@@ -16,23 +17,9 @@ MARKERS = [
     ("reclaim", "daemon", "pazarid_reclaim_requests_total"),
 ]
 
+APART = 0.4
+
 LANES = ["engine mode", "guest link"]
-
-
-def rises(points, apart=0.4):
-
-    times = []
-    last = None
-
-    for at, value in points:
-        if value > (0 if last is None else last) and (
-            not times or at - times[-1] >= apart
-        ):
-            times.append(at)
-
-        last = value
-
-    return times
 
 
 def draw(axis, points, label=None, scale=1.0, steps=True, gap=1.0):
@@ -71,16 +58,16 @@ def spans(points, gap=1.0):
 
 
 def link(run, guest):
-    stale = dict(run.daemon.series("pazarid_guest_stale", guest))
+    stale = dict(run.daemon.series("pazarid_guest_stale", guest.labels))
 
     return [
         (at, "down" if value != 1 else "stale" if stale.get(at) == 1 else "connected")
-        for at, value in run.daemon.series("pazarid_guest_connected", guest)
+        for at, value in run.daemon.series("pazarid_guest_connected", guest.labels)
     ]
 
 
 def lanes(axis, run, guest):
-    rows = [run.agent.winner("pazari_agent_mode", "mode"), link(run, guest)]
+    rows = [guest.agent.winner("pazari_agent_mode", "mode"), link(run, guest)]
     colours = {}
 
     for row, points in enumerate(rows):
@@ -114,12 +101,14 @@ def lanes(axis, run, guest):
     )
 
 
-def events(axis, run):
+def events(axis, run, guest):
     bottom, top = axis.get_ylim()
     seen = []
 
-    for name, source, metric in MARKERS:
-        for at in rises(run.view(source).totals(metric)):
+    for name, endpoint, metric in MARKERS:
+        source = guest.agent if endpoint == "agent" else run.daemon
+
+        for at in rises(source.totals(metric), APART):
             if at >= run.origin:
                 seen.append((at, name))
 
@@ -138,9 +127,18 @@ def events(axis, run):
         )
 
 
-def render(run, path):
-    guest = {"guest": run.scenario.guest}
+def plots(run):
+    for name, guest in run.guests.items():
+        path = run.directory / ("plot.svg" if len(run.guests) == 1 else f"{name}.svg")
 
+        try:
+            render(run, guest, path)
+            run.note(f"{name}'s plot is {path.name}")
+        except Exception as error:  # noqa: BLE001
+            run.note(f"{name}'s plot could not be drawn: {error}")
+
+
+def render(run, guest, path):
     figure, axes = plt.subplots(
         5,
         1,
@@ -152,12 +150,19 @@ def render(run, path):
 
     memory, workload, available, pressure, swimlanes = axes
 
-    draw(memory, run.daemon.series("pazarid_guest_size_bytes", guest), "plugged", GIB)
-    draw(memory, run.agent.series("pazari_agent_memory_max_bytes"), "memory.max", GIB)
-    draw(memory, run.agent.series("pazari_agent_memory_high_bytes"), "memory.high", GIB)
     draw(
         memory,
-        run.agent.series("pazari_agent_workload_usage_bytes"),
+        run.daemon.series("pazarid_guest_size_bytes", guest.labels),
+        "plugged",
+        GIB,
+    )
+    draw(memory, guest.agent.series("pazari_agent_memory_max_bytes"), "memory.max", GIB)
+    draw(
+        memory, guest.agent.series("pazari_agent_memory_high_bytes"), "memory.high", GIB
+    )
+    draw(
+        memory,
+        guest.agent.series("pazari_agent_workload_usage_bytes"),
         "workload usage",
         GIB,
         steps=False,
@@ -166,7 +171,7 @@ def render(run, path):
         memory,
         [
             (at, value)
-            for at, value in run.agent.series("pazari_agent_ceiling_bytes")
+            for at, value in guest.agent.series("pazari_agent_ceiling_bytes")
             if value
         ],
         "ceiling",
@@ -181,7 +186,7 @@ def render(run, path):
 
     draw(
         workload,
-        [(event["at"], event["rate_bps"]) for event in run.workload.progress()],
+        [(event["at"], event["rate_bps"]) for event in guest.workload.progress()],
         scale=MIB,
         gap=None,
     )
@@ -202,7 +207,7 @@ def render(run, path):
     pressure.set_ylim(0, max(pressure.get_ylim()[1], 1.0))
 
     memory.set_xlim(run.origin, max(run.clock(), run.origin + 1.0))
-    events(memory, run)
+    events(memory, run, guest)
 
     lanes(swimlanes, run, guest)
     swimlanes.set_xlabel("seconds from the start of the run")
@@ -211,7 +216,9 @@ def render(run, path):
         axis.grid(axis="y", linewidth=0.5)
         axis.set_axisbelow(True)
 
-    figure.suptitle(f"{run.scenario.name} · {run.stamp}", x=0.1, y=0.985, ha="left")
+    figure.suptitle(
+        f"{run.scenario.name} - {guest.name} - {run.stamp}", x=0.1, y=0.985, ha="left"
+    )
     figure.subplots_adjust(left=0.1, right=0.985, top=0.9, bottom=0.06)
     figure.savefig(path, format="svg")
     plt.close(figure)

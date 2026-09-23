@@ -1,0 +1,184 @@
+.Dd September 23, 2026
+.Dt PAZARID 1
+.Os pazari
+.Sh NAME
+.Nm pazarid
+.Nd host memory daemon for pazari
+.Sh SYNOPSIS
+.Nm
+.Op Fl c Ar path
+.Nm
+.Op Fl c Ar path
+.Cm example-config
+.Sh DESCRIPTION
+.Nm
+runs on a virtualisation host and answers the guests that ask it for memory.
+It listens for
+.Xr pazari-agent 1
+connections, decides whether a guest may grow, and actuates the decision by
+resizing that guest's virtio-mem device over the hypervisor's QMP socket.
+When the host itself comes under memory pressure, it asks a guest to hand
+memory back.
+.Pp
+The daemon holds no durable state.
+Every guest it knows about comes from its configuration file, and everything
+else it knows it re-derives from
+.Pa /proc
+and from the hypervisor.
+A restart loses nothing.
+The guests reconnect, declare again what they hold, and carry on.
+.Pp
+With no subcommand the daemon runs in the foreground until it is asked to stop.
+It reads its configuration once, at startup; there is no reload.
+.Ss What it decides
+A grow is granted when what the host has, less everything already promised to
+other guests and less what this grow would take, still leaves
+.Cm policy.host_floor .
+What "what the host has" counts is
+.Va MemAvailable ,
+or
+.Va MemAvailable
+plus
+.Va SwapFree
+under
+.Cm policy.grant_swap .
+A grant is clamped to the guest's ceiling and may be for less than was asked.
+.Pp
+A refusal names one of four reasons, which the guest sees and the
+.Va pazarid_denies_total
+counter breaks out:
+.Bl -tag -width "host_pressure" -offset indent
+.It Cm ceiling
+The request buys the guest nothing against its ceiling.
+No retry advice: asking again will not help until the ceiling moves.
+.It Cm host_pressure
+The host does not have the memory right now, or has not yet read the figures it
+would need to decide.
+Worth retrying, and the daemon says when.
+.It Cm rate_limited
+The guest was granted memory less than
+.Cm policy.grant_min_interval
+ago.
+The daemon names the time remaining.
+.It Cm policy
+The daemon does not know this guest, or its memory device has not yet reported
+a size.
+.El
+.Pp
+An offer to release is never refused for asking too often, and never refused
+for want of host memory.
+.Pp
+A guest is never compelled to hand memory back.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl c Ar path , Fl -config Ar path
+The configuration file.
+The default is
+.Pa /etc/pazari/pazarid.toml .
+Accepted before or after a subcommand.
+.It Fl -version
+Print the version and exit.
+.It Fl h , Fl -help
+Print a usage summary and exit.
+.El
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm example-config
+Print an annotated configuration file, carrying every key at its default, to
+standard output.
+.El
+.Sh STARTUP
+The daemon reads
+.Pa /proc/meminfo
+and fails to start if it cannot.
+It then warns once if the guests at their ceilings plus
+.Cm policy.host_floor
+come to more than the host holds in RAM and swap together, refuses to start if
+it was asked to revoke on a kernel that carries no
+.Pa /proc/pressure/memory ,
+and warns about zram swap it has been told to grant out of.
+.Pp
+It then binds the metrics listener, attaches to each guest's memory device,
+binds one listener per distinct vsock port and one per unix socket, and tells
+systemd it is ready.
+.Pp
+A guest whose QMP socket is not there yet is retried with a doubling backoff
+rather than being treated as a configuration error, so the daemon and the VMs
+it serves may be started in any order.
+.Sh PRIVILEGE
+The daemon needs no capabilities.
+It reads
+.Pa /proc ,
+connects to QMP sockets, and binds its listeners; nothing it does requires
+root, unless a guest is configured on a vsock port at or below 1023, which is
+reserved.
+.Pp
+It does need to reach the hypervisor's QMP sockets, which is a matter of group
+membership: run it as its own user and put that user in the group the sockets
+belong to.
+.Pp
+A QMP socket carries the hypervisor's whole control interface, and anything
+that can talk to it can do far more than resize a memory device.
+Give the daemon a socket of its own so that its access can be reasoned about
+separately from the VM manager's; see
+.Xr pazari 7 .
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev RUST_LOG
+The log filter for standard error.
+The default is
+.Cm info .
+.It Ev NOTIFY_SOCKET
+Where the daemon tells systemd it is ready, and where it sends watchdog pings.
+Set by systemd under
+.Va Type=notify ;
+ignored when it is not set.
+.It Ev WATCHDOG_USEC
+The watchdog period systemd expects to be pinged within.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/pazari/pazarid.toml
+The default configuration file.
+See
+.Xr pazarid.toml 5 .
+.It Pa /proc/meminfo
+Read every tick for
+.Va MemTotal , MemAvailable , SwapTotal
+and
+.Va SwapFree .
+.It Pa /proc/pressure/memory
+Read every tick for
+.Va some avg10 .
+Its absence is tolerated unless the daemon was asked to revoke.
+.It Pa /proc/swaps
+Read once at startup, under
+.Cm policy.grant_swap ,
+to look for zram.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Pp
+The daemon exits non-zero when its configuration will not load, when
+.Pa /proc/meminfo
+cannot be read, and when it was asked to revoke on a kernel that cannot measure
+memory pressure.
+.Sh EXAMPLES
+Write a configuration file to start from:
+.Bd -literal -offset indent
+pazarid example-config > /etc/pazari/pazarid.toml
+.Ed
+.Pp
+Watch what it is doing, without a Prometheus:
+.Bd -literal -offset indent
+curl -s http://127.0.0.1:9650/ | grep -E 'guest_size|host_available|denies'
+.Ed
+.Sh SEE ALSO
+.Xr pazari-agent 1 ,
+.Xr pazari-stress 1 ,
+.Xr pazari-agent.toml 5 ,
+.Xr pazarid.toml 5 ,
+.Xr pazari 7
+.Pp
+.Xr qemu 1 ,
+.Xr proc 5

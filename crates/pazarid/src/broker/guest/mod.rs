@@ -15,6 +15,11 @@ pub struct Guest {
     /// `None` until the guest's memory device has reported one.
     pub size: Option<u64>,
 
+    /// The device's size is boot memory plus what is plugged into it; the
+    /// guest reads `MemTotal`, which is that less whatever its kernel keeps
+    /// for itself.
+    pub offset: Option<u64>,
+
     pub reconcile: Option<Reconcile>,
 
     pub granted: Option<Timestamp>,
@@ -28,6 +33,18 @@ impl Guest {
         match self.reconcile {
             Some(reconcile) => Some(reconcile.target),
             None => None,
+        }
+    }
+
+    pub const fn observe(&mut self, plugged: u64) {
+        if self.reconcile.is_some() {
+            return;
+        }
+
+        if let Some(size) = self.size
+            && size >= plugged
+        {
+            self.offset = Some(size - plugged);
         }
     }
 

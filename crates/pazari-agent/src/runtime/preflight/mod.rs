@@ -1,4 +1,4 @@
-use std::{fmt, fs};
+use std::{fmt, fs, path::Path};
 
 use pazari_types::Swappiness;
 
@@ -7,7 +7,7 @@ use crate::runtime::{
         Limit, MEMORY_CURRENT, MEMORY_EVENTS, MEMORY_HIGH, MEMORY_MAX, MEMORY_OOM_GROUP,
         MEMORY_PRESSURE, MEMORY_RECLAIM, MEMORY_SWAP_CURRENT, MEMORY_SWAP_MAX,
     },
-    config::RuntimeConfig,
+    config::{RuntimeConfig, VIRTIO_BALLOON, VIRTIO_DEVICE_ID},
 };
 
 const CONTROLLERS: &str = "cgroup.controllers";
@@ -145,9 +145,10 @@ impl<'a> Preflight<'a> {
                 self.workload_cgroup(),
                 self.agent_cgroup(),
                 self.memory_controller(),
-                self.memmap_on_memory(),
+                self.auto_onlining(),
                 self.transparent_hugepages(),
                 self.block_size(),
+                self.balloon(),
                 self.swap(swappiness),
             ],
         }
@@ -294,10 +295,10 @@ impl<'a> Preflight<'a> {
             ))
     }
 
-    fn memmap_on_memory(self) -> Check {
-        let check = Named("memmap_on_memory");
+    fn auto_onlining(self) -> Check {
+        let check = Named("auto-onlining");
 
-        let path = &self.config.paths.memmap_on_memory;
+        let path = &self.config.paths.auto_online_blocks;
 
         let value = match fs::read_to_string(path) {
             Ok(text) => text.trim().to_owned(),
@@ -307,16 +308,79 @@ impl<'a> Preflight<'a> {
         };
 
         match value.as_str() {
-            "Y" | "1" => check.pass("a hotplugged range carries its own memmap".to_owned()),
-            "N" | "0" => check.fail(format!(
-                "{} is {value}: a hotplugged range takes its memmap out of the memory the guest already has",
+            "online" | "online_kernel" | "online_movable" => {
+                check.pass(format!("the policy is {value}"))
+            }
+            "offline" => check.fail(format!(
+                "{} is offline: a hot-plugged block is added and left offline, so a grant never reaches MemTotal; write online to it, or boot with memhp_default_state=online",
                 path.display()
             )),
             _ => check.fail(format!(
-                "{} holds {value:?}, which is not Y or N",
+                "{} holds {value:?}, which is not an onlining policy",
                 path.display()
             )),
         }
+    }
+
+    fn balloon(self) -> Check {
+        let check = Named("balloon");
+
+        let path = &self.config.paths.virtio_devices;
+
+        let Ok(entries) = fs::read_dir(path) else {
+            return check.pass(format!(
+                "{} is not there: this guest is on no virtio bus",
+                path.display()
+            ));
+        };
+
+        let mut devices: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+
+        devices.sort();
+
+        let mut unreadable = None;
+
+        for device in &devices {
+            match Self::device_id(device) {
+                Ok(VIRTIO_BALLOON) => {
+                    return check.fail(format!(
+                        "{} is a virtio-balloon: a balloon moves the memory the guest has underneath the negotiation, so the two cannot share a guest",
+                        device.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(detail) => unreadable = unreadable.or(Some(detail)),
+            }
+        }
+
+        if let Some(detail) = unreadable {
+            return check.warn(detail);
+        }
+
+        check.pass(format!(
+            "none of the {} devices on {} is a balloon",
+            devices.len(),
+            path.display()
+        ))
+    }
+
+    fn device_id(device: &Path) -> Result<u32, String> {
+        let path = device.join(VIRTIO_DEVICE_ID);
+
+        let value = fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+
+        let value = value.trim();
+
+        u32::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).map_err(|_| {
+            format!(
+                "{} holds {value:?}, which is not a device id",
+                path.display()
+            )
+        })
     }
 
     fn transparent_hugepages(self) -> Check {
@@ -432,7 +496,7 @@ impl<'a> Preflight<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::testing::Guest;
+    use crate::runtime::{config::Paths, testing::Guest};
 
     fn severity(report: &Report, name: &str) -> Severity {
         report
@@ -459,7 +523,7 @@ mod tests {
 
         assert_eq!(report.severity(), Severity::Pass, "{report}");
         assert!(report.passed());
-        assert_eq!(report.checks().len(), 8);
+        assert_eq!(report.checks().len(), 9);
     }
 
     #[test]
@@ -586,26 +650,138 @@ mod tests {
     }
 
     #[test]
-    fn a_kernel_without_memmap_on_memory_fails() {
+    fn a_guest_that_leaves_hot_plugged_blocks_offline_fails() {
         let guest = Guest::new();
-        Guest::write(&guest.config.paths.memmap_on_memory, "N\n");
+        Guest::write(&guest.config.paths.auto_online_blocks, "offline\n");
 
         let report = Preflight::new(&guest.config).run(None);
 
-        assert_eq!(severity(&report, "memmap_on_memory"), Severity::Fail);
-        assert!(detail(&report, "memmap_on_memory").contains("takes its memmap out of"));
+        assert_eq!(severity(&report, "auto-onlining"), Severity::Fail);
+        assert!(
+            detail(&report, "auto-onlining").contains("never reaches MemTotal"),
+            "{}",
+            detail(&report, "auto-onlining")
+        );
+        assert!(!report.passed());
+    }
 
-        Guest::write(&guest.config.paths.memmap_on_memory, "1\n");
+    #[test]
+    fn every_onlining_policy_that_onlines_passes() {
+        let guest = Guest::new();
+
+        for policy in ["online", "online_kernel", "online_movable"] {
+            Guest::write(
+                &guest.config.paths.auto_online_blocks,
+                &format!("{policy}\n"),
+            );
+
+            assert_eq!(
+                severity(&Preflight::new(&guest.config).run(None), "auto-onlining"),
+                Severity::Pass,
+                "rejected {policy}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_onlining_policy_that_cannot_be_read_or_placed_fails() {
+        let guest = Guest::new();
+        Guest::write(&guest.config.paths.auto_online_blocks, "sideways\n");
+
+        let report = Preflight::new(&guest.config).run(None);
+
+        assert_eq!(severity(&report, "auto-onlining"), Severity::Fail);
+        assert!(detail(&report, "auto-onlining").contains("not an onlining policy"));
+
+        Guest::remove(&guest.config.paths.auto_online_blocks);
+
         assert_eq!(
-            severity(&Preflight::new(&guest.config).run(None), "memmap_on_memory"),
+            severity(&Preflight::new(&guest.config).run(None), "auto-onlining"),
+            Severity::Fail
+        );
+    }
+
+    #[test]
+    fn a_guest_sharing_its_memory_with_a_balloon_fails() {
+        let guest = Guest::new();
+        Guest::write(
+            &guest.config.paths.virtio_devices.join("virtio2/device"),
+            "0x0005\n",
+        );
+
+        let report = Preflight::new(&guest.config).run(None);
+
+        assert_eq!(severity(&report, "balloon"), Severity::Fail);
+        assert!(
+            detail(&report, "balloon").contains("virtio2"),
+            "{}",
+            detail(&report, "balloon")
+        );
+        assert!(detail(&report, "balloon").contains("underneath the negotiation"));
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn a_guest_on_no_virtio_bus_has_no_balloon_to_find() {
+        let guest = Guest::new();
+
+        assert_eq!(
+            severity(&Preflight::new(&guest.config).run(None), "balloon"),
             Severity::Pass
         );
 
-        Guest::remove(&guest.config.paths.memmap_on_memory);
-        assert_eq!(
-            severity(&Preflight::new(&guest.config).run(None), "memmap_on_memory"),
-            Severity::Fail
+        let bare = RuntimeConfig {
+            paths: Paths {
+                virtio_devices: guest.config.paths.virtio_devices.join("absent"),
+                ..guest.config.paths.clone()
+            },
+            ..guest.config.clone()
+        };
+
+        let report = Preflight::new(&bare).run(None);
+
+        assert_eq!(severity(&report, "balloon"), Severity::Pass);
+        assert!(detail(&report, "balloon").contains("no virtio bus"));
+    }
+
+    #[test]
+    fn a_virtio_device_that_will_not_say_what_it_is_warns() {
+        let guest = Guest::new();
+        Guest::write(
+            &guest.config.paths.virtio_devices.join("virtio2/device"),
+            "balloon?\n",
         );
+
+        let report = Preflight::new(&guest.config).run(None);
+
+        assert_eq!(severity(&report, "balloon"), Severity::Warn);
+        assert!(detail(&report, "balloon").contains("not a device id"));
+        assert!(report.passed(), "a warning still starts the agent");
+
+        Guest::write(
+            &guest.config.paths.virtio_devices.join("virtio2/device"),
+            "0x0001\n",
+        );
+        Guest::dir(&guest.config.paths.virtio_devices.join("virtio3"));
+
+        let report = Preflight::new(&guest.config).run(None);
+
+        assert_eq!(severity(&report, "balloon"), Severity::Warn);
+        assert!(detail(&report, "balloon").contains("cannot read"));
+    }
+
+    #[test]
+    fn a_balloon_outranks_a_device_that_will_not_say_what_it_is() {
+        let guest = Guest::new();
+        let devices = &guest.config.paths.virtio_devices;
+
+        Guest::dir(&devices.join("virtio2"));
+        Guest::write(&devices.join("virtio3/device"), "0x0005\n");
+
+        let report = Preflight::new(&guest.config).run(None);
+
+        assert_eq!(severity(&report, "balloon"), Severity::Fail);
+        assert!(detail(&report, "balloon").contains("virtio3"));
     }
 
     #[test]

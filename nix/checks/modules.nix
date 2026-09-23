@@ -155,7 +155,6 @@ in
     {
       name = "the kernel is booted the way preflight wants it";
       ok = lib.all (parameter: lib.elem parameter guest.boot.kernelParams) [
-        "memory_hotplug.memmap_on_memory=1"
         "transparent_hugepage=madvise"
         "psi=1"
       ];

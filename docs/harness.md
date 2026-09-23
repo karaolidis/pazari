@@ -5,6 +5,7 @@ This document describes the VM test harness. The reference implementation is
 
 ```
 nix build .#checks.x86_64-linux.test-reconnect -L
+nix build .#measure-hotplug-rtt -L
 ```
 
 ## A scenario
@@ -16,6 +17,7 @@ A scenario is one `.nix` file in `nix/harness/scenarios`.
 | `description` | One line, printed when the run starts.                           |
 | `timeout`     | Seconds the whole run may take before it is failed.              |
 | `breaches`    | Optional. True when the workload is meant to reach `memory.max`. |
+| `sample`      | Optional. Seconds between scrapes of every endpoint.             |
 | `daemon`      | What this scenario changes about the host daemon's settings.     |
 | `guests`      | The guests.                                                      |
 | `host`        | Optional. A NixOS module merged into the outer machine.          |
@@ -36,6 +38,15 @@ The workload does not start with the guest. It blocks on a file in the share
 that the driver makes only once it is scraping every endpoint and every guest is
 past the handshake, so nothing a scenario cares about happens unobserved. The
 first workload's own `started` event is the run's `t0`.
+
+## A measurement
+
+A scenario whose name begins with `measure-` is a measurement rather than a
+test. It is kept out of `nix flake check`, and built by name instead:
+
+```
+nix build .#measure-brake-crawl -L
+```
 
 ## Check tooling
 
@@ -76,13 +87,14 @@ grant, a deny, an offer, a reclaim.
 `/var/lib/pazari-harness` inside the outer machine, copied out into the check's
 result.
 
-| Entry           | What it is                                                        |
-| --------------- | ----------------------------------------------------------------- |
-| `scenario.json` | The manifest this run was built from.                             |
-| `samples.jsonl` | Every scrape of every endpoint, one object each.                  |
-| `events.jsonl`  | What the driver noted, and when.                                  |
-| `result.json`   | The result, and how long it took.                                 |
-| `plot.svg`      | The plot, or one `<guest>.svg` each where there is more than one. |
-| `logs/`         | `pazarid.log`, and one console per guest.                         |
-| `<guest>/`      | Where that guest's qemu runs: its QMP socket, and its share.      |
-| `<guest>/share` | The 9p share: the workload's stream, the gate, the commands.      |
+| Entry               | What it is                                                        |
+| ------------------- | ----------------------------------------------------------------- |
+| `scenario.json`     | The manifest this run was built from.                             |
+| `samples.jsonl`     | Every scrape of every endpoint, one object each.                  |
+| `events.jsonl`      | What the driver noted, and when.                                  |
+| `result.json`       | The result, and how long it took.                                 |
+| `measurements.json` | What a `measure-` scenario took.                                  |
+| `plot.svg`          | The plot, or one `<guest>.svg` each where there is more than one. |
+| `logs/`             | `pazarid.log`, and one console per guest.                         |
+| `<guest>/`          | Where that guest's qemu runs: its QMP socket, and its share.      |
+| `<guest>/share`     | The 9p share: the workload's stream, the gate, the commands.      |

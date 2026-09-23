@@ -30,7 +30,10 @@ let
 
     inherit (common) scenarios;
   };
+
+  measured = name: lib.hasPrefix "measure-" name;
 in
 {
-  inherit (nested) tests;
+  tests = lib.filterAttrs (name: _: !measured name) nested.tests;
+  measurements = lib.filterAttrs (name: _: measured name) nested.tests;
 }

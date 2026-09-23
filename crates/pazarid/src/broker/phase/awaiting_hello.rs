@@ -97,6 +97,8 @@ impl State for AwaitingHello {
             },
         );
 
+        ctx.observe_plugged(said.guest, plugged);
+
         Phase::Negotiated(Negotiated::new(boot_mem, block_size, said.now))
     }
 }

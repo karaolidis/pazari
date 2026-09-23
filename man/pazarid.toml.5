@@ -1,0 +1,496 @@
+.Dd September 23, 2026
+.Dt PAZARID.TOML 5
+.Os pazari
+.Sh NAME
+.Nm pazarid.toml
+.Nd configuration file for the pazari host memory daemon
+.Sh DESCRIPTION
+.Xr pazarid 1
+reads one TOML file, by default
+.Pa /etc/pazari/pazarid.toml .
+.Pp
+.Nm pazarid Cm example-config
+prints an annotated file carrying every key at its default.
+A copy is installed with the package as
+.Pa share/doc/pazari/examples/pazarid.toml .
+.Pp
+Sizes and durations are written as in
+.Xr pazari-agent.toml 5 :
+a size is a bare integer or a number with a unit, where
+.Cm MiB
+counts 1024 and
+.Cm MB
+counts 1000; a duration is always a string, and unless a key says otherwise it
+must be greater than zero and at most
+.Cm 24h .
+.Sh WHAT THE DAEMON DECIDES
+The daemon decides whether a guest may grow, how large its memory device
+should be made, and which guest to ask for memory back when the host itself is
+short.
+.Pp
+It does not take memory from a guest.
+The host may send a reclaim request, and a guest that does not want to answer
+one keeps what it holds until its ceiling.
+There is no mechanism in the daemon that unplugs memory a guest has not agreed
+to give up; the ceiling is the only hard bound, and it bounds growth rather
+than what is already held.
+.Sh SETTINGS
+.Ss General
+.Bl -tag -width Ds
+.It Cm tick_interval No = Ar duration
+How often the daemon re-reads the host's memory and sweeps what it knows about
+its guests: reconciling actuations, noticing guests that have gone quiet,
+expiring reclaim deadlines, and refreshing its gauges.
+The default is
+.Cm 1s .
+.Pp
+This is the resolution of the daemon's whole view of the host.
+Nothing here bounds how fast a grant is answered; a request is decided as it
+arrives.
+.El
+.Ss policy
+.Bl -tag -width Ds
+.It Cm host_floor No = Ar size
+Memory the host keeps for itself: the hypervisor's own working set, the daemon,
+the storage stack, and whatever else shares the host.
+Required; zero is accepted.
+.Pp
+It is what the arbiter refuses to grant past, and it is counted into the
+startup warning.
+A grow is granted only if what the host has, less everything already promised
+to other guests and less what this grow would take, still leaves the floor.
+Equality with the floor is granted.
+.It Cm welcome_status_interval No = Ar duration
+How often a guest must send
+.Cm status .
+The default is
+.Cm 1s .
+.Pp
+This is sent to the guest in
+.Cm welcome
+and is the unit of the staleness window, so shortening it makes the daemon
+notice a departed guest sooner and makes every guest talk more.
+.It Cm grant_min_interval No = Ar duration
+How long a guest waits after a grant before another one.
+The default is
+.Cm 5s .
+.Pp
+A grow that arrives sooner is refused with
+.Cm rate_limited
+and the remaining time as
+.Va retry_after_ms .
+It is also the retry advice the daemon gives on a
+.Cm host_pressure
+refusal and on a refusal of a guest whose device has not yet reported its size.
+It rate-limits grows only; an offer to release is never refused for asking too
+often.
+.It Cm reconcile_deadline No = Ar duration
+How long an actuation is given to apply before the daemon stops waiting for it.
+The default is
+.Cm 30s .
+.Pp
+When it passes, a grow is accepted at whatever size the device reached and a
+shrink is logged as having missed.
+Set it above the time a resize of the largest step a guest can take actually
+costs on this host; a virtio-mem resize is not instant, and a deadline below
+the cost turns every grow into a reconciliation failure.
+.It Cm shrink_revert No = Ar boolean
+Whether a shrink that did not apply is taken back to the size the guest still
+has.
+The default is
+.Cm true .
+.Pp
+Without this a shrink that stalls leaves the device asking for a size the guest
+never reached, so the guest goes on holding memory the daemon has stopped
+counting against it.
+.It Cm stale_after No = Ar count
+Missed
+.Cm status
+intervals before a guest is marked stale.
+Must be greater than zero; the default is
+.Cm 3 .
+.Pp
+The window is
+.Cm welcome_status_interval
+multiplied by this.
+A stale guest is still connected and still holds what it holds; the mark is a
+signal to an operator, and to the
+.Va pazarid_guest_stale
+gauge, that the daemon's view of that guest has stopped being refreshed.
+.It Cm reclaim_deadline No = Ar duration
+How long a guest has to answer a reclaim request.
+The default is
+.Cm 30s .
+.Pp
+A guest with a request outstanding is left alone until it answers or the
+deadline runs out, and a guest that refuses is left alone until the deadline
+would have passed.
+Too short and a guest that is genuinely reclaiming gets asked again while it
+works; too long and one unresponsive guest holds up the sweep.
+.It Cm grant_swap No = Ar boolean
+Whether free host swap counts towards what a grow may be granted out of.
+The default is
+.Cm false .
+.Pp
+With
+.Cm false
+a grant promises RAM: the daemon grants against
+.Va MemAvailable
+alone.
+With
+.Cm true
+it grants against
+.Va MemAvailable
+plus
+.Va SwapFree ,
+and is deliberately lending out memory the host may have to page for.
+Either way, until the relevant field has been read every grow is refused with
+.Cm host_pressure .
+.Pp
+This pairs naturally with the
+.Sx policy.revocation
+table:
+a host that lends out swap should be able to ask for it back.
+It pairs badly with zram, whose
+.Va SwapFree
+counts what the device would hold uncompressed rather than what it will cost in
+RAM, and worst of all for the incompressible pages a memory-hungry workload
+tends to produce.
+The daemon warns at startup when it finds zram in
+.Pa /proc/swaps
+under this setting.
+.El
+.Ss policy.revocation
+How the host takes memory back when it comes under pressure itself.
+Leave the table out and the daemon never asks a guest for memory back on its
+own initiative.
+.Bl -tag -width Ds
+.It Cm psi No = Ar percent
+The host memory pressure, as
+.Va some avg10
+from
+.Pa /proc/pressure/memory
+in percent of wall time, at which the daemon starts asking guests for memory
+back.
+Greater than zero and at most
+.Cm 100 ;
+required when the table is present.
+.It Cm step No = Ar size
+How much memory one such request asks a guest for.
+Must be greater than zero; the default is
+.Cm 256MiB .
+.El
+.Pp
+On every tick at or over
+.Cm psi
+the daemon sends one reclaim request to the guest holding the most over its
+boot memory, asking for
+.Cm step
+bytes or for what that guest holds over boot, whichever is less.
+One guest is asked per tick.
+.Pp
+A host asked to revoke must be able to measure pressure.
+Where this table is present and the kernel carries no
+.Pa /proc/pressure/memory ,
+the daemon refuses to start.
+.Ss metrics
+Leave the table out and the daemon binds no listener and keeps no counters.
+.Bl -tag -width Ds
+.It Cm listen No = Ar address
+The address the Prometheus endpoint answers scrapes on, for example
+.Ql 127.0.0.1:9650 .
+Required when the table is present.
+.Pp
+Any
+.Cm GET ,
+on any path, is answered with the OpenMetrics text exposition; any other method
+is answered with
+.Cm 405 .
+See
+.Sx METRICS .
+.El
+.Ss guests.<name>
+One table per guest.
+The name is the daemon's own; it is what appears in the logs and in the
+.Va guest
+label of every per-guest series, and it need not be the guest's hostname.
+At least one guest table is required.
+.Bl -tag -width Ds
+.It Cm ceiling No = Ar size
+The most memory this guest may hold, counted the way the guest counts its own
+memory: boot memory plus whatever is plugged.
+Must be greater than zero; required.
+.Pp
+It is sent to the guest in
+.Cm welcome ,
+and every grant target is clamped to it.
+A request that buys the guest nothing against it is refused with
+.Cm ceiling .
+The ceiling may be lowered at run time by editing the file and restarting the
+daemon, which will tell the guest its new ceiling and then ask for the
+difference back; it does not take the memory.
+.El
+.Ss guests.<name>.transport
+How this guest reaches the daemon.
+Required.
+.Bl -tag -width Ds
+.It Cm kind No = Cm \(dqvsock\(dq
+.Dv AF_VSOCK .
+.Bl -tag -width Ds
+.It Cm cid No = Ar id
+The context id the guest dials from.
+This identifies the guest rather than naming an address to bind; the listener
+is bound at
+.Dv VMADDR_CID_ANY .
+Required.
+.It Cm port No = Ar port
+The port the guest dials.
+The default is
+.Cm 4650 .
+One listener is bound per distinct port across all guests.
+.Pp
+Ports at or below 1023 are reserved, and binding one wants
+.Dv CAP_NET_BIND_SERVICE ,
+which the packaged daemon does not have.
+.El
+.It Cm kind No = Cm \(dqunix\(dq
+An
+.Dv AF_UNIX
+socket.
+.Bl -tag -width Ds
+.It Cm path No = Ar path
+The socket this guest dials.
+Required.
+A stale socket file at that path is removed before the listener is bound.
+.El
+.El
+.Pp
+Two guests may not share a context id or a socket path; the daemon refuses to
+start if they do, naming the peer and the guest that already holds it.
+.Ss guests.<name>.qmp
+The QMP socket of the hypervisor process running this guest, and the memory
+device on it.
+Required.
+.Bl -tag -width Ds
+.It Cm path No = Ar path
+The QMP socket of the qemu process running the guest.
+Required.
+.Pp
+Give the daemon a socket of its own rather than the one the VM manager already
+drives; see
+.Xr pazari 7 .
+.It Cm device No = Ar id
+The
+.Va id=
+of the guest's virtio-mem device.
+Required.
+.Pp
+The daemon addresses it as
+.Pa /machine/peripheral/<id>
+and refuses to attach if the device is missing or is not a virtio-mem.
+.It Cm deadline No = Ar duration
+How long one QMP command is given to finish.
+The default is
+.Cm 5s .
+.It Cm retry_min No = Ar duration
+The first delay before a device that did not answer is opened again.
+The default is
+.Cm 500ms .
+.It Cm retry_max No = Ar duration
+The cap that delay doubles towards.
+Must not be less than
+.Cm retry_min ;
+the default is
+.Cm 30s .
+.Pp
+The backoff covers opening the device, reading its size at attach, and watching
+it for changes.
+It does not cover a resize the device refused: that is counted, logged, and
+left to reconciliation, and the connection is kept.
+.El
+.Ss guests.<name>.qmp.mode
+How the daemon uses the QMP socket.
+The table is optional and defaults to
+.Cm held .
+.Bl -tag -width Ds
+.It Cm kind No = Cm \(dqheld\(dq
+One connection held open for the life of the device.
+Sizes come from the hypervisor's own size-change events, so the daemon learns
+that a resize has landed as soon as it has.
+Takes no other key.
+.It Cm kind No = Cm \(dqper_operation\(dq
+A fresh connection per command, for a socket shared with other tools.
+No events are subscribed to, so the size is polled instead.
+.Bl -tag -width Ds
+.It Cm poll No = Ar duration
+How often the size is resampled while a resize is being processed.
+The default is
+.Cm 1s .
+.Pp
+This is the resolution of every resize under this mode, and it is added to
+every grow round trip.
+.El
+.El
+.Sh CAPACITY
+.Ss Provisioning
+At startup the daemon compares the guests' ceilings and
+.Cm host_floor
+against what the host holds:
+.Bd -literal -offset indent
+sum(ceilings) + host_floor > MemTotal + SwapTotal
+.Ed
+.Pp
+If that holds, it warns once and starts anyway.
+Over-provisioning is a legitimate posture: the point of negotiation is that
+guests do not all want their ceiling at once.
+.Pp
+Operators who want the strong guarantee can have it through how they set
+ceilings rather than by asking the daemon to enforce it:
+.Bd -literal -offset indent
+sum(ceilings) + host_floor <= MemTotal
+.Ed
+.Pp
+Every byte any guest could ever hold is then RAM.
+.Ss Per-guest host-side limits
+Nothing in the daemon bounds any one guest's share of the host.
+Under
+.Cm grant_swap No = Cm true
+in particular, one greedy guest can take the free swap into its own pages and
+leave the others paging for it.
+.Pp
+Put a host-side limit on each VM's own scope or service, so that a guest's
+appetite is charged to that guest.
+.Sh STARTUP CHECKS
+Before it serves anything, the daemon reads
+.Pa /proc/meminfo
+and fails to start if it cannot.
+It then:
+.Bl -bullet -width Ds
+.It
+warns once if the guests at their ceilings plus
+.Cm host_floor
+come to more than the host holds in RAM and swap together;
+.It
+refuses to start if
+.Sx policy.revocation
+is present and the kernel carries no
+.Pa /proc/pressure/memory ;
+.It
+warns, under
+.Cm grant_swap No = Cm true ,
+if
+.Pa /proc/swaps
+names a zram device.
+.El
+.Sh METRICS
+With a
+.Sx metrics
+table present, the daemon publishes, under the prefix
+.Va pazarid :
+.Pp
+Per-guest gauges, each labelled
+.Va guest :
+.Va guest_size_bytes ,
+what the guest's memory device holds;
+.Va guest_ceiling_bytes ;
+.Va guest_connected ,
+1 while the guest is connected and past the handshake;
+.Va guest_stale ,
+1 while it has gone quiet; and
+.Va guest_reclaim_outstanding ,
+1 while a reclaim request is waiting on it.
+.Pp
+Host gauges:
+.Va host_available_bytes
+and
+.Va host_swap_free_bytes ,
+as the daemon last read them, and
+.Va host_psi ,
+the host's memory
+.Va some avg10 .
+.Pp
+Counters:
+.Va connections_total ,
+.Va disconnections_total ,
+.Va closes_total ,
+.Va grants_total ,
+.Va reclaim_requests_total ,
+.Va denies_total
+with a
+.Va reason
+label,
+.Va guest_messages_total
+with a
+.Va kind
+label naming the protocol message, and, per guest,
+.Va device_reconnects_total ,
+.Va device_seed_failures_total
+and
+.Va device_refused_actuations_total .
+.Pp
+The daemon refreshes its gauges once per
+.Cm tick_interval .
+.Pp
+.Va device_refused_actuations_total
+counts resizes the hypervisor would not make.
+A device configured with a block size the daemon's targets do not divide by
+looks like this from here.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/pazari/pazarid.toml
+The default configuration file.
+.It Pa share/doc/pazari/examples/pazarid.toml
+An annotated file carrying every key at its default.
+.It Pa /proc/meminfo
+Read every tick for
+.Va MemTotal , MemAvailable , SwapTotal
+and
+.Va SwapFree .
+.It Pa /proc/pressure/memory
+Read every tick for
+.Va some avg10 .
+Absent is tolerated unless
+.Sx policy.revocation
+is configured.
+.It Pa /proc/swaps
+Read once at startup, under
+.Cm grant_swap No = Cm true ,
+to look for zram.
+.El
+.Sh EXAMPLES
+A host keeping four gigabytes for itself, taking memory back when it comes
+under pressure, and answering to one guest:
+.Bd -literal -offset indent
+tick_interval = "1s"
+
+[policy]
+host_floor = "4GiB"
+grant_min_interval = "5s"
+grant_swap = false
+
+[policy.revocation]
+psi = 20.0
+step = "256MiB"
+
+[metrics]
+listen = "127.0.0.1:9650"
+
+[guests.example]
+ceiling = "32GiB"
+
+[guests.example.transport]
+kind = "vsock"
+cid = 3
+
+[guests.example.qmp]
+path = "/run/pazari/example.qmp"
+device = "vm0"
+.Ed
+.Sh SEE ALSO
+.Xr pazari-agent 1 ,
+.Xr pazarid 1 ,
+.Xr pazari-agent.toml 5 ,
+.Xr pazari 7
+.Pp
+.Xr proc 5 ,
+.Xr qemu 1

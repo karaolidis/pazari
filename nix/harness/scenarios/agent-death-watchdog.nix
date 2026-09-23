@@ -29,7 +29,7 @@
             "grow=800MiB,rate=384MiB/s"
             "release=384MiB"
             "grow=384MiB,rate=384MiB/s"
-            "hold=30s"
+            "hold=180s"
           ];
         };
 

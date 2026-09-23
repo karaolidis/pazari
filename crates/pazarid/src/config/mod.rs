@@ -127,7 +127,7 @@ mod tests {
 
     const FIXTURE: &str = "pazarid.toml";
 
-    const EXAMPLE: &str = include_str!("../../../../docs/pazarid.example.toml");
+    const EXAMPLE: &str = include_str!("../../../../examples/pazarid.toml");
 
     const FULL: &str = r#"
         tick_interval = "500ms"
@@ -211,8 +211,8 @@ mod tests {
         assert_eq!(
             EXAMPLE,
             Config::template(),
-            "docs/pazarid.example.toml is stale: regenerate it with \
-             `cargo run -p pazarid -- example-config > docs/pazarid.example.toml`"
+            "examples/pazarid.toml is stale: regenerate it with \
+             `cargo run -p pazarid -- example-config > examples/pazarid.toml`"
         );
     }
 

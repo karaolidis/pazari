@@ -156,10 +156,14 @@ pub fn sized_with(policy: Policy) -> Broker {
 }
 
 pub fn greet(broker: &mut Broker, now: Timestamp, cid: u32) {
+    greet_at(broker, now, cid, BOOT);
+}
+
+pub fn greet_at(broker: &mut Broker, now: Timestamp, cid: u32, plugged: u64) {
     connect(broker, now, cid);
 
     assert_eq!(
-        message(broker, now, cid, hello()),
+        message(broker, now, cid, hello_at(plugged)),
         vec![welcome(cid, CEILING)],
     );
 }
@@ -205,12 +209,16 @@ pub fn sizes(broker: &mut Broker, now: Timestamp, cid: u32, size: u64) -> Vec<Ac
 }
 
 pub fn hello() -> GuestMessage {
+    hello_at(BOOT)
+}
+
+pub fn hello_at(plugged: u64) -> GuestMessage {
     GuestMessage::Hello {
         protocol: PROTOCOL_VERSION,
         agent_version: "0.1.0".to_owned(),
         boot_mem: BOOT,
         block_size: BLOCK,
-        plugged: BOOT,
+        plugged,
     }
 }
 

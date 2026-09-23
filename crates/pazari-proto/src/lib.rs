@@ -1,6 +1,4 @@
 //! Wire protocol for pazari guest-host negotiation.
-//!
-//! See `docs/protocol.md` for the normative specification.
 
 pub mod codec;
 pub mod error;

@@ -15,8 +15,14 @@ pub const SELF_CGROUP: &str = "/proc/self/cgroup";
 /// The virtio-mem block size, in lowercase hexadecimal with no `0x`.
 pub const BLOCK_SIZE: &str = "/sys/devices/system/memory/block_size_bytes";
 
-/// Whether a hotplugged range carries its own `struct page` array.
-pub const MEMMAP_ON_MEMORY: &str = "/sys/module/memory_hotplug/parameters/memmap_on_memory";
+pub const AUTO_ONLINE_BLOCKS: &str = "/sys/devices/system/memory/auto_online_blocks";
+
+pub const VIRTIO_DEVICES: &str = "/sys/bus/virtio/devices";
+
+/// Holds a device id in hexadecimal, under each directory of `VIRTIO_DEVICES`.
+pub const VIRTIO_DEVICE_ID: &str = "device";
+
+pub const VIRTIO_BALLOON: u32 = 5;
 
 /// The transparent hugepage mode, with the selected one in brackets.
 pub const TRANSPARENT_HUGEPAGE: &str = "/sys/kernel/mm/transparent_hugepage/enabled";
@@ -31,7 +37,8 @@ pub struct Paths {
     pub self_cgroup: PathBuf,
     pub meminfo: PathBuf,
     pub block_size: PathBuf,
-    pub memmap_on_memory: PathBuf,
+    pub auto_online_blocks: PathBuf,
+    pub virtio_devices: PathBuf,
     pub transparent_hugepage: PathBuf,
 }
 
@@ -43,7 +50,8 @@ impl Paths {
             self_cgroup: rooted(root, SELF_CGROUP),
             meminfo: rooted(root, MEMINFO),
             block_size: rooted(root, BLOCK_SIZE),
-            memmap_on_memory: rooted(root, MEMMAP_ON_MEMORY),
+            auto_online_blocks: rooted(root, AUTO_ONLINE_BLOCKS),
+            virtio_devices: rooted(root, VIRTIO_DEVICES),
             transparent_hugepage: rooted(root, TRANSPARENT_HUGEPAGE),
         }
     }
@@ -56,7 +64,8 @@ impl Default for Paths {
             self_cgroup: PathBuf::from(SELF_CGROUP),
             meminfo: PathBuf::from(MEMINFO),
             block_size: PathBuf::from(BLOCK_SIZE),
-            memmap_on_memory: PathBuf::from(MEMMAP_ON_MEMORY),
+            auto_online_blocks: PathBuf::from(AUTO_ONLINE_BLOCKS),
+            virtio_devices: PathBuf::from(VIRTIO_DEVICES),
             transparent_hugepage: PathBuf::from(TRANSPARENT_HUGEPAGE),
         }
     }
@@ -152,8 +161,12 @@ mod tests {
             Path::new("/tmp/fixture/proc/self/cgroup")
         );
         assert_eq!(
-            paths.memmap_on_memory,
-            Path::new("/tmp/fixture/sys/module/memory_hotplug/parameters/memmap_on_memory")
+            paths.auto_online_blocks,
+            Path::new("/tmp/fixture/sys/devices/system/memory/auto_online_blocks")
+        );
+        assert_eq!(
+            paths.virtio_devices,
+            Path::new("/tmp/fixture/sys/bus/virtio/devices")
         );
     }
 

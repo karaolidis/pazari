@@ -111,6 +111,7 @@ rec {
     inherit (scenario) name description timeout;
 
     breaches = scenario.breaches or false;
+    sample = scenario.sample or 0.25;
     assertions = "${assertions scenario}/assertions.py";
 
     inherit (parts) daemon;

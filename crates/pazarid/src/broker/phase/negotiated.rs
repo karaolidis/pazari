@@ -93,6 +93,15 @@ impl Negotiated {
         None
     }
 
+    #[must_use]
+    const fn blocks(&self, size: u64, wanted: u64, ceiling: u64) -> u64 {
+        let blocks = wanted.saturating_sub(size).div_ceil(self.block_size);
+
+        let target = size.saturating_add(blocks.saturating_mul(self.block_size));
+
+        if target < ceiling { target } else { ceiling }
+    }
+
     fn stray_reclaim(self, ctx: &mut Context, said: Said<'_>, id: u64) -> Phase {
         warn!(
             guest = ctx.name(said.guest),
@@ -138,11 +147,12 @@ impl State for Negotiated {
 
         let ask = match (ctx.ceiling(said.guest), ctx.size(said.guest)) {
             (Some(ceiling), Some(size)) => {
-                let target = target.min(ceiling.get());
+                let ceiling = ceiling.get();
+                let wanted = target.saturating_add(ctx.offset(said.guest)).min(ceiling);
 
-                if target > size {
+                if wanted > size {
                     Ok(Ask::Grow {
-                        target,
+                        target: self.blocks(size, wanted, ceiling),
                         reason,
                         urgency,
                     })
@@ -231,6 +241,8 @@ impl State for Negotiated {
         self.stale = false;
         self.heard = said.now;
         self.status = Some(status);
+
+        ctx.observe_plugged(said.guest, status.plugged);
 
         if returned {
             info!(

@@ -101,6 +101,8 @@
           inherit pazari;
         };
 
+        legacyPackages.${system} = harness.measurements;
+
         formatter.${system} = treefmt.config.build.wrapper;
 
         checks.${system} =

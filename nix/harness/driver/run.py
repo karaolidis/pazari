@@ -18,7 +18,7 @@ from .waiting import HarnessFailure, wait_for
 
 SAMPLE_INTERVAL = 0.25
 
-HELD_GAP = 4 * SAMPLE_INTERVAL
+HELD_GAPS = 4
 
 SOCKET_TIMEOUT = 60.0
 BOOT_TIMEOUT = 420.0
@@ -38,6 +38,7 @@ class Scenario:
     daemon: dict
     guests: dict
     assertions: str
+    sample: float = SAMPLE_INTERVAL
 
     @classmethod
     def of(cls, entry):
@@ -121,9 +122,9 @@ class Source:
         if not seen or seen[-1][0] - seen[0][0] < over:
             return False
 
-        return max(gaps([at for at, _ in seen]), default=0.0) <= HELD_GAP and all(
-            predicate(value) for _, value in seen
-        )
+        return max(
+            gaps([at for at, _ in seen]), default=0.0
+        ) <= self._run.held_gap and (all(predicate(value) for _, value in seen))
 
     def answering(self, timeout, reason, ok=True, since=None):
         return self._run.wait_for(
@@ -217,13 +218,15 @@ class Run:
         self.logs = self.directory / "logs"
         self.logs.mkdir(parents=True, exist_ok=True)
 
+        self.held_gap = HELD_GAPS * scenario.sample
+
         self.sampler = Sampler(
             {
                 name: f"http://127.0.0.1:{port}/metrics"
                 for name, port in scenario.ports().items()
             },
             self.directory / "samples.jsonl",
-            SAMPLE_INTERVAL,
+            scenario.sample,
             self.clock,
         )
 

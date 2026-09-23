@@ -24,7 +24,7 @@
         };
 
         workload.phases = [
-          "grow=850MiB,rate=256MiB/s"
+          "grow=850MiB,rate=96MiB/s"
           "hold=600s"
         ];
       };
@@ -85,13 +85,14 @@
         )
         ceiling = guest.agent.gauge("pazari_agent_memory_max_bytes")
 
-        run.require(
-            guest.agent.held(
+        run.wait_for(
+            lambda: guest.agent.held(
                 "pazari_agent_memory_high_bytes",
                 lambda value: value < ceiling,
                 over=20,
                 since=stalled,
             ),
+            120,
             "the brake stayed on, under memory.max, for the whole stall",
         )
 

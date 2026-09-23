@@ -1,21 +1,62 @@
-{ lib, rustPlatform }:
-rustPlatform.buildRustPackage {
-  pname = "pazari";
+{
+  lib,
+  installShellFiles,
+  runCommand,
+  rustPlatform,
+  symlinkJoin,
+}:
+let
   version = "0.1.0";
 
-  src = lib.fileset.toSource {
-    root = ../.;
-    fileset = lib.fileset.unions [
-      ../Cargo.toml
-      ../Cargo.lock
-      ../clippy.toml
-      ../rustfmt.toml
-      ../crates
+  unwrapped = rustPlatform.buildRustPackage {
+    pname = "pazari-unwrapped";
+    inherit version;
 
-      ../docs/agent.example.toml
-      ../docs/pazarid.example.toml
-    ];
+    src = lib.fileset.toSource {
+      root = ../.;
+      fileset = lib.fileset.unions [
+        ../Cargo.toml
+        ../Cargo.lock
+        ../clippy.toml
+        ../rustfmt.toml
+        ../crates
+
+        ../examples
+      ];
+    };
+
+    cargoLock.lockFile = ../Cargo.lock;
+
+    postInstall = ''
+      install -Dm644 -t "$out/share/doc/pazari/examples" examples/agent.toml examples/pazarid.toml
+    '';
   };
 
-  cargoLock.lockFile = ../Cargo.lock;
+  manual =
+    runCommand "pazari-man-${version}"
+      {
+        src = lib.fileset.toSource {
+          root = ../man;
+          fileset = ../man;
+        };
+
+        nativeBuildInputs = [ installShellFiles ];
+      }
+      ''
+        installManPage "$src"/*.1 "$src"/*.5 "$src"/*.7
+      '';
+in
+symlinkJoin {
+  name = "pazari-${version}";
+  inherit version;
+
+  paths = [
+    unwrapped
+    manual
+  ];
+
+  meta = {
+    description = "Guest-initiated VM memory negotiation";
+    mainProgram = "pazarid";
+  };
 }

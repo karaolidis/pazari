@@ -128,6 +128,20 @@ impl Context {
         self.guests.state(guest)?.size
     }
 
+    #[must_use]
+    pub fn offset(&self, guest: GuestId) -> u64 {
+        self.guests
+            .state(guest)
+            .and_then(|state| state.offset)
+            .unwrap_or(0)
+    }
+
+    pub fn observe_plugged(&mut self, guest: GuestId, plugged: u64) {
+        if let Some(state) = self.guests.state_mut(guest) {
+            state.observe(plugged);
+        }
+    }
+
     pub fn request(&mut self, said: Said<'_>, id: u64, ask: Result<Ask, Decision>) {
         let ask = match ask {
             Ok(ask) => ask,
@@ -155,7 +169,9 @@ impl Context {
 
         let target = target.min(ceiling.get());
 
-        self.answer(said.peer, id, Decision::Grant { target });
+        let granted = target.saturating_sub(self.offset(said.guest));
+
+        self.answer(said.peer, id, Decision::Grant { target: granted });
 
         if matches!(ask, Ask::Grow { .. })
             && let Some(state) = self.guests.state_mut(said.guest)

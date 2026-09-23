@@ -103,7 +103,15 @@ impl Guest {
         );
         Self::write(&paths.meminfo, MEMINFO);
         Self::write(&paths.block_size, BLOCK_SIZE);
-        Self::write(&paths.memmap_on_memory, "Y\n");
+        Self::write(&paths.auto_online_blocks, "online\n");
+        Self::write(
+            &paths.virtio_devices.join("virtio0").join("device"),
+            "0x0018\n",
+        );
+        Self::write(
+            &paths.virtio_devices.join("virtio1").join("device"),
+            "0x0001\n",
+        );
         Self::write(&paths.transparent_hugepage, "always [madvise] never\n");
         Self::write(&paths.self_cgroup, &format!("0::/{AGENT_CGROUP}\n"));
         Self::dir(&paths.cgroup_root.join(AGENT_CGROUP));

@@ -1,0 +1,284 @@
+.Dd September 23, 2026
+.Dt PAZARI-AGENT 1
+.Os pazari
+.Sh NAME
+.Nm pazari-agent
+.Nd guest memory agent for pazari
+.Sh SYNOPSIS
+.Nm
+.Op Fl c Ar path
+.Nm
+.Op Fl c Ar path
+.Cm panic-open
+.Nm
+.Op Fl c Ar path
+.Cm preflight
+.Nm
+.Op Fl c Ar path
+.Cm example-config
+.Sh DESCRIPTION
+.Nm
+runs inside a virtual machine and negotiates that machine's memory with
+.Xr pazarid 1
+on the host.
+It watches one cgroup, brakes the workload in it with
+.Va memory.high
+rather than letting the kernel kill it, asks the host for more memory when the
+brake starts to bite, and offers memory back when the workload stops wanting
+it.
+.Pp
+The agent writes
+.Va memory.high
+and
+.Va memory.max
+on that cgroup, and nothing else in the guest should.
+It does not start, stop or restart the workload, and it does not decide what
+the workload may do.
+.Pp
+With no subcommand the agent runs in the foreground until it is asked to stop.
+It reads its configuration once, at startup; there is no reload.
+.Ss What it does
+The agent holds one of five modes, published as
+.Va pazari_agent_mode :
+.Bl -tag -width "awaiting_grant" -offset indent
+.It Cm titrating
+Finding the workload's working set, once, at startup, by lowering
+.Va memory.high
+from
+.Va memory.max
+a step at a time for as long as the workload is quiet.
+.It Cm steady
+The workload is progressing.
+.Va memory.high
+sits a whole burst reserve below
+.Va memory.max .
+.It Cm awaiting_grant
+The kernel is throttling the workload and the agent has asked the host for more
+memory.
+The band is open: the workload may burst to within
+.Cm open_guard
+of
+.Va memory.max
+while the request is in flight.
+.It Cm releasing
+The workload has been idle for long enough that the agent is reclaiming memory
+out of its cgroup so as to offer it back to the host.
+.It Cm exhausted
+The workload wants more than the host will give it.
+What happens next is
+.Cm engine.exhaustion :
+either the band stays open and the workload degrades, or it collapses onto
+.Va memory.max
+and the workload is killed as a unit.
+.El
+.Pp
+The arithmetic behind those bands, and how to size the three reserves that
+place them, is in
+.Xr pazari-agent.toml 5 .
+.Ss Shutdown
+On
+.Dv SIGTERM
+or
+.Dv SIGINT
+the agent takes the brake off before it exits: it writes
+.Va memory.high
+back to
+.Cm max ,
+so the workload is left unthrottled rather than pinned at whatever limit the
+agent happened to have set.
+.Pp
+It cannot do that if it is killed outright, which is what
+.Cm panic-open
+is for.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl c Ar path , Fl -config Ar path
+The configuration file.
+The default is
+.Pa /etc/pazari/agent.toml .
+Accepted before or after a subcommand.
+.It Fl -version
+Print the version and exit.
+.It Fl h , Fl -help
+Print a usage summary and exit.
+.El
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm panic-open
+Take the brake off the workload cgroup and exit.
+.Pp
+This writes
+.Va memory.high
+back to
+.Cm max
+and does nothing else.
+It is meant for
+.Va ExecStopPost ,
+where it runs after every exit the agent makes, orderly or not.
+Without it, an agent that is killed leaves the workload braked at limits
+nothing will ever move again, and the workload stalls until something notices.
+.Pp
+It is safe to run when no agent is running and safe to run twice.
+.It Cm preflight
+Run the checks the agent runs at startup, print what they found, and exit.
+.Pp
+See
+.Sx PREFLIGHT .
+.It Cm example-config
+Print an annotated configuration file, carrying every key at its default, to
+standard output.
+.El
+.Sh PREFLIGHT
+The agent runs nine checks before it starts and refuses to run if any of them
+fails.
+A warning does not stop it.
+Each is printed as
+.Ql <severity> <name>: <detail> ,
+where the severity is
+.Cm pass ,
+.Cm warn
+or
+.Cm fail .
+.Bl -tag -width "memory controller" -offset indent
+.It Cm cgroup v2
+The unified hierarchy is mounted.
+Fatal.
+.It Cm workload cgroup
+The configured cgroup exists and the agent can read its counters and write its
+limits.
+Fatal, and it names every file it could not use.
+.It Cm agent cgroup
+The agent is not itself inside the cgroup it brakes.
+Fatal when it provably is; a warning when the agent cannot tell, which is what
+a cgroup namespace looks like from inside.
+.It Cm memory controller
+The memory controller is delegated to the cgroup's parent.
+Fatal.
+.It Cm auto-onlining
+The kernel brings a hot-plugged block online by itself.
+Fatal.
+Under
+.Cm offline
+it adds the block and leaves it there, so the guest's
+.Va MemTotal
+never rises and no grant ever arrives.
+Write
+.Cm online
+to
+.Pa auto_online_blocks
+under
+.Pa /sys/devices/system/memory ,
+or boot with
+.Va memhp_default_state=online .
+.It Cm transparent hugepages
+The guest is not on
+.Va transparent_hugepage=always .
+Fatal by default; see
+.Cm runtime.thp_always_fatal
+in
+.Xr pazari-agent.toml 5 .
+.It Cm block size
+.Pa /sys/devices/system/memory/block_size_bytes
+can be read and is not zero.
+Fatal.
+This is the unit every grow is rounded to.
+.It Cm balloon
+No device on the virtio bus is a virtio-balloon.
+Fatal when one is; a warning when a device will not say what it is.
+A balloon moves the memory the guest has out from under the negotiation, so a
+guest may have one or an agent, not both.
+A guest on no virtio bus passes.
+.It Cm swap
+The guest has swap, and the workload cgroup may use it.
+Never fatal, and skipped entirely when
+.Cm engine.reclaim_swappiness
+is zero.
+A guest without swap cannot reclaim anonymous memory at all, so the brake is
+the only thing between the workload and the kernel's out-of-memory killer.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev RUST_LOG
+The log filter for standard error.
+The default is
+.Cm info .
+.It Ev NOTIFY_SOCKET
+Where the agent tells systemd it is ready, and where it sends watchdog pings.
+Set by systemd under
+.Va Type=notify ;
+ignored when it is not set.
+.It Ev WATCHDOG_USEC
+The watchdog period systemd expects to be pinged within.
+The agent pings at half of it.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/pazari/agent.toml
+The default configuration file.
+See
+.Xr pazari-agent.toml 5 .
+.It Pa /proc/meminfo
+Read every tick for
+.Va MemTotal ,
+which is what the agent means by how much memory the guest has, and
+.Va MemAvailable .
+.It Pa /sys/devices/system/memory/block_size_bytes
+Read once, for the unit every grow is rounded to.
+.It Pa <cgroup>/memory.high , <cgroup>/memory.max
+Written to place the band.
+Under the systemd backend these are set as unit properties instead.
+.It Pa <cgroup>/memory.current , <cgroup>/memory.events , <cgroup>/memory.pressure
+Read every tick.
+.Pa memory.events
+is also held open and polled, so a throttle wakes the agent rather than waiting
+for the next tick.
+.It Pa <cgroup>/memory.reclaim
+Written to free memory before it is offered back to the host.
+.It Pa <cgroup>/memory.oom.group
+Written once at startup, to arm or disarm killing the cgroup as a unit.
+.El
+.Pp
+The agent also opens an
+.Dv AF_NETLINK
+socket on the kernel's uevent group, filtered to memory hot-plug events, so
+that it learns a resize has landed without polling for it.
+.Sh EXIT STATUS
+.Ex -std
+.Pp
+.Cm preflight
+exits 0 when every check passed or warned, and 1 when any of them failed.
+.Sh EXAMPLES
+Check a guest before deploying an agent to it:
+.Bd -literal -offset indent
+pazari-agent preflight --config /etc/pazari/agent.toml
+.Ed
+.Pp
+Write a configuration file to start from:
+.Bd -literal -offset indent
+pazari-agent example-config > /etc/pazari/agent.toml
+.Ed
+.Pp
+The unit the guest module writes, in outline:
+.Bd -literal -offset indent
+[Service]
+Type=notify
+ExecStart=/usr/bin/pazari-agent --config /etc/pazari/agent.toml
+ExecStopPost=/usr/bin/pazari-agent panic-open --config /etc/pazari/agent.toml
+WatchdogSec=30s
+Restart=always
+Slice=system.slice
+.Ed
+.Pp
+.Va Slice=system.slice
+keeps the agent out of the cgroup it brakes.
+An agent inside that cgroup throttles itself, and preflight refuses to start
+one that is.
+.Sh SEE ALSO
+.Xr pazari-stress 1 ,
+.Xr pazarid 1 ,
+.Xr pazari-agent.toml 5 ,
+.Xr pazarid.toml 5 ,
+.Xr pazari 7
+.Pp
+.Xr cgroups 7 ,
+.Xr systemd.resource-control 5

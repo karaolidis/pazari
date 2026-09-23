@@ -51,7 +51,7 @@ mod tests {
 
     const FIXTURE: &str = "agent.toml";
 
-    const EXAMPLE: &str = include_str!("../../../../docs/agent.example.toml");
+    const EXAMPLE: &str = include_str!("../../../../examples/agent.toml");
 
     const FULL: &str = r#"
         tick_interval = "500ms"
@@ -135,8 +135,8 @@ mod tests {
         assert_eq!(
             EXAMPLE,
             Config::template(),
-            "docs/agent.example.toml is stale: regenerate it with \
-             `cargo run -p pazari-agent -- example-config > docs/agent.example.toml`"
+            "examples/agent.toml is stale: regenerate it with \
+             `cargo run -p pazari-agent -- example-config > examples/agent.toml`"
         );
     }
 

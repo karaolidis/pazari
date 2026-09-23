@@ -267,6 +267,116 @@ mod tests {
         assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
     }
 
+    const RESERVED: u64 = 136 * MIB;
+
+    fn reserving() -> Broker {
+        let mut broker = sized();
+
+        greet_at(&mut broker, at(0), ONE, BOOT - RESERVED);
+
+        broker
+    }
+
+    #[test]
+    fn a_guest_asking_for_what_its_device_already_holds_is_still_grown() {
+        let mut broker = reserving();
+
+        assert_eq!(
+            message(&mut broker, at(10), ONE, ask(1, BOOT - RESERVED, BOOT)),
+            vec![
+                grant(ONE, 1, BOOT + 120 * MIB),
+                requested(ONE, BOOT + 256 * MIB)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_grow_carries_the_guest_past_what_it_asked_for_never_short_of_it() {
+        let mut broker = reserving();
+
+        let wanted = BOOT + 256 * MIB;
+
+        let Action::Send {
+            message: HostMessage::Grant { target, .. },
+            ..
+        } = message(&mut broker, at(10), ONE, ask(1, BOOT - RESERVED, wanted))
+            .into_iter()
+            .next()
+            .expect("an answer")
+        else {
+            panic!("the guest was not granted its grow");
+        };
+
+        assert!(target >= wanted, "{target} is short of {wanted}");
+        assert!(target - wanted < BLOCK, "{target} overshoots {wanted}");
+    }
+
+    #[test]
+    fn the_offset_is_taken_again_from_every_status() {
+        let mut broker = reserving();
+
+        let _ = message(&mut broker, at(10), ONE, ask(1, BOOT - RESERVED, BOOT));
+        sizes(&mut broker, at(11), ONE, BOOT + 256 * MIB);
+
+        let _ = message(
+            &mut broker,
+            at(12),
+            ONE,
+            GuestMessage::Status(status(BOOT + 64 * MIB, 512 * MIB)),
+        );
+
+        assert_eq!(
+            broker.guest(id(ONE)).and_then(|guest| guest.offset),
+            Some(192 * MIB)
+        );
+
+        assert_eq!(
+            message(
+                &mut broker,
+                at(20),
+                ONE,
+                ask(2, BOOT + 64 * MIB, BOOT + 192 * MIB)
+            ),
+            vec![
+                grant(ONE, 2, BOOT + 192 * MIB),
+                requested(ONE, BOOT + 384 * MIB)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_offset_is_not_taken_while_a_resize_is_in_flight() {
+        let mut broker = reserving();
+
+        let _ = message(&mut broker, at(10), ONE, ask(1, BOOT - RESERVED, BOOT));
+
+        let _ = message(
+            &mut broker,
+            at(11),
+            ONE,
+            GuestMessage::Status(status(BOOT - RESERVED, 512 * MIB)),
+        );
+
+        assert_eq!(
+            broker.guest(id(ONE)).and_then(|guest| guest.offset),
+            Some(RESERVED)
+        );
+    }
+
+    #[test]
+    fn a_guest_that_has_not_said_what_it_sees_is_answered_in_the_device_s_terms() {
+        let mut broker = unsized_guest();
+
+        sizes(&mut broker, at(5), ONE, BOOT);
+
+        assert_eq!(broker.guest(id(ONE)).and_then(|guest| guest.offset), None);
+
+        assert_eq!(
+            message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB)),
+            vec![grant(ONE, 1, 3072 * MIB), requested(ONE, 3072 * MIB)]
+        );
+    }
+
     fn unsized_guest() -> Broker {
         let mut broker = Broker::new(policy(), registry());
 
@@ -727,7 +837,7 @@ mod tests {
         });
         sizes(&mut broker, at(13), ONE, 2560 * MIB);
 
-        greet(&mut broker, at(20), ONE);
+        greet_at(&mut broker, at(20), ONE, 2560 * MIB);
 
         assert_eq!(
             message(&mut broker, at(21), ONE, ask(1, 2560 * MIB, 3072 * MIB)),

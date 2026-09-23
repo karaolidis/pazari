@@ -1,0 +1,304 @@
+.Dd September 23, 2026
+.Dt PAZARI 7
+.Os pazari
+.Sh NAME
+.Nm pazari
+.Nd guest-initiated memory negotiation for virtual machines
+.Sh DESCRIPTION
+Virtual machines are usually sized by guesswork: a static allocation that is
+either wasteful or too small, chosen before anyone knows what the workload will
+do.
+Under
+.Nm
+the guest decides when it needs memory instead.
+From outside the VM a workload growing into its working set and a workload
+thrashing look the same; from inside they do not.
+.Pp
+The name is the Greek word for haggling.
+.Pp
+Three programs make it up:
+.Bl -tag -width "pazari-stress" -offset indent
+.It Xr pazari-agent 1
+runs inside the guest.
+It brakes one cgroup with
+.Va memory.high
+instead of letting the kernel kill what is in it, and asks the host for memory
+when the brake bites.
+.It Xr pazarid 1
+runs on the host.
+It arbitrates those requests across every guest it serves and actuates a grant
+by resizing that guest's virtio-mem device over QMP.
+.It Xr pazari-stress 1
+is a deterministic memory workload, for measuring any of the above.
+.El
+.Pp
+The agent and the daemon talk over a newline-delimited JSON protocol carried on
+a vsock or unix stream.
+Every message carries absolute values.
+Neither side keeps state across a connection, and there is no error message: a
+peer that reads something it does not understand closes the connection, and the
+guest reconnects.
+.Sh HOW A GROW HAPPENS
+.Bl -enum
+.It
+The workload grows into the band between
+.Va memory.high
+and
+.Va memory.max .
+The kernel throttles it at
+.Va memory.high
+and raises the cgroup's own throttle counter.
+.It
+The counter wakes the agent, which opens the band: it moves
+.Va memory.high
+up to within
+.Cm open_guard
+of
+.Va memory.max ,
+so the workload may burst instead of stalling for the whole round trip, and
+sends a grant request.
+.It
+The daemon decides.
+If the host has the memory, less what is already promised to the other guests
+and less its own floor, it answers with a grant and asks the hypervisor to make
+the device larger.
+.It
+The device grows.
+The guest's kernel onlines the new memory, the guest's
+.Va MemTotal
+rises, and a uevent wakes the agent.
+.It
+The agent re-places the band against the larger guest and goes back to steady.
+.El
+.Pp
+Shrinking runs the same way backwards, and is always the guest's idea: a
+workload that has been idle for long enough makes the agent reclaim memory out
+of its cgroup and offer it back.
+The host may ask for memory back when it is itself under pressure, but it
+cannot take it.
+.Pp
+How long step 3 may take is set by
+.Cm open_guard ,
+the memory kept between the open band and
+.Va memory.max .
+The kernel throttles the workload as it climbs through that memory, and the
+climb is what the grant has to arrive within.
+.Xr pazari-agent.toml 5
+carries the measurements behind it.
+.Sh DEPLOYMENT
+Both programs are ordinary system daemons that read one configuration file.
+What takes setting up is around them: a memory device for the guest to grow
+into, a control channel the host daemon may use, and a cgroup the agent is
+allowed to brake.
+.Ss Giving a guest a device to grow into
+The guest needs a virtio-mem device with room in it.
+With qemu:
+.Bd -literal -offset indent
+qemu-system-x86_64 \e
+    -machine q35 \e
+    -m 2048M,maxmem=32768M \e
+    -object memory-backend-ram,id=vmem0,size=30720M \e
+    -device virtio-mem-pci,id=vm0,memdev=vmem0,requested-size=0 \e
+    ...
+.Ed
+.Pp
+The backend's
+.Va size
+is the whole capacity the guest may grow into, and
+.Va maxmem
+must cover the boot memory plus that.
+.Va requested-size
+is what the device starts plugged with; the daemon moves it from there.
+.Va id
+is what names the device in
+.Xr pazarid.toml 5 .
+.Pp
+The machine model must carry PCI, so qemu's own
+.Va microvm
+model will not do: it has no virtio-mem.
+.Pp
+Leave the device's block size alone.
+Moving it buys nothing measurable: a guest run with the device at 128MiB blocks
+instead of the 2MiB default measured the same median grow round trip to within
+six milliseconds, over ten grows each, and gave back exactly as much memory
+when it went idle.
+It can cost something.
+The agent rounds its targets to the guest kernel's memory block size, 128MiB on
+x86-64, which is a different number and is not configurable; a device block
+size above it would leave the daemon asking for sizes the hypervisor refuses,
+which it counts as
+.Va pazarid_device_refused_actuations_total .
+.Ss A control channel of the daemon's own
+The daemon drives the device over QMP, and holds its connection open.
+Most things that run VMs already drive a QMP socket of their own, so give the
+daemon a second one rather than have the two of them share:
+.Bd -literal -offset indent
+    -qmp unix:/run/pazari/example.qmp,server=on,wait=off
+.Ed
+.Pp
+Contention is only part of the reason.
+A QMP socket is the hypervisor's whole control channel, and anything that can
+talk to it can do far more than resize a memory device.
+A socket of the daemon's own means its access can be reasoned about, and taken
+away, without touching what the VM manager needs.
+.Pp
+The daemon needs no privilege beyond reaching that socket, which is a matter of
+file ownership: run it as its own user, put that user in the group the socket
+belongs to, and create the socket with a group-readable mask.
+.Pp
+Where guests reach the daemon over vsock, the host needs
+.Va vhost_vsock
+loaded.
+.Ss Booting the guest
+The agent refuses to start on a guest that cannot be braked safely.
+Boot with:
+.Bd -literal -offset indent
+transparent_hugepage=madvise psi=1
+.Ed
+.Pp
+Give the guest no virtio-balloon.
+A balloon and an agent both move the memory the guest has, and preflight
+refuses to start against one.
+.Pp
+.Nm pazari-agent Cm preflight
+says what each of these is for and what else it checks.
+.Ss The units
+The agent brakes one cgroup and must not be in it.
+Give the workload a slice of its own, keep anything watching memory pressure
+off that slice, and run the agent under
+.Va system.slice :
+.Bd -literal -offset indent
+# workload.slice
+[Slice]
+MemoryAccounting=yes
+ManagedOOMMemoryPressure=auto
+ManagedOOMSwap=auto
+ManagedOOMPreference=omit
+.Ed
+.Pp
+A braked workload sits at
+.Va memory.high
+and stalls there on purpose, which is indistinguishable from a workload in
+trouble to anything watching pressure.
+.Va ManagedOOMPreference=omit
+is the directive that matters; the other two only decline to opt in.
+.Bd -literal -offset indent
+# pazari-agent.service
+[Service]
+Type=notify
+ExecStart=/usr/bin/pazari-agent --config /etc/pazari/agent.toml
+ExecStopPost=/usr/bin/pazari-agent panic-open --config /etc/pazari/agent.toml
+WatchdogSec=30s
+Restart=always
+RestartSec=5s
+Slice=system.slice
+.Ed
+.Pp
+Do not leave out the
+.Va ExecStopPost .
+An agent that is killed outright leaves the workload braked at limits nothing
+will move again;
+.Cm panic-open
+takes the brake off after every exit, orderly or not.
+.Bd -literal -offset indent
+# pazarid.service
+[Service]
+Type=notify
+ExecStart=/usr/bin/pazarid --config /etc/pazari/pazarid.toml
+WatchdogSec=30s
+Restart=always
+RestartSec=5s
+User=pazarid
+SupplementaryGroups=kvm
+.Ed
+.Ss Writing the two configurations
+.Xr pazarid.toml 5
+and
+.Xr pazari-agent.toml 5
+document every setting and carry a worked example each.
+Either program will print an annotated file at its defaults to start from:
+.Bd -literal -offset indent
+pazarid example-config > /etc/pazari/pazarid.toml
+pazari-agent example-config > /etc/pazari/agent.toml
+.Ed
+.Sh PUTTING THE WORKLOAD IN THE CGROUP
+Memory the agent cannot see is memory it cannot negotiate for.
+Every workload the guest exists to run belongs in the slice the agent brakes.
+What puts it there is whatever creates its cgroup, which is not always the unit
+that was declared.
+.Pp
+A quadlet container is its unit.
+Quadlet runs podman at
+.Va CgroupsMode=split ,
+which puts the container's payload in a sub-cgroup of the unit's own, so the
+unit's slice is the container's slice.
+Set
+.Va Slice=workload.slice
+on the unit and the payload follows.
+.Pp
+A container that some daemon starts on the workload's behalf is not.
+Where the workload holds a docker or podman socket and asks for containers
+through it, which is what CI runners do, the daemon on the other end creates
+them under its own default parent.
+.Pp
+Docker on a cgroup v2 host drives systemd and parents its scopes at
+.Va system.slice ,
+so those containers land as
+.Pa system.slice/docker-<id>.scope :
+charged to the guest's own services, watched by whatever manages
+.Va system.slice ,
+and invisible to the agent.
+Point the daemon at the slice instead, with
+.Va cgroup-parent
+in
+.Pa /etc/docker/daemon.json
+or the equivalent for whatever creates the containers.
+.Pp
+The daemon itself stays out of the slice.
+It is a service of the guest rather than of the workload, and what it holds
+belongs in
+.Cm engine.service_reserve .
+.Sh OBSERVING
+Both programs publish OpenMetrics over HTTP when their
+.Va metrics
+table is configured; the series are listed in
+.Xr pazari-agent.toml 5
+and
+.Xr pazarid.toml 5 .
+.Pp
+The four to watch on a host that is behaving:
+.Va pazarid_host_available_bytes
+against
+.Cm policy.host_floor ,
+.Va pazarid_denies_total
+broken out by reason,
+.Va pazari_agent_mode
+for how long a guest sits in
+.Cm awaiting_grant ,
+and
+.Va pazari_agent_max_events ,
+which should stay at zero, because a workload that reached
+.Va memory.max
+is a workload the brake did not catch.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/pazari/agent.toml
+The agent's configuration.
+See
+.Xr pazari-agent.toml 5 .
+.It Pa /etc/pazari/pazarid.toml
+The daemon's configuration.
+See
+.Xr pazarid.toml 5 .
+.It Pa share/doc/pazari/examples
+Annotated configuration files for both, as installed with the package.
+.El
+.Sh SEE ALSO
+.Xr pazari-agent 1 ,
+.Xr pazari-stress 1 ,
+.Xr pazarid 1 ,
+.Xr pazari-agent.toml 5 ,
+.Xr pazarid.toml 5
+.Pp
+.Xr cgroups 7 ,
+.Xr systemd-oomd 8

@@ -28,7 +28,7 @@ use pazarid::{
         Session as BrokerSession,
     },
     run::{Peers, Report},
-    runtime::{Actuator, Driver, RuntimeError},
+    runtime::{Actuator, Driver, Reading, RuntimeError},
 };
 use tempfile::TempDir;
 use tokio::{
@@ -64,6 +64,8 @@ const PRESSED: f32 = 25.0;
 const STEP: Duration = Duration::from_secs(1);
 
 const PATIENCE: Duration = Duration::from_secs(10);
+
+const LULL: Duration = Duration::from_millis(100);
 
 const DEPTH: usize = 64;
 
@@ -159,7 +161,7 @@ struct Device {
 impl Device {
     fn new(size: u64) -> (Self, mpsc::UnboundedReceiver<u64>) {
         let (completed, pending) = mpsc::unbounded_channel();
-        let (plugs, plugged) = mpsc::unbounded_channel();
+        let (plugs, total_mem) = mpsc::unbounded_channel();
 
         let device = Self {
             sizes: Mutex::new(Sizes {
@@ -171,7 +173,7 @@ impl Device {
             pending: tokio::sync::Mutex::new(pending),
         };
 
-        (device, plugged)
+        (device, total_mem)
     }
 
     fn locked(&self) -> MutexGuard<'_, Sizes> {
@@ -200,8 +202,8 @@ impl Device {
 }
 
 impl Actuator for Device {
-    fn size(&self) -> impl Future<Output = Result<u64, RuntimeError>> + Send {
-        future::ready(Ok(self.locked().size))
+    fn reading(&self) -> impl Future<Output = Result<Reading, RuntimeError>> + Send {
+        future::ready(Ok(Reading::sized(self.locked().size, BOOT)))
     }
 
     fn requested(&self) -> impl Future<Output = Result<u64, RuntimeError>> + Send {
@@ -214,11 +216,11 @@ impl Actuator for Device {
         future::ready(Ok(()))
     }
 
-    async fn changed(&self) -> Result<u64, RuntimeError> {
+    async fn changed(&self) -> Result<Reading, RuntimeError> {
         let mut pending = self.pending.lock().await;
 
         match pending.recv().await {
-            Some(size) => Ok(size),
+            Some(size) => Ok(Reading::sized(size, BOOT)),
             None => future::pending().await,
         }
     }
@@ -262,7 +264,7 @@ struct Harness {
     plugs: mpsc::UnboundedReceiver<u64>,
 
     plugging: VecDeque<u64>,
-    plugged: u64,
+    total_mem: u64,
     high_events: u64,
 
     taken: Vec<Action>,
@@ -312,9 +314,8 @@ impl Harness {
         let (peers, reports) = Peers::new();
 
         let boot = BootInfo {
-            boot_mem: bytes(BOOT),
             block_size: bytes(BLOCK),
-            plugged: BOOT,
+            total_mem: BOOT,
         };
 
         let (engine, emitted) = Engine::try_new(engine_config(), boot).expect("a workable boot");
@@ -330,9 +331,8 @@ impl Harness {
                     .expect("five milliseconds"),
             },
             Geometry {
-                boot_mem: bytes(BOOT),
                 block_size: bytes(BLOCK),
-                plugged: geometry.subscribe(),
+                total_mem: geometry.subscribe(),
             },
             clock,
         );
@@ -355,7 +355,7 @@ impl Harness {
             geometry,
             plugs,
             plugging: VecDeque::new(),
-            plugged: BOOT,
+            total_mem: BOOT,
             high_events: 0,
             taken: Vec::new(),
             emitted,
@@ -415,7 +415,7 @@ impl Harness {
 
             let actions = self.engine.handle(event);
 
-            self.geometry.send_replace(self.engine.plugged());
+            self.geometry.send_replace(self.engine.total_mem());
 
             for action in &actions {
                 match action {
@@ -442,7 +442,7 @@ impl Harness {
             reported = self.reports.recv() => Step::Reported(reported.expect("the harness holds a sender")),
             sized = self.sizes.recv() => Step::Sized(sized.expect("the watcher is running")),
             event = self.session.event() => Step::Session(event.expect("the session is running")),
-            plugged = self.plugs.recv() => Step::Plugged(plugged.expect("the harness holds the device")),
+            total_mem = self.plugs.recv() => Step::Plugged(total_mem.expect("the harness holds the device")),
         };
 
         match step {
@@ -462,7 +462,7 @@ impl Harness {
             }
             Step::Sized(event) => self.host(event).await,
             Step::Session(event) => self.guest(event),
-            Step::Plugged(plugged) => self.plugging.push_back(plugged),
+            Step::Plugged(total_mem) => self.plugging.push_back(total_mem),
         }
     }
 
@@ -477,6 +477,16 @@ impl Harness {
             timeout(PATIENCE, pumping).await.is_ok(),
             "timed out waiting for {what}"
         );
+    }
+
+    async fn lull(&mut self) {
+        let pumping = async {
+            loop {
+                self.step().await;
+            }
+        };
+
+        let _ = timeout(LULL, pumping).await;
     }
 
     async fn handshake(&mut self) {
@@ -518,15 +528,15 @@ impl Harness {
 
     fn tick(&mut self, workload_usage: u64) {
         let now = self.now();
-        let plugged = self.plugged;
+        let total_mem = self.total_mem;
         let high_events = self.high_events;
 
         self.guest(GuestEvent::Tick {
             now,
             snapshot: Snapshot {
-                plugged,
+                total_mem,
                 workload_usage,
-                available: plugged.saturating_sub(workload_usage),
+                available: total_mem.saturating_sub(workload_usage),
                 swap_used: 0,
                 high_events,
                 max_events: 0,
@@ -550,15 +560,15 @@ impl Harness {
     }
 
     fn plug(&mut self) {
-        let plugged = self
+        let total_mem = self
             .plugging
             .pop_front()
             .expect("the device took on a size");
 
-        self.plugged = plugged;
+        self.total_mem = total_mem;
 
         let now = self.now();
-        self.guest(GuestEvent::PluggedChanged { now, plugged });
+        self.guest(GuestEvent::TotalChanged { now, total_mem });
     }
 
     async fn resized(&mut self, mark: Mark, to: u64) {
@@ -580,6 +590,16 @@ impl Harness {
         self.wake();
 
         self.resized(mark, to).await;
+
+        self.settle("the geometry", |harness| {
+            harness.heard[mark.heard..].iter().any(|message| {
+                matches!(
+                    message,
+                    HostMessage::Geometry { hotplugged } if *hotplugged == to.saturating_sub(BOOT)
+                )
+            })
+        })
+        .await;
 
         assert_eq!(
             self.engine.mode(),
@@ -705,24 +725,27 @@ async fn a_guest_that_says_hello_is_welcomed_with_its_ceiling() {
     let negotiated = harness.negotiated().expect("a welcomed guest");
 
     assert_eq!(
-        (negotiated.boot_mem, negotiated.block_size),
-        (BOOT, BLOCK),
+        negotiated.block_size, BLOCK,
         "the guest's geometry did not reach the host"
     );
 
     assert_eq!(
         harness.sent(mark),
-        vec![HostMessage::Welcome {
-            protocol: PROTOCOL_VERSION,
-            ceiling: CEILING,
-            status_interval_ms: Duration::from_secs(1),
-        }]
+        vec![
+            HostMessage::Welcome {
+                protocol: PROTOCOL_VERSION,
+                ceiling: CEILING,
+                status_interval_ms: Duration::from_secs(1),
+                hotplugged: 0,
+            },
+            HostMessage::Geometry { hotplugged: 0 },
+        ]
     );
 
     assert_eq!(harness.engine.ceiling(), Some(CEILING));
     assert_eq!(harness.size(), Some(BOOT));
     assert_eq!(
-        harness.status().map(|status| status.plugged),
+        harness.status().map(|status| status.total_mem),
         Some(BOOT),
         "the host never heard the guest's first status"
     );
@@ -747,37 +770,33 @@ async fn a_guest_that_says_hello_is_welcomed_with_its_ceiling() {
 async fn a_guest_whose_device_has_said_nothing_is_not_negotiated_with_until_it_does() {
     let mut harness = Harness::unseeded(policy());
 
-    harness.handshake().await;
     harness.available(PLENTY).await;
 
     let mark = harness.mark();
 
-    harness.tick(BUSY);
-    harness.wake();
+    harness.lull().await;
 
-    harness
-        .settle("the denial", |harness| harness.denied(mark))
-        .await;
-
-    assert_eq!(
-        harness.answers(mark, 1),
-        vec![HostMessage::Deny {
-            id: 1,
-            reason: DenyReason::Policy,
-            retry_after_ms: Some(Duration::from_millis(1)),
-        }]
+    assert!(
+        !harness.welcomed(),
+        "the host welcomed a guest whose size it did not know"
     );
-    assert_eq!(harness.actuated(mark), Vec::<u64>::new());
     assert_eq!(harness.size(), None);
+    assert_eq!(
+        harness.sent(mark),
+        Vec::new(),
+        "the host spoke before its device reported"
+    );
+    assert!(!harness.engine.is_connected());
 
     harness.seed().await;
+    harness.handshake().await;
 
     let seeded = harness.mark();
 
-    harness.tick(BUSY);
-    harness.resized(seeded, GROWN).await;
+    harness.grow(GROWN).await;
 
     assert_eq!(harness.size(), Some(GROWN));
+    assert_eq!(harness.actuated(seeded), vec![GROWN]);
 }
 
 #[tokio::test]
@@ -827,7 +846,7 @@ async fn a_throttled_guest_is_grown_and_recomputes_its_limits() {
         ]
     );
 
-    assert_eq!(harness.engine.plugged(), GROWN);
+    assert_eq!(harness.engine.total_mem(), GROWN);
     assert_eq!(harness.engine.max(), GROWN - SERVICE);
     assert_eq!(harness.engine.high(), GROWN - SERVICE - BURST);
 }
@@ -859,7 +878,7 @@ async fn a_grow_the_host_cannot_afford_is_denied_and_asked_for_again() {
     assert_eq!(harness.actuated(mark), Vec::<u64>::new());
     assert_eq!(harness.engine.mode(), GuestMode::AwaitingGrant);
     assert_eq!(harness.engine.pending_request(), None);
-    assert_eq!(harness.plugged, BOOT);
+    assert_eq!(harness.total_mem, BOOT);
 
     harness.available(PLENTY).await;
 
@@ -885,7 +904,7 @@ async fn a_grow_the_host_cannot_afford_is_denied_and_asked_for_again() {
         "the host answered one request twice"
     );
     assert_eq!(harness.engine.mode(), GuestMode::Steady);
-    assert_eq!(harness.engine.plugged(), GROWN);
+    assert_eq!(harness.engine.total_mem(), GROWN);
 }
 
 #[tokio::test]
@@ -936,7 +955,7 @@ async fn an_idle_guest_offers_memory_back_and_is_shrunk() {
     );
 
     assert_eq!(harness.engine.mode(), GuestMode::Steady);
-    assert_eq!(harness.engine.plugged(), SHRUNK);
+    assert_eq!(harness.engine.total_mem(), SHRUNK);
     assert_eq!(harness.engine.max(), SHRUNK - SERVICE);
     assert_eq!(harness.engine.high(), SHRUNK - SERVICE - BURST);
 }
@@ -992,7 +1011,7 @@ async fn a_host_under_pressure_takes_memory_back() {
     );
     assert_eq!(harness.actuated(mark), vec![SHRUNK]);
     assert_eq!(harness.size(), Some(SHRUNK));
-    assert_eq!(harness.engine.plugged(), SHRUNK);
+    assert_eq!(harness.engine.total_mem(), SHRUNK);
 }
 
 #[tokio::test]
@@ -1041,7 +1060,7 @@ async fn a_connection_that_drops_is_rebuilt_and_the_next_grow_still_works() {
     );
 
     assert_eq!(harness.size(), Some(REGROWN));
-    assert_eq!(harness.engine.plugged(), REGROWN);
+    assert_eq!(harness.engine.total_mem(), REGROWN);
     assert_eq!(harness.engine.max(), REGROWN - SERVICE);
     assert_eq!(harness.engine.high(), REGROWN - SERVICE - BURST);
 }

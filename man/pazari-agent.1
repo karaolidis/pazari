@@ -199,9 +199,17 @@ the only thing between the workload and the kernel's out-of-memory killer.
 .Sh ENVIRONMENT
 .Bl -tag -width Ds
 .It Ev RUST_LOG
-The log filter for standard error.
+The log filter, in the directive syntax the
+.Va tracing
+crate's environment filter reads.
 The default is
 .Cm info .
+.It Ev JOURNAL_STREAM
+Set by systemd.
+Where it names the agent's own standard error, records go to the journal at
+their own priority, their fields under an
+.Cm F_
+prefix; otherwise they go to standard error.
 .It Ev NOTIFY_SOCKET
 Where the agent tells systemd it is ready, and where it sends watchdog pings.
 Set by systemd under

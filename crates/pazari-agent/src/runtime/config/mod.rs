@@ -89,8 +89,6 @@ pub struct RuntimeConfig {
 
     pub backend: Backend,
 
-    pub boot_mem: NonZeroU64,
-
     pub tick_interval: Interval,
 
     pub hotplug_debounce: Interval,
@@ -104,11 +102,10 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     #[must_use]
-    pub fn new(cgroup: impl Into<PathBuf>, boot_mem: NonZeroU64) -> Self {
+    pub fn new(cgroup: impl Into<PathBuf>) -> Self {
         Self {
             cgroup: cgroup.into(),
             backend: Backend::Cgroupfs,
-            boot_mem,
             tick_interval: Interval::try_new(Duration::from_secs(1))
                 .expect("a positive interval under a day"),
             hotplug_debounce: Interval::try_new(Duration::from_millis(250))
@@ -133,10 +130,7 @@ mod tests {
     use super::*;
 
     fn config() -> RuntimeConfig {
-        RuntimeConfig::new(
-            "/sys/fs/cgroup/workload.slice",
-            NonZeroU64::new(2 << 30).expect("a positive byte count"),
-        )
+        RuntimeConfig::new("/sys/fs/cgroup/workload.slice")
     }
 
     #[test]

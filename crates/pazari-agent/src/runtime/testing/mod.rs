@@ -86,7 +86,7 @@ impl Guest {
         let guest = Self {
             config: RuntimeConfig {
                 paths,
-                ..RuntimeConfig::new(cgroup, bytes(2048 * MIB))
+                ..RuntimeConfig::new(cgroup)
             },
             dir,
         };

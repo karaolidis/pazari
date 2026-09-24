@@ -153,7 +153,7 @@ def render(run, guest, path):
     draw(
         memory,
         run.daemon.series("pazarid_guest_size_bytes", guest.labels),
-        "plugged",
+        "device size",
         GIB,
     )
     draw(memory, guest.agent.series("pazari_agent_memory_max_bytes"), "memory.max", GIB)

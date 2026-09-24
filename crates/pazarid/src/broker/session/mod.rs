@@ -32,18 +32,18 @@ mod tests {
     use super::*;
     use crate::broker::{
         phase::AwaitingHello,
-        testing::{BLOCK, BOOT, at, vsock},
+        testing::{BLOCK, at, vsock},
     };
 
     #[test]
     fn a_fresh_connection_says_nothing_until_it_is_welcomed() {
         let mut session = Session::new(vsock(3));
 
-        assert_eq!(session.phase, Phase::AwaitingHello(AwaitingHello));
+        assert_eq!(session.phase, Phase::AwaitingHello(AwaitingHello::new()));
         assert_eq!(session.negotiated(), None);
         assert_eq!(session.negotiated_mut(), None);
 
-        session.phase = Phase::Negotiated(Negotiated::new(BOOT, BLOCK, at(0)));
+        session.phase = Phase::Negotiated(Negotiated::new(BLOCK, at(0)));
 
         assert!(session.negotiated().is_some());
     }

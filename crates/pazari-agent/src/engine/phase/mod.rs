@@ -33,7 +33,7 @@ pub trait State: Copy {
         Growing::start(ctx, now, None)
     }
 
-    fn on_plugged(self, ctx: &mut Context, _now: Timestamp, changed: bool) -> Phase {
+    fn on_total_changed(self, ctx: &mut Context, _now: Timestamp, changed: bool) -> Phase {
         if changed {
             ctx.reapply_limits();
         }

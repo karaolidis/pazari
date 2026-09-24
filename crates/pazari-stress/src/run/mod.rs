@@ -53,7 +53,7 @@ pub fn run<W: Write>(
         arena = region.bytes(),
         page_size = region.page(),
         phases = options.plan.phases().len(),
-        "the workload is running"
+        "workload started"
     );
 
     out.started(Started {
@@ -88,7 +88,7 @@ pub fn run<W: Write>(
             warn!(
                 index,
                 spec = phase.spec.as_str(),
-                "a signal stopped the workload"
+                "workload stopped by signal"
             );
             walk.out.interrupted(index)?;
 
@@ -98,7 +98,7 @@ pub fn run<W: Write>(
         walk.out.completed(index)?;
     }
 
-    info!("the workload is done");
+    info!("workload finished");
     walk.out.done()?;
 
     Ok(Outcome::Done)

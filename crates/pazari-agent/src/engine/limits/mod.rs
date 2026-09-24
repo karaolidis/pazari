@@ -21,7 +21,7 @@ pub struct Limits {
     burst_reserve: NonZeroU64,
     open_guard: NonZeroU64,
 
-    plugged: u64,
+    total_mem: u64,
     ceiling: Option<u64>,
 
     high: u64,
@@ -30,14 +30,14 @@ pub struct Limits {
 }
 
 impl Limits {
-    pub const fn new(config: &EngineConfig, plugged: u64) -> Self {
-        let max = plugged.saturating_sub(config.service_reserve);
+    pub const fn new(config: &EngineConfig, total_mem: u64) -> Self {
+        let max = total_mem.saturating_sub(config.service_reserve);
 
         Self {
             service_reserve: config.service_reserve,
             burst_reserve: config.burst_reserve,
             open_guard: config.open_guard,
-            plugged,
+            total_mem,
             ceiling: None,
             high: max,
             max,
@@ -45,8 +45,8 @@ impl Limits {
         }
     }
 
-    pub const fn plugged(self) -> u64 {
-        self.plugged
+    pub const fn total_mem(self) -> u64 {
+        self.total_mem
     }
 
     pub const fn ceiling(self) -> Option<u64> {
@@ -83,16 +83,16 @@ impl Limits {
     }
 
     pub const fn budget(self) -> u64 {
-        self.plugged.saturating_sub(self.service_reserve)
+        self.total_mem.saturating_sub(self.service_reserve)
     }
 
     pub const fn steady_high(self) -> u64 {
         self.budget().saturating_sub(self.burst_reserve.get())
     }
 
-    pub const fn set_plugged(&mut self, plugged: u64) -> bool {
-        let changed = plugged != self.plugged;
-        self.plugged = plugged;
+    pub const fn set_total_mem(&mut self, total_mem: u64) -> bool {
+        let changed = total_mem != self.total_mem;
+        self.total_mem = total_mem;
         changed
     }
 
@@ -150,12 +150,12 @@ mod tests {
     const R: u64 = 128;
     const G: u64 = 32;
 
-    fn limits(plugged: u64, high: u64, max: u64) -> Limits {
+    fn limits(total_mem: u64, high: u64, max: u64) -> Limits {
         Limits {
             service_reserve: S,
             burst_reserve: NonZeroU64::new(R).unwrap(),
             open_guard: NonZeroU64::new(G).unwrap(),
-            plugged,
+            total_mem,
             ceiling: None,
             high,
             max,
@@ -229,7 +229,7 @@ mod tests {
         assert_eq!(limits.band(), Band::Open);
 
         out.clear();
-        limits.set_plugged(4096);
+        limits.set_total_mem(4096);
         limits.reapply(&mut out);
 
         assert_eq!(out, vec![Action::SetMax(3840), Action::SetHigh(3840 - G)]);

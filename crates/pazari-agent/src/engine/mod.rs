@@ -16,6 +16,7 @@ use std::{fmt, time::Duration};
 
 use pazari_proto::HostMessage;
 use pazari_types::Timestamp;
+use tracing::debug;
 
 pub use crate::engine::{
     action::Action,
@@ -76,21 +77,14 @@ impl Engine {
         config: EngineConfig,
         boot: BootInfo,
     ) -> Result<(Self, Vec<Action>), EngineError> {
-        if boot.plugged < boot.boot_mem.get() {
-            return Err(EngineError::PluggedBelowBoot {
-                plugged: boot.plugged,
-                boot_mem: boot.boot_mem.get(),
-            });
-        }
-
         let floor = config
             .service_reserve
             .saturating_add(config.burst_reserve.get())
             .saturating_add(boot.block_size.get());
 
-        if boot.plugged < floor {
+        if boot.total_mem < floor {
             return Err(EngineError::ReservesExceedMemory {
-                plugged: boot.plugged,
+                total_mem: boot.total_mem,
                 service_reserve: config.service_reserve,
                 burst_reserve: config.burst_reserve.get(),
                 block_size: boot.block_size.get(),
@@ -123,6 +117,28 @@ impl Engine {
     }
 
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
+        let before = self.phase.mode();
+
+        self.dispatch(event);
+
+        let mode = self.phase.mode();
+
+        if mode != before {
+            debug!(
+                %mode,
+                from = %before,
+                high = self.ctx.limits.high(),
+                max = self.ctx.limits.max(),
+                total_mem = self.ctx.limits.total_mem(),
+                usage = self.ctx.last.workload_usage,
+                "the engine changed phase",
+            );
+        }
+
+        self.ctx.drain()
+    }
+
+    fn dispatch(&mut self, event: Event) {
         match event {
             Event::Tick { now, snapshot } => self.on_tick(now, snapshot),
             Event::ThrottleWake {
@@ -130,7 +146,7 @@ impl Engine {
                 high_events,
                 max_events,
             } => self.on_throttle_wake(now, high_events, max_events),
-            Event::PluggedChanged { now, plugged } => self.on_plugged(now, plugged),
+            Event::TotalChanged { now, total_mem } => self.on_total_changed(now, total_mem),
             Event::ReclaimFinished { now, reclaimed } => {
                 self.phase = self
                     .phase
@@ -140,12 +156,11 @@ impl Engine {
                 now,
                 ceiling,
                 status_interval,
-            } => self.on_connected(now, ceiling, status_interval),
+                hotplugged,
+            } => self.on_connected(now, ceiling, status_interval, hotplugged),
             Event::Disconnected { now } => self.on_disconnected(now),
             Event::Host { now, message } => self.on_host(now, &message),
         }
-
-        self.ctx.drain()
     }
 
     #[must_use]
@@ -164,8 +179,8 @@ impl Engine {
     }
 
     #[must_use]
-    pub const fn plugged(&self) -> u64 {
-        self.ctx.limits.plugged()
+    pub const fn total_mem(&self) -> u64 {
+        self.ctx.limits.total_mem()
     }
 
     #[must_use]
@@ -191,7 +206,7 @@ impl Engine {
     fn on_tick(&mut self, now: Timestamp, snapshot: Snapshot) {
         let throttled = self.ctx.observe(snapshot);
 
-        self.on_plugged(now, snapshot.plugged);
+        self.on_total_changed(now, snapshot.total_mem);
 
         if throttled {
             self.brake(now);
@@ -216,21 +231,37 @@ impl Engine {
     fn brake(&mut self, now: Timestamp) {
         self.ctx.idle.note_throttle();
 
-        if self.ctx.limits.band() != Band::Collapsed {
+        let collapsed = self.ctx.limits.band() == Band::Collapsed;
+
+        debug!(
+            usage = self.ctx.last.workload_usage,
+            high = self.ctx.limits.high(),
+            total_mem = self.ctx.limits.total_mem(),
+            collapsed,
+            "workload throttled at memory.high",
+        );
+
+        if !collapsed {
             self.ctx.apply_limits(Band::Open);
         }
 
         self.phase = self.phase.brake(&mut self.ctx, now);
     }
 
-    fn on_plugged(&mut self, now: Timestamp, plugged: u64) {
-        let changed = self.ctx.limits.set_plugged(plugged);
+    fn on_total_changed(&mut self, now: Timestamp, total_mem: u64) {
+        let changed = self.ctx.limits.set_total_mem(total_mem);
 
-        self.phase = self.phase.on_plugged(&mut self.ctx, now, changed);
+        self.phase = self.phase.on_total_changed(&mut self.ctx, now, changed);
     }
 
-    fn on_connected(&mut self, now: Timestamp, ceiling: u64, status_interval: Duration) {
-        self.ctx.connect(status_interval);
+    fn on_connected(
+        &mut self,
+        now: Timestamp,
+        ceiling: u64,
+        status_interval: Duration,
+        hotplugged: u64,
+    ) {
+        self.ctx.connect(status_interval, hotplugged);
         self.phase = self.phase.on_connected();
         self.ctx.emit_status(now);
 
@@ -255,7 +286,10 @@ impl Engine {
             HostMessage::Ceiling { ceiling } => {
                 self.adopt_ceiling(now, ceiling);
             }
+            HostMessage::Geometry { hotplugged } => self.ctx.set_hotplugged(hotplugged),
             HostMessage::Grant { id, target } => {
+                debug!(id, target, "host granted the request");
+
                 self.phase = self.phase.on_grant(&mut self.ctx, now, id, target);
             }
             HostMessage::Deny {
@@ -263,11 +297,20 @@ impl Engine {
                 reason,
                 retry_after_ms,
             } => {
+                debug!(
+                    id,
+                    ?reason,
+                    retry_after = ?retry_after_ms,
+                    "host denied the request",
+                );
+
                 self.phase = self
                     .phase
                     .on_deny(&mut self.ctx, now, id, reason, retry_after_ms);
             }
             HostMessage::ReclaimRequest { id, desired, .. } => {
+                debug!(id, desired, "host requested memory back");
+
                 self.phase = self.phase.on_reclaim_request(&mut self.ctx, id, desired);
             }
         }
@@ -277,6 +320,12 @@ impl Engine {
         if !self.ctx.limits.raise_ceiling(ceiling) {
             return false;
         }
+
+        debug!(
+            ceiling,
+            total_mem = self.ctx.limits.total_mem(),
+            "ceiling raised",
+        );
 
         let Some(phase) = self.phase.on_ceiling_raised(&mut self.ctx, now) else {
             return false;
@@ -362,7 +411,7 @@ mod tests {
         assert_eq!(
             tick(&mut engine, at(5), snap(BOOT, 1234 * MIB, 0)),
             vec![Action::Send(GuestMessage::Status(Status {
-                plugged: BOOT,
+                total_mem: BOOT,
                 available: BOOT - 1234 * MIB,
                 high_events: 0,
                 max_events: 0,
@@ -393,7 +442,7 @@ mod tests {
         assert_eq!(
             actions[0],
             Action::Send(GuestMessage::Status(Status {
-                plugged: BOOT,
+                total_mem: BOOT,
                 available: BOOT - BUSY,
                 high_events: 9,
                 max_events: 3,
@@ -512,21 +561,21 @@ mod tests {
     }
 
     #[test]
-    fn limits_track_plugged_when_it_moves_underneath_steady_state() {
+    fn limits_track_the_total_when_it_moves_underneath_steady_state() {
         let mut engine = started();
 
         assert_eq!(
-            engine.handle(Event::PluggedChanged {
+            engine.handle(Event::TotalChanged {
                 now: at(100),
-                plugged: 2560 * MIB,
+                total_mem: 2560 * MIB,
             }),
             vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
         );
 
         assert_eq!(
-            engine.handle(Event::PluggedChanged {
+            engine.handle(Event::TotalChanged {
                 now: at(101),
-                plugged: BOOT,
+                total_mem: BOOT,
             }),
             vec![Action::SetHigh(HIGH0), Action::SetMax(MAX0)]
         );
@@ -535,15 +584,14 @@ mod tests {
     #[test]
     fn a_guest_smaller_than_its_reserves_is_rejected() {
         let boot = BootInfo {
-            boot_mem: bytes(128 * MIB),
             block_size: bytes(BLOCK),
-            plugged: 128 * MIB,
+            total_mem: 128 * MIB,
         };
 
         assert_eq!(
             Engine::try_new(config(), boot).expect_err("the reserves swallow the guest"),
             EngineError::ReservesExceedMemory {
-                plugged: 128 * MIB,
+                total_mem: 128 * MIB,
                 service_reserve: SERVICE,
                 burst_reserve: BURST,
                 block_size: BLOCK,
@@ -554,16 +602,15 @@ mod tests {
     #[test]
     fn a_guest_without_a_block_to_spare_is_rejected() {
         let boot = BootInfo {
-            boot_mem: bytes(128 * MIB),
             block_size: bytes(BLOCK),
-            plugged: SERVICE + BURST + BLOCK - 1,
+            total_mem: SERVICE + BURST + BLOCK - 1,
         };
 
         assert_eq!(
             Engine::try_new(config(), boot)
                 .expect_err("the reserves leave less than a block to work in"),
             EngineError::ReservesExceedMemory {
-                plugged: SERVICE + BURST + BLOCK - 1,
+                total_mem: SERVICE + BURST + BLOCK - 1,
                 service_reserve: SERVICE,
                 burst_reserve: BURST,
                 block_size: BLOCK,
@@ -574,9 +621,8 @@ mod tests {
     #[test]
     fn a_guest_with_exactly_a_block_to_spare_boots() {
         let boot = BootInfo {
-            boot_mem: bytes(128 * MIB),
             block_size: bytes(BLOCK),
-            plugged: SERVICE + BURST + BLOCK,
+            total_mem: SERVICE + BURST + BLOCK,
         };
 
         let (engine, _) = Engine::try_new(config(), boot).expect("a block is workable");
@@ -585,20 +631,112 @@ mod tests {
     }
 
     #[test]
-    fn plugged_below_boot_memory_is_rejected() {
+    fn boot_memory_the_guest_cannot_see_is_held_at_what_it_can() {
         let boot = BootInfo {
-            boot_mem: bytes(BOOT),
             block_size: bytes(BLOCK),
-            plugged: BOOT - BLOCK,
+            total_mem: BOOT - BLOCK,
         };
 
-        assert_eq!(
-            Engine::try_new(config(), boot).expect_err("a prober reporting less than boot memory"),
-            EngineError::PluggedBelowBoot {
-                plugged: BOOT - BLOCK,
-                boot_mem: BOOT,
-            }
+        let (engine, _) = Engine::try_new(config(), boot).expect("a workable boot");
+
+        assert_eq!(engine.total_mem(), BOOT - BLOCK);
+        assert_eq!(engine.ctx.release_budget(u64::MAX), 0);
+    }
+
+    #[test]
+    fn only_the_host_can_say_how_much_of_the_guest_is_hot_plugged() {
+        let boot = BootInfo {
+            block_size: bytes(BLOCK),
+            total_mem: BOOT + 4 * BLOCK,
+        };
+
+        let (mut engine, _) = Engine::try_new(config(), boot).expect("a workable boot");
+
+        assert_eq!(engine.ctx.release_budget(u64::MAX), 0);
+
+        reconnect(&mut engine, at(0), CEILING, 4 * BLOCK);
+
+        assert_eq!(engine.ctx.release_budget(u64::MAX), 4 * BLOCK);
+    }
+
+    #[test]
+    fn a_floor_taken_before_a_plug_lands_corrects_itself_when_it_does() {
+        let (mut engine, _) = Engine::try_new(config(), boot()).expect("a workable boot");
+
+        connect(&mut engine, at(0), CEILING, HOUR);
+
+        assert_eq!(engine.ctx.release_budget(u64::MAX), 0);
+
+        host(
+            &mut engine,
+            at(1),
+            HostMessage::Geometry {
+                hotplugged: 4 * BLOCK,
+            },
         );
+
+        engine.handle(Event::TotalChanged {
+            now: at(2),
+            total_mem: BOOT + 4 * BLOCK,
+        });
+
+        assert_eq!(
+            engine.total_mem() - engine.ctx.release_budget(u64::MAX),
+            BOOT,
+            "the guest would have offered past the memory it booted with",
+        );
+    }
+
+    #[test]
+    fn a_guest_offers_back_no_more_than_the_host_says_is_plugged_in() {
+        let boot = BootInfo {
+            block_size: bytes(BLOCK),
+            total_mem: BOOT + 4 * BLOCK,
+        };
+
+        let (mut engine, _) = Engine::try_new(config(), boot).expect("a workable boot");
+
+        reconnect(&mut engine, at(0), CEILING, 4 * BLOCK);
+
+        assert_eq!(engine.ctx.release_budget(u64::MAX), 4 * BLOCK);
+
+        host(
+            &mut engine,
+            at(1),
+            HostMessage::Geometry {
+                hotplugged: 2 * BLOCK,
+            },
+        );
+
+        assert_eq!(engine.ctx.release_budget(u64::MAX), 2 * BLOCK);
+
+        engine.handle(Event::TotalChanged {
+            now: at(2),
+            total_mem: BOOT + 2 * BLOCK,
+        });
+
+        assert_eq!(engine.ctx.release_budget(u64::MAX), 2 * BLOCK);
+    }
+
+    #[test]
+    fn a_reconnect_takes_the_floor_the_host_gives_it_that_time() {
+        let boot = BootInfo {
+            block_size: bytes(BLOCK),
+            total_mem: BOOT + 4 * BLOCK,
+        };
+
+        let (mut engine, _) = Engine::try_new(config(), boot).expect("a workable boot");
+
+        reconnect(&mut engine, at(0), CEILING, 4 * BLOCK);
+        engine.handle(Event::Disconnected { now: at(1) });
+
+        engine.handle(Event::TotalChanged {
+            now: at(2),
+            total_mem: BOOT + 2 * BLOCK,
+        });
+        reconnect(&mut engine, at(3), CEILING, 2 * BLOCK);
+
+        assert_eq!(engine.ctx.release_budget(u64::MAX), 2 * BLOCK);
     }
 
     #[test]
@@ -620,7 +758,7 @@ mod tests {
     #[derive(Debug, Clone, Copy)]
     enum Step {
         Tick {
-            plugged: u64,
+            total_mem: u64,
             usage: u64,
             available: u64,
             high_events: u64,
@@ -630,7 +768,7 @@ mod tests {
             high_events: u64,
         },
         Plug {
-            plugged: u64,
+            total_mem: u64,
         },
         Reclaimed {
             reclaimed: u64,
@@ -673,8 +811,8 @@ mod tests {
     fn step() -> impl Strategy<Value = Step> {
         prop_oneof![
             8 => (byte_count(), byte_count(), byte_count(), 0_u64..8, 0.0_f32..100.0).prop_map(
-                |(plugged, usage, available, high_events, psi)| Step::Tick {
-                    plugged,
+                |(total_mem, usage, available, high_events, psi)| Step::Tick {
+                    total_mem,
                     usage,
                     available,
                     high_events,
@@ -682,7 +820,7 @@ mod tests {
                 }
             ),
             4 => (0_u64..8).prop_map(|high_events| Step::Wake { high_events }),
-            3 => byte_count().prop_map(|plugged| Step::Plug { plugged }),
+            3 => byte_count().prop_map(|total_mem| Step::Plug { total_mem }),
             2 => byte_count().prop_map(|reclaimed| Step::Reclaimed { reclaimed }),
             2 => byte_count().prop_map(|ceiling| Step::Connect { ceiling }),
             1 => Just(Step::Disconnect),
@@ -746,7 +884,7 @@ mod tests {
         }
 
         if engine.mode() == Mode::Steady && engine.pending_request().is_none() {
-            let max = engine.plugged().saturating_sub(SERVICE);
+            let max = engine.total_mem().saturating_sub(SERVICE);
 
             prop_assert_eq!(engine.max(), max, "steady max off formula");
             prop_assert_eq!(
@@ -775,7 +913,7 @@ mod tests {
 
             let event = match *step {
                 Step::Tick {
-                    plugged,
+                    total_mem,
                     usage,
                     available,
                     high_events,
@@ -783,7 +921,7 @@ mod tests {
                 } => Event::Tick {
                     now,
                     snapshot: Snapshot {
-                        plugged,
+                        total_mem,
                         workload_usage: usage,
                         available,
                         swap_used: 0,
@@ -798,7 +936,7 @@ mod tests {
                     high_events,
                     max_events: 0,
                 },
-                Step::Plug { plugged } => Event::PluggedChanged { now, plugged },
+                Step::Plug { total_mem } => Event::TotalChanged { now, total_mem },
                 Step::Reclaimed { reclaimed } => Event::ReclaimFinished { now, reclaimed },
                 Step::Connect { ceiling } => {
                     model.connected = true;
@@ -808,6 +946,7 @@ mod tests {
                         now,
                         ceiling,
                         status_interval: Duration::from_millis(500),
+                        hotplugged: 0,
                     }
                 }
                 Step::Disconnect => {

@@ -105,6 +105,7 @@ let
 
         services.pazarid = {
           enable = true;
+          logLevel = scenario.daemon.logLevel or "debug";
           settings = settings scenario built (guest: "${stateDir}/${guest}/qmp.sock");
         };
       };

@@ -71,17 +71,16 @@ pub fn config() -> EngineConfig {
 
 pub const fn boot() -> BootInfo {
     BootInfo {
-        boot_mem: bytes(BOOT),
         block_size: bytes(BLOCK),
-        plugged: BOOT,
+        total_mem: BOOT,
     }
 }
 
-pub const fn snap(plugged: u64, usage: u64, high_events: u64) -> Snapshot {
+pub const fn snap(total_mem: u64, usage: u64, high_events: u64) -> Snapshot {
     Snapshot {
-        plugged,
+        total_mem,
         workload_usage: usage,
-        available: plugged.saturating_sub(usage),
+        available: total_mem.saturating_sub(usage),
         swap_used: 0,
         high_events,
         max_events: 0,
@@ -90,10 +89,10 @@ pub const fn snap(plugged: u64, usage: u64, high_events: u64) -> Snapshot {
     }
 }
 
-pub const fn snap_psi(plugged: u64, usage: u64, psi_some10: f32) -> Snapshot {
+pub const fn snap_psi(total_mem: u64, usage: u64, psi_some10: f32) -> Snapshot {
     Snapshot {
         psi_some10,
-        ..snap(plugged, usage, 0)
+        ..snap(total_mem, usage, 0)
     }
 }
 
@@ -132,6 +131,21 @@ pub fn connect(engine: &mut Engine, now: Timestamp, ceiling: u64, status: Durati
         now,
         ceiling,
         status_interval: status,
+        hotplugged: 0,
+    })
+}
+
+pub fn reconnect(
+    engine: &mut Engine,
+    now: Timestamp,
+    ceiling: u64,
+    hotplugged: u64,
+) -> Vec<Action> {
+    engine.handle(Event::Connected {
+        now,
+        ceiling,
+        status_interval: HOUR,
+        hotplugged,
     })
 }
 
@@ -170,10 +184,21 @@ pub fn grown(engine: &mut Engine) {
     );
 
     assert_eq!(
-        engine.handle(Event::PluggedChanged {
+        engine.handle(Event::TotalChanged {
             now: at(102),
-            plugged: 2560 * MIB,
+            total_mem: 2560 * MIB,
         }),
         vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
+    );
+
+    assert_eq!(
+        host(
+            engine,
+            at(103),
+            HostMessage::Geometry {
+                hotplugged: 2560 * MIB - BOOT,
+            },
+        ),
+        vec![]
     );
 }

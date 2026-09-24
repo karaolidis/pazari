@@ -29,7 +29,7 @@
         guest = run.guest
 
         size = run.daemon.gauge("pazarid_guest_size_bytes", guest.labels)
-        booted = guest.agent.gauge("pazari_agent_plugged_bytes")
+        booted = guest.agent.gauge("pazari_agent_total_mem_bytes")
 
         grew(run, guest, size)
         followed(guest, booted + BLOCK)
@@ -58,7 +58,7 @@
         )
 
         peak = run.daemon.peak("pazarid_guest_size_bytes", guest.labels)
-        plugged = guest.agent.peak("pazari_agent_plugged_bytes")
+        plugged = guest.agent.peak("pazari_agent_total_mem_bytes")
 
         run.require(
             peak - size >= RETURNED,
@@ -73,7 +73,7 @@
             guest.labels,
         )
         guest.agent.reaches(
-            "pazari_agent_plugged_bytes",
+            "pazari_agent_total_mem_bytes",
             lambda value: value <= plugged - RETURNED,
             60,
             "the guest's MemTotal followed the device down",

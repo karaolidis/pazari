@@ -1,12 +1,13 @@
 use pazari_transport::PeerId;
+use pazari_types::Timestamp;
 use tracing::{debug, info, warn};
 
-use crate::broker::{Broker, action::Action, session::Session};
+use crate::broker::{Broker, action::Action, phase::Phase, registry::GuestId, session::Session};
 
 impl Broker {
     pub(in crate::broker) fn on_connected(&mut self, peer: PeerId) {
         let Some(guest) = self.ctx.guests.lookup(&peer) else {
-            warn!(%peer, "a connection from a peer no guest answers to");
+            warn!(%peer, "connection from an unknown peer");
             self.ctx.emit(Action::Close { peer });
 
             return;
@@ -22,10 +23,37 @@ impl Broker {
             info!(
                 guest = self.ctx.name(guest),
                 %peer,
-                "the guest connected again over a connection the host still held",
+                "guest reconnected while the previous connection was still open",
             );
         } else {
-            debug!(guest = self.ctx.name(guest), %peer, "a guest connected");
+            debug!(guest = self.ctx.name(guest), %peer, "guest connected");
+        }
+    }
+
+    pub(in crate::broker) fn on_size(
+        &mut self,
+        now: Timestamp,
+        guest: GuestId,
+        size: u64,
+        hotplugged: u64,
+    ) {
+        self.ctx.settled(guest, size, hotplugged);
+
+        let Some(session) = self.ctx.guests.session(guest) else {
+            return;
+        };
+
+        let peer = session.peer.clone();
+
+        match session.phase {
+            Phase::AwaitingHello(awaiting) => {
+                let next = awaiting.welcome(&mut self.ctx, now, guest, &peer);
+
+                if let Some(session) = self.ctx.guests.session_mut(guest) {
+                    session.phase = next;
+                }
+            }
+            Phase::Negotiated(_) => self.ctx.tell_geometry(guest, &peer),
         }
     }
 
@@ -39,7 +67,7 @@ impl Broker {
         };
 
         if state.session.take().is_some() {
-            debug!(guest = self.ctx.name(guest), %peer, "a guest disconnected");
+            debug!(guest = self.ctx.name(guest), %peer, "guest disconnected");
         }
     }
 }

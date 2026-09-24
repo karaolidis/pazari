@@ -70,7 +70,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
             let (observer, published) = Observer::new();
             let exposition = Exposition::bind(address, published).await?;
 
-            info!(%address, "the daemon is serving metrics");
+            info!(%address, "serving metrics");
 
             (observer, Some(exposition))
         }
@@ -88,7 +88,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
             guest = spec.name.as_str(),
             device = qmp.device.as_str(),
             ceiling = spec.ceiling.get(),
-            "the daemon is taking a guest on",
+            "registering a guest",
         );
 
         let backoff = Backoff::new(qmp.retry_min.get(), qmp.retry_max.get());
@@ -119,7 +119,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
         let listener = transport.bind()?;
         let connections = connections.clone();
 
-        info!(local = %listener.local(), "the daemon is listening");
+        info!(local = %listener.local(), "listening");
 
         acceptors.push(tokio::spawn(async move {
             loop {
@@ -158,7 +158,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
     let mut notifier = Notifier::new();
     notifier.ready();
 
-    info!("the daemon is running");
+    info!("daemon started");
 
     loop {
         let step = tokio::select! {
@@ -180,7 +180,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
                     peer,
                 });
             }
-            Step::Accepted(Err(error)) => warn!(%error, "failed to take on a connection"),
+            Step::Accepted(Err(error)) => warn!(%error, "failed to accept a connection"),
             Step::Reported(report) => {
                 if let Some(event) = exchange.peers.digest(report, clock.now()) {
                     exchange.drive(event);
@@ -192,7 +192,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
 
                 match host::reading(&memory, now).await {
                     Ok(event) => exchange.drive(event),
-                    Err(error) => warn!(%error, "failed to read the host's memory"),
+                    Err(error) => warn!(%error, "failed to read host memory"),
                 }
 
                 exchange.drive(Event::Tick { now });

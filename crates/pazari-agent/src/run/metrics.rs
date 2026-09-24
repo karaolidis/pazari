@@ -104,7 +104,7 @@ impl Observer {
 
         series.limits.high.set_saturating(engine.high());
         series.limits.max.set_saturating(engine.max());
-        series.limits.plugged.set_saturating(engine.plugged());
+        series.limits.total_mem.set_saturating(engine.total_mem());
         series
             .limits
             .ceiling
@@ -208,7 +208,7 @@ impl Series {
 struct Limits {
     high: Gauge,
     max: Gauge,
-    plugged: Gauge,
+    total_mem: Gauge,
     ceiling: Gauge,
     band_open: Gauge,
 }
@@ -228,10 +228,10 @@ impl Limits {
             self.max.clone(),
         );
         registry.register_with_unit(
-            "plugged",
-            "What the guest's memory device holds",
+            "total_mem",
+            "The guest's MemTotal",
             Unit::Bytes,
-            self.plugged.clone(),
+            self.total_mem.clone(),
         );
         registry.register_with_unit(
             "ceiling",
@@ -318,6 +318,7 @@ mod tests {
             now: at(0),
             ceiling: CEILING,
             status_interval: HOUR,
+            hotplugged: 0,
         }
     }
 
@@ -342,7 +343,7 @@ mod tests {
             &format!("pazari_agent_memory_high_bytes {HIGH0}"),
         );
         carries(&registry, &format!("pazari_agent_memory_max_bytes {MAX0}"));
-        carries(&registry, &format!("pazari_agent_plugged_bytes {BOOT}"));
+        carries(&registry, &format!("pazari_agent_total_mem_bytes {BOOT}"));
         carries(&registry, &format!("pazari_agent_ceiling_bytes {CEILING}"));
         carries(&registry, "pazari_agent_band_open 0");
         carries(&registry, "pazari_agent_connected 1");

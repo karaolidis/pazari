@@ -10,7 +10,7 @@ impl Broker {
         let Some(session) = self.ctx.guests.session(guest) else {
             warn!(
                 guest = self.ctx.name(guest),
-                "nothing to reclaim from: the guest is not connected"
+                "cannot reclaim: guest is not connected"
             );
 
             return;
@@ -21,7 +21,7 @@ impl Broker {
         let Some(negotiated) = session.negotiated() else {
             warn!(
                 guest = self.ctx.name(guest),
-                "nothing to reclaim from: the guest has not said hello"
+                "cannot reclaim: guest has not sent hello"
             );
 
             return;
@@ -32,7 +32,7 @@ impl Broker {
                 guest = self.ctx.name(guest),
                 outstanding = reclaim.id,
                 refused = reclaim.refused,
-                "the guest is not to be asked for memory again yet",
+                "guest is still in reclaim backoff",
             );
 
             return;
@@ -56,7 +56,7 @@ impl Broker {
 
         info!(
             guest = self.ctx.name(guest),
-            id, desired, "asking a guest for memory back"
+            id, desired, "requesting memory back from a guest"
         );
 
         self.ctx.send(

@@ -125,9 +125,9 @@ impl HotplugListener {
             result?;
         }
 
-        Ok(Event::PluggedChanged {
+        Ok(Event::TotalChanged {
             now: self.clock.now(),
-            plugged: self.topology.plugged().await?,
+            total_mem: self.topology.total_mem().await?,
         })
     }
 

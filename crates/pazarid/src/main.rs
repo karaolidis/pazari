@@ -1,13 +1,13 @@
-use std::{io, path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use pazari_systemd::logging;
 use pazarid::{
     config::{Config, Settings},
     run,
 };
 use tracing::error;
-use tracing_subscriber::EnvFilter;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/pazari/pazarid.toml";
 
@@ -32,17 +32,12 @@ enum Command {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_writer(io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    logging::install("info");
 
     match daemon(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            error!(%error, "the daemon failed");
+            error!(%error, "daemon failed");
             ExitCode::FAILURE
         }
     }

@@ -339,11 +339,18 @@ a human-readable string for logs.
 .Sh ENVIRONMENT
 .Bl -tag -width Ds
 .It Ev RUST_LOG
-The log filter for standard error, in the directive syntax the
+The log filter, in the directive syntax the
 .Va tracing
 crate's environment filter reads.
 The default is
 .Cm info .
+The event stream on standard output is not a log, and this does not filter it.
+.It Ev JOURNAL_STREAM
+Set by systemd.
+Where it names the generator's own standard error, records go to the journal at
+their own priority, their fields under an
+.Cm F_
+prefix; otherwise they go to standard error.
 .El
 .Sh EXIT STATUS
 .Bl -tag -width Ds

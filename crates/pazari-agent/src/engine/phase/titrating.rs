@@ -1,4 +1,5 @@
 use pazari_types::Timestamp;
+use tracing::debug;
 
 use crate::engine::{
     context::Context,
@@ -24,11 +25,25 @@ impl Titrating {
                 .saturating_sub(ctx.config.titrate_step.get())
                 .max(floor);
 
+            debug!(
+                high = next,
+                from = ctx.limits.high(),
+                floor,
+                usage = ctx.last.workload_usage,
+                "lowering the brake",
+            );
+
             ctx.set_high(next);
 
             if next <= floor {
                 return Steady::from_titration(ctx);
             }
+        } else {
+            debug!(
+                psi = ctx.last.psi_some10,
+                throttled = ctx.idle.throttled(),
+                "holding titration",
+            );
         }
 
         Self::scheduled(ctx, now)

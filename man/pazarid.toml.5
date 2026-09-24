@@ -81,7 +81,7 @@ and the remaining time as
 .Va retry_after_ms .
 It is also the retry advice the daemon gives on a
 .Cm host_pressure
-refusal and on a refusal of a guest whose device has not yet reported its size.
+refusal.
 It rate-limits grows only; an offer to release is never refused for asking too
 often.
 .It Cm reconcile_deadline No = Ar duration
@@ -307,6 +307,8 @@ The backoff covers opening the device, reading its size at attach, and watching
 it for changes.
 It does not cover a resize the device refused: that is counted, logged, and
 left to reconciliation, and the connection is kept.
+.Pp
+A guest whose device has not answered yet is not negotiated with.
 .El
 .Ss guests.<name>.qmp.mode
 How the daemon uses the QMP socket.

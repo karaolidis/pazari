@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use pazari_proto::{DenyReason, GuestMessage};
 use pazari_types::Timestamp;
+use tracing::debug;
 
 use crate::engine::{
     action::Action,
@@ -20,6 +21,8 @@ pub enum Releasing {
 impl Releasing {
     pub fn begin(ctx: &mut Context, bytes: u64) -> Phase {
         let swappiness = ctx.config.reclaim_swappiness;
+
+        debug!(bytes, ?swappiness, "reclaiming from the workload cgroup");
 
         ctx.emit(Action::StartReclaim { bytes, swappiness });
 
@@ -75,9 +78,9 @@ impl State for Releasing {
         }
     }
 
-    fn on_plugged(self, ctx: &mut Context, now: Timestamp, changed: bool) -> Phase {
+    fn on_total_changed(self, ctx: &mut Context, now: Timestamp, changed: bool) -> Phase {
         match self {
-            Self::Settling { target, .. } if ctx.limits.plugged() <= target => {
+            Self::Settling { target, .. } if ctx.limits.total_mem() <= target => {
                 Self::finish(ctx, now)
             }
             _ => {
@@ -97,7 +100,7 @@ impl State for Releasing {
 
         let expires = now.saturating_add(ctx.config.settle_grace.get());
 
-        Self::Settling { target, expires }.on_plugged(ctx, now, false)
+        Self::Settling { target, expires }.on_total_changed(ctx, now, false)
     }
 
     fn on_deny(
@@ -132,7 +135,16 @@ impl State for Releasing {
         }
 
         let id = ctx.take_id();
-        let current = ctx.limits.plugged();
+        let current = ctx.limits.total_mem();
+
+        debug!(
+            id,
+            current,
+            releasable,
+            asked = bytes,
+            reclaimed,
+            "offering memory back to the host",
+        );
 
         ctx.send(GuestMessage::OfferRelease {
             id,
@@ -195,9 +207,9 @@ mod tests {
         );
 
         assert_eq!(
-            engine.handle(Event::PluggedChanged {
+            engine.handle(Event::TotalChanged {
                 now: at(146),
-                plugged: 2304 * MIB,
+                total_mem: 2304 * MIB,
             }),
             vec![Action::SetHigh(1792 * MIB), Action::SetMax(2048 * MIB)]
         );
@@ -230,6 +242,6 @@ mod tests {
             vec![]
         );
         assert_eq!(engine.mode(), Mode::Steady);
-        assert_eq!(engine.plugged(), 2560 * MIB);
+        assert_eq!(engine.total_mem(), 2560 * MIB);
     }
 }

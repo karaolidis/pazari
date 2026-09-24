@@ -1,5 +1,6 @@
 use pazari_proto::GuestMessage;
 use pazari_types::Timestamp;
+use tracing::debug;
 
 use crate::engine::{
     context::Context,
@@ -47,6 +48,15 @@ impl State for Steady {
     fn on_reclaim_request(self, ctx: &mut Context, id: u64, desired: u64) -> Phase {
         let will_release = ctx.release_budget(desired);
 
+        debug!(
+            id,
+            desired,
+            will_release,
+            usage = ctx.last.workload_usage,
+            total_mem = ctx.limits.total_mem(),
+            "answering the host's reclaim request",
+        );
+
         if will_release == 0 {
             ctx.nak(id, self.busy());
 
@@ -70,8 +80,21 @@ impl State for Steady {
         let bytes = ctx.release_budget(ctx.config.shrink_step.get());
 
         if bytes == 0 {
+            debug!(
+                usage = ctx.last.workload_usage,
+                total_mem = ctx.limits.total_mem(),
+                "workload idle, but no headroom to release",
+            );
+
             return self.stay();
         }
+
+        debug!(
+            bytes,
+            usage = ctx.last.workload_usage,
+            total_mem = ctx.limits.total_mem(),
+            "workload idle long enough to shrink",
+        );
 
         ctx.idle.reset();
 

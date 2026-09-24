@@ -60,7 +60,6 @@ The guest's half, inside the VM:
         open_guard = "64MiB";
       };
 
-      runtime.boot_mem = "2GiB";
       transport.kind = "vsock";
     };
   };

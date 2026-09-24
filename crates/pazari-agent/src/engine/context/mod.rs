@@ -2,6 +2,7 @@ use std::{mem, num::NonZeroU64, time::Duration};
 
 use pazari_proto::{GuestMessage, Status};
 use pazari_types::Timestamp;
+use tracing::debug;
 
 use crate::engine::{
     action::Action,
@@ -20,7 +21,8 @@ pub struct Context {
     pub last: Snapshot,
     pub connected: bool,
 
-    boot_mem: u64,
+    hotplugged: Option<u64>,
+
     block_size: NonZeroU64,
 
     counters: CounterTracker,
@@ -35,14 +37,14 @@ impl Context {
     pub fn new(config: EngineConfig, boot: BootInfo) -> Self {
         Self {
             config,
-            limits: Limits::new(&config, boot.plugged),
+            limits: Limits::new(&config, boot.total_mem),
             idle: IdleTracker::default(),
             last: Snapshot {
-                plugged: boot.plugged,
+                total_mem: boot.total_mem,
                 ..Snapshot::default()
             },
             connected: false,
-            boot_mem: boot.boot_mem.get(),
+            hotplugged: None,
             block_size: boot.block_size,
             counters: CounterTracker::default(),
             status_interval: Duration::ZERO,
@@ -85,11 +87,33 @@ impl Context {
         self.limits.set_high(value, &mut self.out);
     }
 
-    pub const fn connect(&mut self, status_interval: Duration) {
+    pub fn connect(&mut self, status_interval: Duration, hotplugged: u64) {
         self.connected = true;
         self.status_interval = status_interval;
         self.next_status = None;
         self.next_id = 1;
+
+        self.set_hotplugged(hotplugged);
+    }
+
+    pub fn set_hotplugged(&mut self, hotplugged: u64) {
+        if self.hotplugged == Some(hotplugged) {
+            return;
+        }
+
+        debug!(
+            hotplugged,
+            was = ?self.hotplugged,
+            total_mem = self.limits.total_mem(),
+            "host reported the plugged size",
+        );
+
+        self.hotplugged = Some(hotplugged);
+    }
+
+    fn real_mem(&self) -> Option<u64> {
+        self.hotplugged
+            .map(|hotplugged| self.limits.total_mem().saturating_sub(hotplugged))
     }
 
     pub const fn disconnect(&mut self) {
@@ -137,7 +161,7 @@ impl Context {
         let counters = self.counters.seen();
 
         self.send(GuestMessage::Status(Status {
-            plugged: self.limits.plugged(),
+            total_mem: self.limits.total_mem(),
             available: self.last.available,
             high_events: counters.high,
             max_events: counters.max,
@@ -159,7 +183,7 @@ impl Context {
     }
 
     pub fn grow_target(&self) -> Option<u64> {
-        let plugged = self.limits.plugged();
+        let total_mem = self.limits.total_mem();
 
         let need = self
             .last
@@ -167,10 +191,10 @@ impl Context {
             .saturating_add(self.limits.service_reserve())
             .saturating_add(self.limits.burst_reserve());
 
-        let deficit = need.saturating_sub(plugged);
+        let deficit = need.saturating_sub(total_mem);
         let step = deficit.max(self.config.grow_step.get());
 
-        let mut target = self.round_up(plugged.saturating_add(step));
+        let mut target = self.round_up(total_mem.saturating_add(step));
 
         if let Some(ceiling) = self.limits.ceiling()
             && target > ceiling
@@ -178,17 +202,18 @@ impl Context {
             target = self.round_down(ceiling);
         }
 
-        (target > plugged).then_some(target)
+        (target > total_mem).then_some(target)
     }
 
     pub fn release_budget(&self, desired: u64) -> u64 {
-        let plugged = self.limits.plugged();
+        let total_mem = self.limits.total_mem();
 
         let floor = self
-            .boot_mem
+            .real_mem()
+            .unwrap_or(total_mem)
             .max(self.limits.reserves().saturating_add(self.block_size.get()));
 
-        let by_floor = plugged.saturating_sub(floor);
+        let by_floor = total_mem.saturating_sub(floor);
 
         #[expect(
             clippy::cast_precision_loss,
@@ -200,7 +225,7 @@ impl Context {
             (self.last.workload_usage as f64 / self.config.idle_threshold.get()) as u64;
 
         let by_pressure =
-            plugged.saturating_sub(unpressured.saturating_add(self.limits.service_reserve()));
+            total_mem.saturating_sub(unpressured.saturating_add(self.limits.service_reserve()));
 
         self.round_down(desired.min(by_floor).min(by_pressure))
     }
@@ -223,8 +248,9 @@ mod tests {
     fn grown(usage: u64) -> Context {
         let mut ctx = context();
 
-        ctx.limits.set_plugged(2560 * MIB);
+        ctx.limits.set_total_mem(2560 * MIB);
         ctx.observe(snap(2560 * MIB, usage, 0));
+        ctx.connect(Duration::ZERO, 512 * MIB);
 
         ctx
     }
@@ -242,7 +268,7 @@ mod tests {
         let mut ctx = context();
         ctx.observe(snap(BOOT, 2200 * MIB, 0));
 
-        // 2200 + 256 + 256 wanted, 2048 plugged: a 664 MiB deficit, rounded up
+        // 2200 + 256 + 256 wanted, 2048 total_mem: a 664 MiB deficit, rounded up
         // to the next 128 MiB block.
         assert_eq!(ctx.grow_target(), Some(2816 * MIB));
     }
@@ -269,6 +295,7 @@ mod tests {
     fn a_release_budget_keeps_the_guest_at_its_boot_memory() {
         let mut ctx = context();
         ctx.observe(snap(BOOT, CALM, 0));
+        ctx.connect(Duration::ZERO, 0);
 
         assert_eq!(ctx.release_budget(256 * MIB), 0);
     }
@@ -278,7 +305,7 @@ mod tests {
         let ctx = grown(CALM);
 
         assert_eq!(ctx.release_budget(256 * MIB), 256 * MIB);
-        // 2560 plugged against a 2048 floor leaves 512, whatever was asked for.
+        // 2560 total_mem against a 2048 floor leaves 512, whatever was asked for.
         assert_eq!(ctx.release_budget(1024 * MIB), 512 * MIB);
     }
 
@@ -294,14 +321,14 @@ mod tests {
     #[test]
     fn a_release_budget_leaves_a_block_of_band() {
         let boot = BootInfo {
-            boot_mem: NonZeroU64::new(128 * MIB).expect("a positive byte count"),
             block_size: NonZeroU64::new(BLOCK).expect("a positive byte count"),
-            plugged: 4096 * MIB,
+            total_mem: 4096 * MIB,
         };
 
         let mut ctx = Context::new(config(), boot);
-        ctx.limits.set_plugged(4096 * MIB);
+        ctx.limits.set_total_mem(4096 * MIB);
         ctx.observe(snap(4096 * MIB, 0, 0));
+        ctx.connect(Duration::ZERO, 4096 * MIB - 128 * MIB);
 
         let given = ctx.release_budget(u64::MAX);
         let left = 4096 * MIB - given;

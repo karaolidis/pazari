@@ -84,7 +84,7 @@ pub enum Phase {
 impl Phase {
     #[must_use]
     pub const fn start() -> Self {
-        Self::AwaitingHello(AwaitingHello)
+        Self::AwaitingHello(AwaitingHello::new())
     }
 
     #[must_use]

@@ -15,9 +15,11 @@ pub struct Guest {
     /// `None` until the guest's memory device has reported one.
     pub size: Option<u64>,
 
-    /// The device's size is boot memory plus what is plugged into it; the
-    /// guest reads `MemTotal`, which is that less whatever its kernel keeps
-    /// for itself.
+    /// How much of that size was plugged in, rather than there at boot.
+    pub hotplugged: Option<u64>,
+
+    /// The device's size is boot memory plus what is plugged into it; the guest
+    /// reads `MemTotal`, which is that less whatever its kernel keeps for itself.
     pub offset: Option<u64>,
 
     pub reconcile: Option<Reconcile>,
@@ -36,15 +38,15 @@ impl Guest {
         }
     }
 
-    pub const fn observe(&mut self, plugged: u64) {
+    pub const fn observe(&mut self, total_mem: u64) {
         if self.reconcile.is_some() {
             return;
         }
 
         if let Some(size) = self.size
-            && size >= plugged
+            && size >= total_mem
         {
-            self.offset = Some(size - plugged);
+            self.offset = Some(size - total_mem);
         }
     }
 
@@ -55,7 +57,7 @@ impl Guest {
         GuestView {
             id,
             spec,
-            boot_mem: negotiated.map(|session| session.boot_mem),
+            hotplugged: self.hotplugged,
             size: self.size.unwrap_or(0),
             requested: self.requested(),
             status: negotiated.and_then(|session| session.status),

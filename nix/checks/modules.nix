@@ -37,7 +37,6 @@ let
       enable = true;
       metricsPort = 9651;
       openFirewall = true;
-      systemMemoryMin = "256M";
 
       settings = {
         engine = {
@@ -45,8 +44,6 @@ let
           burst_reserve = "256MiB";
           open_guard = "64MiB";
         };
-
-        runtime.boot_mem = "2GiB";
 
         transport = {
           kind = "vsock";
@@ -67,7 +64,6 @@ let
       watchdog.enable = false;
 
       settings.runtime = {
-        boot_mem = "2GiB";
         backend.kind = "cgroupfs";
       };
     };
@@ -121,10 +117,7 @@ in
     }
     {
       name = "the settings the deployment sets survive";
-      ok =
-        guestSettings.runtime.boot_mem == "2GiB"
-        && guestSettings.engine.open_guard == "64MiB"
-        && guestSettings.transport.kind == "vsock";
+      ok = guestSettings.engine.open_guard == "64MiB" && guestSettings.transport.kind == "vsock";
     }
     {
       name = "the metrics port becomes a listen address";
@@ -145,12 +138,6 @@ in
         && guest.systemd.slices.workload.sliceConfig.ManagedOOMSwap == "auto"
         && guest.systemd.slices.workload.sliceConfig.ManagedOOMPreference == "omit"
         && guest.systemd.slices.workload.sliceConfig.MemoryAccounting;
-    }
-    {
-      name = "system.slice keeps a floor, as a drop-in";
-      ok =
-        guest.systemd.slices.system.sliceConfig.MemoryMin == "256M"
-        && guest.systemd.slices.system.overrideStrategy == "asDropin";
     }
     {
       name = "the kernel is booted the way preflight wants it";

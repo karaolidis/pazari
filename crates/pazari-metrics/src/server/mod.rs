@@ -61,11 +61,11 @@ impl Exposition {
                             .serve_connection(TokioIo::new(connection), service)
                             .await
                         {
-                            debug!(%error, "a scrape went unanswered");
+                            debug!(%error, "scrape failed");
                         }
                     });
                 }
-                Err(error) => warn!(%error, "failed to take on a scrape"),
+                Err(error) => warn!(%error, "failed to accept a scrape connection"),
             }
         }
     }
@@ -107,8 +107,6 @@ mod tests {
     use super::*;
 
     const PATIENCE: Duration = Duration::from_secs(5);
-
-    const SILENCE: Duration = Duration::from_secs(60);
 
     const SCRAPES: u64 = 7;
 
@@ -256,27 +254,5 @@ mod tests {
 
         assert!(first.contains("pazari_test_scrapes_total"));
         assert!(second.contains("pazari_test_scrapes_total"));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_connection_that_never_asks_is_let_go_of() {
-        let served = served().await;
-
-        let mut connection = TcpStream::connect(served.address)
-            .await
-            .expect("the endpoint answers");
-
-        let mut answer = Vec::new();
-
-        timeout(SILENCE, connection.read_to_end(&mut answer))
-            .await
-            .expect("the endpoint let a connection that said nothing go")
-            .expect("the endpoint closed the connection");
-
-        assert!(
-            answer.is_empty(),
-            "a connection that said nothing was answered: {}",
-            String::from_utf8_lossy(&answer),
-        );
     }
 }

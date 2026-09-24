@@ -482,7 +482,7 @@ impl Pending {
         if let Some(waiter) = waiter {
             let _ = waiter.send(outcome);
         } else {
-            warn!(id, "a QMP reply arrived for nobody");
+            warn!(id, "QMP reply with no matching request");
         }
     }
 
@@ -563,21 +563,21 @@ async fn route(
             Ok(Some(Incoming::Reply(reply))) => pending.resolve(reply.id, reply.outcome),
             Ok(Some(Incoming::Event(event))) => {
                 if let Some(size) = device.resized(&event) {
-                    debug!(size, device = device.id, "the device changed size");
+                    debug!(size, device = device.id, "device size changed");
 
                     let _ = sizes.send(size);
                 }
             }
             Ok(Some(Incoming::Fault(fault))) => {
-                warn!(desc = %fault.error.desc, "the QMP server rejected a frame");
+                warn!(desc = %fault.error.desc, "QMP server rejected a frame");
             }
-            Ok(Some(Incoming::Greeting(_))) => warn!("the QMP server greeted twice"),
+            Ok(Some(Incoming::Greeting(_))) => warn!("duplicate QMP greeting"),
             Ok(None) => {
-                debug!("the QMP server closed the connection");
+                debug!("QMP server closed the connection");
                 break None;
             }
             Err(error) => {
-                warn!(%error, "the QMP connection failed");
+                warn!(%error, "QMP connection failed");
                 break Some(Arc::new(error));
             }
         }
@@ -602,7 +602,7 @@ async fn feed(
             continue;
         };
 
-        warn!(%source, "the QMP connection would not take a command");
+        warn!(%source, "QMP connection refused a command");
 
         pending.close(Some(Arc::new(QmpError::Socket {
             what: WRITE,

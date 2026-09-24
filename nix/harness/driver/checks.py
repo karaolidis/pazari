@@ -91,7 +91,7 @@ def grew(run, guest, boot):
 
 def followed(guest, floor):
     return guest.agent.reaches(
-        "pazari_agent_plugged_bytes",
+        "pazari_agent_total_mem_bytes",
         lambda value: value >= floor,
         PATIENCE,
         f"{guest.name}'s MemTotal followed the device",

@@ -33,7 +33,7 @@
         steady(run, guest, "the engine settled after the first grow")
 
         grown = run.daemon.gauge("pazarid_guest_size_bytes", guest.labels)
-        plugged = guest.agent.gauge("pazari_agent_plugged_bytes")
+        plugged = guest.agent.gauge("pazari_agent_total_mem_bytes")
         before = run.clock()
 
         run.require(
@@ -92,7 +92,7 @@
 
         run.require(
             guest.agent.held(
-                "pazari_agent_plugged_bytes",
+                "pazari_agent_total_mem_bytes",
                 lambda value: value >= plugged,
                 over=10,
                 since=before,

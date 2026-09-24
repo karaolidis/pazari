@@ -37,7 +37,7 @@ impl Topology {
         Ok(MemInfo::parse(&self.meminfo, &text)?)
     }
 
-    pub async fn plugged(&self) -> Result<u64, RuntimeError> {
+    pub async fn total_mem(&self) -> Result<u64, RuntimeError> {
         Ok(self.meminfo().await?.total)
     }
 
@@ -125,7 +125,7 @@ mod tests {
 
         let topology = Topology::new(&paths);
 
-        assert_eq!(topology.plugged().await.unwrap(), 2_096_756 * KB);
+        assert_eq!(topology.total_mem().await.unwrap(), 2_096_756 * KB);
         assert_eq!(topology.block_size().await.unwrap().get(), 128 << 20);
         assert_eq!(topology.meminfo().await.unwrap().available, 1_729_396 * KB);
     }

@@ -16,14 +16,14 @@ impl Broker {
         message: GuestMessage,
     ) {
         let Some(guest) = self.ctx.guests.lookup(peer) else {
-            warn!(%peer, "a message from a peer no guest answers to");
+            warn!(%peer, "message from an unknown peer");
             self.ctx.close_unknown(peer);
 
             return;
         };
 
         let Some(phase) = self.ctx.guests.session(guest).map(|session| session.phase) else {
-            warn!(guest = self.ctx.name(guest), %peer, "a message on a connection the broker never accepted");
+            warn!(guest = self.ctx.name(guest), %peer, "message on a connection the broker never accepted");
             self.ctx.close_unknown(peer);
 
             return;

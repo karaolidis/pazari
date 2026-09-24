@@ -55,7 +55,12 @@ impl Broker {
             Event::Connected { peer, .. } => self.on_connected(peer),
             Event::Message { now, peer, message } => self.on_message(now, &peer, message),
             Event::Disconnected { peer, .. } => self.on_disconnected(&peer),
-            Event::Size { guest, size, .. } => self.ctx.settled(guest, size),
+            Event::Size {
+                now,
+                guest,
+                size,
+                hotplugged,
+            } => self.on_size(now, guest, size, hotplugged),
             Event::HostAvailable {
                 bytes,
                 swap_free,
@@ -153,6 +158,7 @@ mod tests {
                     protocol: PROTOCOL_VERSION,
                     ceiling: CEILING,
                     status_interval_ms: Duration::from_secs(1),
+                    hotplugged: 0,
                 },
             }]
         );
@@ -168,9 +174,8 @@ mod tests {
         let wrong = GuestMessage::Hello {
             protocol: PROTOCOL_VERSION + 1,
             agent_version: "0.1.0".to_owned(),
-            boot_mem: BOOT,
             block_size: BLOCK,
-            plugged: BOOT,
+            total_mem: BOOT,
         };
 
         assert_eq!(message(&mut broker, at(0), ONE, wrong), vec![closed(ONE)]);
@@ -186,9 +191,8 @@ mod tests {
         let wrong = GuestMessage::Hello {
             protocol: PROTOCOL_VERSION,
             agent_version: "0.1.0".to_owned(),
-            boot_mem: BOOT,
             block_size: 0,
-            plugged: BOOT,
+            total_mem: BOOT,
         };
 
         assert_eq!(message(&mut broker, at(0), ONE, wrong), vec![closed(ONE)]);
@@ -272,7 +276,7 @@ mod tests {
     fn reserving() -> Broker {
         let mut broker = sized();
 
-        greet_at(&mut broker, at(0), ONE, BOOT - RESERVED);
+        greet_at(&mut broker, at(0), ONE, BOOT - RESERVED, 0);
 
         broker
     }
@@ -365,7 +369,7 @@ mod tests {
 
     #[test]
     fn a_guest_that_has_not_said_what_it_sees_is_answered_in_the_device_s_terms() {
-        let mut broker = unsized_guest();
+        let mut broker = held_guest();
 
         sizes(&mut broker, at(5), ONE, BOOT);
 
@@ -377,56 +381,79 @@ mod tests {
         );
     }
 
-    fn unsized_guest() -> Broker {
+    fn held_guest() -> Broker {
         let mut broker = Broker::new(policy(), registry());
 
         let _ = broker.handle(available(at(0), HOST));
-        greet(&mut broker, at(0), ONE);
+
+        connect(&mut broker, at(0), ONE);
+
+        assert_eq!(
+            message(&mut broker, at(0), ONE, hello()),
+            vec![],
+            "the host answered before it knew how much of the guest was plugged in",
+        );
 
         broker
     }
 
     #[test]
-    fn a_grow_from_a_guest_whose_size_is_unknown_is_denied_once() {
-        let mut broker = unsized_guest();
+    fn a_hello_is_held_until_the_guest_device_reports_a_size() {
+        let mut broker = held_guest();
+
+        assert!(!broker.is_negotiated(&vsock(ONE)));
+
+        assert_eq!(
+            sizes(&mut broker, at(11), ONE, 2560 * MIB),
+            vec![welcome(ONE, CEILING, 2560 * MIB - BOOT)],
+            "the welcome did not follow the size that unblocked it",
+        );
+        assert!(broker.is_negotiated(&vsock(ONE)));
+    }
+
+    #[test]
+    fn a_held_guest_starts_its_status_clock_when_it_is_welcomed() {
+        let mut broker = held_guest();
+
+        sizes(&mut broker, at(60), ONE, BOOT);
+        let _ = tick(&mut broker, at(61));
+
+        assert!(
+            !broker.is_stale(id(ONE)),
+            "a guest was stale before it had a chance to say anything",
+        );
+    }
+
+    #[test]
+    fn a_guest_held_at_hello_negotiates_once_the_welcome_lands() {
+        let mut broker = held_guest();
+
+        sizes(&mut broker, at(11), ONE, BOOT);
+
+        assert_eq!(
+            message(&mut broker, at(12), ONE, ask(1, BOOT, 3072 * MIB)),
+            vec![grant(ONE, 1, 3072 * MIB), requested(ONE, 3072 * MIB)]
+        );
+    }
+
+    #[test]
+    fn a_guest_that_speaks_while_its_hello_is_held_is_hung_up_on() {
+        let mut broker = held_guest();
 
         assert_eq!(
             message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB)),
-            vec![retry(ONE, 1, DenyReason::Policy, Duration::from_secs(5))]
+            vec![closed(ONE)]
         );
         assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
     }
 
     #[test]
-    fn a_release_from_a_guest_whose_size_is_unknown_is_denied_once() {
-        let mut broker = unsized_guest();
+    fn a_guest_that_says_hello_twice_while_it_is_held_is_hung_up_on() {
+        let mut broker = held_guest();
 
         assert_eq!(
-            message(&mut broker, at(10), ONE, release(1, BOOT, 512 * MIB)),
-            vec![retry(ONE, 1, DenyReason::Policy, Duration::from_secs(5))]
-        );
-        assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
-    }
-
-    #[test]
-    fn a_guest_negotiates_as_soon_as_its_device_reports_a_size() {
-        let mut broker = unsized_guest();
-
-        message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB));
-        sizes(&mut broker, at(11), ONE, BOOT);
-
-        assert_eq!(
-            message(&mut broker, at(12), ONE, ask(2, BOOT, 3072 * MIB)),
-            vec![grant(ONE, 2, 3072 * MIB), requested(ONE, 3072 * MIB)]
-        );
-
-        let mut broker = unsized_guest();
-
-        sizes(&mut broker, at(11), ONE, BOOT);
-
-        assert_eq!(
-            message(&mut broker, at(12), ONE, release(1, BOOT, 512 * MIB)),
-            vec![grant(ONE, 1, 1536 * MIB), requested(ONE, 1536 * MIB)]
+            message(&mut broker, at(10), ONE, hello()),
+            vec![closed(ONE)]
         );
     }
 
@@ -473,34 +500,42 @@ mod tests {
 
     #[test]
     fn an_offer_to_release_is_taken_and_actuated_downward() {
-        let mut broker = welcomed(ONE);
+        let mut broker = plugged(ONE);
 
         assert_eq!(
-            message(&mut broker, at(10), ONE, release(1, BOOT, 512 * MIB)),
-            vec![grant(ONE, 1, 1536 * MIB), requested(ONE, 1536 * MIB),]
+            message(&mut broker, at(10), ONE, release(1, BOOT + GIB, 512 * MIB)),
+            vec![
+                grant(ONE, 1, BOOT + 512 * MIB),
+                requested(ONE, BOOT + 512 * MIB),
+            ]
         );
     }
 
     #[test]
-    fn an_offer_of_more_than_the_guest_holds_stops_at_nothing() {
-        let mut broker = welcomed(ONE);
+    fn an_offer_of_more_than_is_plugged_in_stops_at_the_boot_memory() {
+        let mut broker = plugged(ONE);
 
         assert_eq!(
-            message(&mut broker, at(10), ONE, release(1, BOOT, u64::MAX)),
-            vec![grant(ONE, 1, 0), requested(ONE, 0)]
+            message(&mut broker, at(10), ONE, release(1, BOOT + GIB, u64::MAX)),
+            vec![grant(ONE, 1, BOOT), requested(ONE, BOOT)]
         );
     }
 
     #[test]
     fn a_release_does_not_arm_the_rate_limit() {
-        let mut broker = welcomed(ONE);
+        let mut broker = plugged(ONE);
 
-        message(&mut broker, at(10), ONE, release(1, BOOT, 512 * MIB));
-        sizes(&mut broker, at(11), ONE, 1536 * MIB);
+        message(&mut broker, at(10), ONE, release(1, BOOT + GIB, 512 * MIB));
+        sizes(&mut broker, at(11), ONE, BOOT + 512 * MIB);
 
         assert_eq!(
-            message(&mut broker, at(12), ONE, ask(2, 1536 * MIB, 2560 * MIB)),
-            vec![grant(ONE, 2, 2560 * MIB), requested(ONE, 2560 * MIB)]
+            message(
+                &mut broker,
+                at(12),
+                ONE,
+                ask(2, BOOT + 512 * MIB, BOOT + GIB)
+            ),
+            vec![grant(ONE, 2, BOOT + GIB), requested(ONE, BOOT + GIB)]
         );
     }
 
@@ -523,13 +558,19 @@ mod tests {
 
         message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB));
 
-        assert_eq!(sizes(&mut broker, at(11), ONE, 2560 * MIB), vec![]);
+        assert_eq!(
+            sizes(&mut broker, at(11), ONE, 2560 * MIB),
+            vec![geometry(ONE, 512 * MIB)]
+        );
         assert_eq!(
             broker.guest(id(ONE)).and_then(Guest::requested),
             Some(3072 * MIB)
         );
 
-        assert_eq!(sizes(&mut broker, at(12), ONE, 3072 * MIB), vec![]);
+        assert_eq!(
+            sizes(&mut broker, at(12), ONE, 3072 * MIB),
+            vec![geometry(ONE, GIB)]
+        );
         assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
         assert_eq!(
             broker.guest(id(ONE)).and_then(|guest| guest.size),
@@ -560,12 +601,12 @@ mod tests {
 
     #[test]
     fn a_shrink_that_stalls_is_taken_back_to_what_the_guest_has() {
-        let mut broker = welcomed(ONE);
+        let mut broker = plugged(ONE);
 
-        message(&mut broker, at(10), ONE, release(1, BOOT, 512 * MIB));
+        message(&mut broker, at(10), ONE, release(1, BOOT + GIB, 512 * MIB));
 
         assert_eq!(tick(&mut broker, at(39)), vec![]);
-        assert_eq!(tick(&mut broker, at(40)), vec![requested(ONE, BOOT)]);
+        assert_eq!(tick(&mut broker, at(40)), vec![requested(ONE, BOOT + GIB)]);
         assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
         assert_eq!(tick(&mut broker, at(41)), vec![]);
     }
@@ -580,8 +621,9 @@ mod tests {
         let mut broker = sized_with(policy);
 
         greet(&mut broker, at(0), ONE);
+        sizes(&mut broker, at(1), ONE, BOOT + GIB);
 
-        message(&mut broker, at(10), ONE, release(1, BOOT, 512 * MIB));
+        message(&mut broker, at(10), ONE, release(1, BOOT + GIB, 512 * MIB));
 
         assert_eq!(tick(&mut broker, at(40)), vec![]);
         assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
@@ -693,7 +735,7 @@ mod tests {
 
     #[test]
     fn a_reclaim_the_guest_takes_on_waits_for_the_memory() {
-        let mut broker = welcomed(ONE);
+        let mut broker = plugged(ONE);
 
         let _ = broker.handle(Event::Reclaim {
             now: at(10),
@@ -722,8 +764,11 @@ mod tests {
         );
 
         assert_eq!(
-            message(&mut broker, at(12), ONE, release(1, BOOT, 256 * MIB)),
-            vec![grant(ONE, 1, 1792 * MIB), requested(ONE, 1792 * MIB),]
+            message(&mut broker, at(12), ONE, release(1, BOOT + GIB, 256 * MIB)),
+            vec![
+                grant(ONE, 1, BOOT + 768 * MIB),
+                requested(ONE, BOOT + 768 * MIB),
+            ]
         );
     }
 
@@ -837,7 +882,7 @@ mod tests {
         });
         sizes(&mut broker, at(13), ONE, 2560 * MIB);
 
-        greet_at(&mut broker, at(20), ONE, 2560 * MIB);
+        greet_at(&mut broker, at(20), ONE, 2560 * MIB, 512 * MIB);
 
         assert_eq!(
             message(&mut broker, at(21), ONE, ask(1, 2560 * MIB, 3072 * MIB)),
@@ -870,7 +915,7 @@ mod tests {
 
         assert_eq!(
             message(&mut broker, at(11), ONE, hello()),
-            vec![welcome(ONE, CEILING)]
+            vec![welcome(ONE, CEILING, 0)]
         );
     }
 
@@ -1100,7 +1145,7 @@ mod tests {
         },
         Report {
             cid: u32,
-            plugged: u64,
+            total_mem: u64,
         },
         Bye {
             cid: u32,
@@ -1162,6 +1207,7 @@ mod tests {
                     peer: peer.expect("a connection step names a peer"),
                 },
                 Self::Size { slot, size } => Event::Size {
+                    hotplugged: size.saturating_sub(BOOT),
                     now,
                     guest: GuestId::from_index(slot),
                     size,
@@ -1199,9 +1245,8 @@ mod tests {
                 } => GuestMessage::Hello {
                     protocol,
                     agent_version: "0.1.0".to_owned(),
-                    boot_mem: BOOT,
                     block_size,
-                    plugged: BOOT,
+                    total_mem: BOOT,
                 },
                 Self::Ask { id, target, .. } => ask(id, BOOT, target),
                 Self::Offer { id, releasable, .. } => release(id, BOOT, releasable),
@@ -1212,7 +1257,7 @@ mod tests {
                     id,
                     reason: "no".to_owned(),
                 },
-                Self::Report { plugged, .. } => report(plugged, plugged / 2),
+                Self::Report { total_mem, .. } => report(total_mem, total_mem / 2),
                 Self::Bye { .. } => GuestMessage::Bye {},
                 _ => unreachable!("only message steps carry a message"),
             }
@@ -1254,7 +1299,7 @@ mod tests {
             2 => (cid(), 0_u64..4, byte_count())
                 .prop_map(|(cid, id, will_release)| Step::Ack { cid, id, will_release }),
             2 => (cid(), 0_u64..4).prop_map(|(cid, id)| Step::Nak { cid, id }),
-            4 => (cid(), byte_count()).prop_map(|(cid, plugged)| Step::Report { cid, plugged }),
+            4 => (cid(), byte_count()).prop_map(|(cid, total_mem)| Step::Report { cid, total_mem }),
             1 => cid().prop_map(|cid| Step::Bye { cid }),
             2 => cid().prop_map(|cid| Step::Disconnect { cid }),
             4 => (0_usize..3, byte_count()).prop_map(|(slot, size)| Step::Size { slot, size }),

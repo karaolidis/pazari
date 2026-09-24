@@ -103,9 +103,8 @@ mod tests {
         GuestMessage::Hello {
             protocol: PROTOCOL_VERSION,
             agent_version: "0.1.0".to_owned(),
-            boot_mem: 1_073_741_824,
             block_size: 2_097_152,
-            plugged: 0,
+            total_mem: 0,
         }
     }
 
@@ -114,6 +113,7 @@ mod tests {
             protocol: PROTOCOL_VERSION,
             ceiling: 4_294_967_296,
             status_interval_ms: Duration::from_secs(1),
+            hotplugged: 0,
         }
     }
 

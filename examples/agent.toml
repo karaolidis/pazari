@@ -70,9 +70,6 @@ kind = "stall"
 # hierarchy. Set me.
 cgroup = "/sys/fs/cgroup/workload.slice"
 
-# What the guest booted with, excluding anything hot-plugged. Set me.
-boot_mem = "2GiB"
-
 # How long the hotplug listener waits for one resize's uevent to end.
 hotplug_debounce = "250ms"
 

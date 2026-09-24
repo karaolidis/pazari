@@ -91,7 +91,7 @@
         run.require(
             guest.agent.gauge("pazari_agent_memory_high_bytes")
             < guest.agent.gauge("pazari_agent_memory_max_bytes")
-            <= guest.agent.gauge("pazari_agent_plugged_bytes"),
+            <= guest.agent.gauge("pazari_agent_total_mem_bytes"),
             "the restarted agent rebuilt the band from the plug it found",
         )
 

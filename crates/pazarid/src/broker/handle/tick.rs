@@ -52,7 +52,7 @@ impl Broker {
             guest = self.ctx.name(guest),
             psi,
             threshold = revocation.psi.get(),
-            "the host is under pressure; taking memory back",
+            "host is under memory pressure; reclaiming",
         );
 
         self.on_reclaim(now, guest, desired);
@@ -86,7 +86,7 @@ impl Broker {
                 guest = name,
                 target = reconcile.target,
                 size,
-                "a grow did not finish in time; taking the size it reached",
+                "grow timed out; accepting the size it reached",
             );
 
             return;
@@ -104,7 +104,7 @@ impl Broker {
             target = reconcile.target,
             size,
             reverted = revert,
-            "a shrink did not finish in time",
+            "shrink timed out",
         );
     }
 
@@ -126,11 +126,7 @@ impl Broker {
         session.reclaim = None;
 
         if reclaim.refused {
-            debug!(
-                guest = name,
-                id = reclaim.id,
-                "the guest may be asked for memory again",
-            );
+            debug!(guest = name, id = reclaim.id, "guest left reclaim backoff",);
 
             return;
         }
@@ -140,7 +136,7 @@ impl Broker {
             id = reclaim.id,
             desired = reclaim.desired,
             committed = ?reclaim.committed,
-            "a reclaim ran out of time",
+            "reclaim timed out",
         );
     }
 
@@ -170,6 +166,6 @@ impl Broker {
 
         session.stale = true;
 
-        warn!(guest = name, ?quiet, "the guest has stopped sending status");
+        warn!(guest = name, ?quiet, "guest stopped sending status");
     }
 }

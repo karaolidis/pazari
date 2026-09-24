@@ -71,13 +71,13 @@ nix build .#measure-brake-crawl -L
 One SVG per guest, five panels on a shared time axis that opens at `t0`. The
 boot and the handshake are not drawn; the captured streams on disk are whole.
 
-| Panel                | What it carries                                                  |
-| -------------------- | ---------------------------------------------------------------- |
-| memory               | `plugged`, `memory.max`, `memory.high`, workload usage, ceiling. |
-| workload fault rate  | What `pazari-stress` reported, log scale.                        |
-| host available       | The daemon's `MemAvailable`.                                     |
-| host memory pressure | The daemon's PSI reading.                                        |
-| swimlanes            | The engine's mode, and the daemon's view of the guest link.      |
+| Panel                | What it carries                                                    |
+| -------------------- | ------------------------------------------------------------------ |
+| memory               | device size, `memory.max`, `memory.high`, workload usage, ceiling. |
+| workload fault rate  | What `pazari-stress` reported, log scale.                          |
+| host available       | The daemon's `MemAvailable`.                                       |
+| host memory pressure | The daemon's PSI reading.                                          |
+| swimlanes            | The engine's mode, and the daemon's view of the guest link.        |
 
 Vertical rules on the memory panel mark the protocol events - a request, a
 grant, a deny, an offer, a reclaim.

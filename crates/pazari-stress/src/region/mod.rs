@@ -249,7 +249,7 @@ impl Drop for Region {
     fn drop(&mut self) {
         // SAFETY: the mapping is ours, nothing borrows it, and this is the only place it is undone.
         if let Err(error) = unsafe { munmap(self.base, self.len) } {
-            warn!(%error, "the arena did not unmap");
+            warn!(%error, "failed to unmap the arena");
         }
     }
 }

@@ -1,3 +1,5 @@
+use tracing::warn;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Counters {
     pub high: u64,
@@ -14,6 +16,15 @@ impl CounterTracker {
         let throttled = self
             .seen
             .map_or(wake && high > 0, |previous| high > previous.high);
+
+        if let Some(previous) = self.seen
+            && max > previous.max
+        {
+            warn!(
+                breaches = max - previous.max,
+                max, "workload hit memory.max",
+            );
+        }
 
         self.seen = Some(Counters { high, max });
 

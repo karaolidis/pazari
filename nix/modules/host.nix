@@ -44,6 +44,15 @@ in
       };
     };
 
+    logLevel = lib.mkOption {
+      type = lib.types.str;
+      default = "info";
+      example = "pazarid=debug,pazari_transport=warn";
+      description = ''
+        `RUST_LOG` for the daemon.
+      '';
+    };
+
     settings = lib.mkOption {
       type = format.type;
       default = { };
@@ -94,6 +103,7 @@ in
         User = "pazarid";
         Group = cfg.group;
         SyslogIdentifier = "pazarid";
+        Environment = [ "RUST_LOG=${cfg.logLevel}" ];
 
         CapabilityBoundingSet = "";
         NoNewPrivileges = true;

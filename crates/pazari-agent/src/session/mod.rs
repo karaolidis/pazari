@@ -32,9 +32,8 @@ pub struct SessionConfig {
 
 #[derive(Debug)]
 pub struct Geometry {
-    pub boot_mem: NonZeroU64,
     pub block_size: NonZeroU64,
-    pub plugged: watch::Receiver<u64>,
+    pub total_mem: watch::Receiver<u64>,
 }
 
 impl Geometry {
@@ -42,9 +41,8 @@ impl Geometry {
         GuestMessage::Hello {
             protocol: PROTOCOL_VERSION,
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
-            boot_mem: self.boot_mem.get(),
             block_size: self.block_size.get(),
-            plugged: *self.plugged.borrow(),
+            total_mem: *self.total_mem.borrow(),
         }
     }
 }
@@ -74,7 +72,7 @@ impl Session {
         drop(outbound);
 
         if timeout(SHUTDOWN_GRACE, self.task).await.is_err() {
-            warn!("the session did not close in time; abandoning it");
+            warn!("session did not close in time; abandoning it");
         }
     }
 }
@@ -89,10 +87,10 @@ impl Outbound {
         match self.messages.try_send(message) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(message)) => {
-                warn!(?message, "the session is behind; dropping a message");
+                warn!(?message, "session queue is full; dropping a message");
             }
             Err(mpsc::error::TrySendError::Closed(message)) => {
-                warn!(?message, "the session is gone; dropping a message");
+                warn!(?message, "session is closed; dropping a message");
             }
         }
     }
@@ -152,7 +150,7 @@ async fn attempt(
     let connection = match config.connector.connect().await {
         Ok(connection) => connection,
         Err(error) => {
-            warn!(%error, "failed to reach the host");
+            warn!(%error, "failed to connect to the host");
             return Outcome::Retry;
         }
     };
@@ -160,11 +158,11 @@ async fn attempt(
     let mut stream = Stream::new(connection);
 
     if let Err(error) = stream.send(&geometry.hello()).await {
-        warn!(%error, "failed to greet the host");
+        warn!(%error, "failed to send hello");
         return Outcome::Retry;
     }
 
-    let Some((ceiling, status_interval)) =
+    let Some((ceiling, status_interval, hotplugged)) =
         welcome(&mut stream, config.handshake_timeout.get()).await
     else {
         return Outcome::Retry;
@@ -174,12 +172,13 @@ async fn attempt(
 
     while outgoing.try_recv().is_ok() {}
 
-    info!(ceiling, ?status_interval, "the host welcomed the agent");
+    info!(ceiling, ?status_interval, hotplugged, "host sent welcome");
 
     let connected = Event::Connected {
         now: clock.now(),
         ceiling,
         status_interval,
+        hotplugged,
     };
 
     if events.send(connected).await.is_err() {
@@ -200,19 +199,19 @@ async fn attempt(
     outcome
 }
 
-async fn welcome(stream: &mut Stream, within: Duration) -> Option<(u64, Duration)> {
+async fn welcome(stream: &mut Stream, within: Duration) -> Option<(u64, Duration, u64)> {
     let first = match timeout(within, stream.recv()).await {
         Ok(Ok(Some(message))) => message,
         Ok(Ok(None)) => {
-            warn!("the host closed the connection before it said welcome");
+            warn!("host closed the connection before sending welcome");
             return None;
         }
         Ok(Err(error)) => {
-            warn!(%error, "the handshake failed");
+            warn!(%error, "handshake failed");
             return None;
         }
         Err(_) => {
-            warn!(?within, "the host did not say welcome in time");
+            warn!(?within, "timed out waiting for welcome");
             return None;
         }
     };
@@ -221,9 +220,10 @@ async fn welcome(stream: &mut Stream, within: Duration) -> Option<(u64, Duration
         protocol,
         ceiling,
         status_interval_ms,
+        hotplugged,
     } = first
     else {
-        warn!(?first, "the host spoke before it said welcome");
+        warn!(?first, "host sent a message before welcome");
         return None;
     };
 
@@ -231,12 +231,12 @@ async fn welcome(stream: &mut Stream, within: Duration) -> Option<(u64, Duration
         warn!(
             host = protocol,
             agent = PROTOCOL_VERSION,
-            "the host speaks another protocol"
+            "host protocol version mismatch"
         );
         return None;
     }
 
-    Some((ceiling, status_interval_ms))
+    Some((ceiling, status_interval_ms, hotplugged))
 }
 
 async fn pump(
@@ -258,11 +258,11 @@ async fn pump(
 
     match ended {
         Ended::Closed => {
-            info!("the host closed the connection");
+            info!("host closed the connection");
             Outcome::Retry
         }
         Ended::Recv(error) => {
-            warn!(%error, "the connection failed");
+            warn!(%error, "connection failed");
             Outcome::Retry
         }
         Ended::Send(error) => {
@@ -270,7 +270,7 @@ async fn pump(
             Outcome::Retry
         }
         Ended::Local => {
-            debug!("the agent is shutting down");
+            debug!("shutting down");
             Outcome::Closed
         }
     }
@@ -316,19 +316,20 @@ mod tests {
             protocol,
             ceiling: CEILING,
             status_interval_ms: Duration::from_millis(2_500),
+            hotplugged: 0,
         }
     }
 
     struct Fixture {
         dir: TempDir,
-        plugged: watch::Sender<u64>,
+        total_mem: watch::Sender<u64>,
     }
 
     impl Fixture {
         fn new() -> Self {
             Self {
                 dir: TempDir::new().expect("a temporary directory"),
-                plugged: watch::Sender::new(BOOT),
+                total_mem: watch::Sender::new(BOOT),
             }
         }
 
@@ -344,9 +345,8 @@ mod tests {
             Session::spawn(
                 config(&self.path()),
                 Geometry {
-                    boot_mem: bytes(BOOT),
                     block_size: bytes(BLOCK),
-                    plugged: self.plugged.subscribe(),
+                    total_mem: self.total_mem.subscribe(),
                 },
                 Clock::start(),
             )
@@ -421,11 +421,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_hello_carries_the_plugged_size_of_the_moment() {
+    async fn the_hello_carries_the_total_memory_of_the_moment() {
         let fixture = Fixture::new();
         let listener = fixture.listen();
 
-        fixture.plugged.send_replace(BOOT + 512 * MIB);
+        fixture.total_mem.send_replace(BOOT + 512 * MIB);
 
         let (session, outbound) = fixture.spawn();
 
@@ -441,9 +441,8 @@ mod tests {
             GuestMessage::Hello {
                 protocol: PROTOCOL_VERSION,
                 agent_version: env!("CARGO_PKG_VERSION").to_owned(),
-                boot_mem: BOOT,
                 block_size: BLOCK,
-                plugged: BOOT + 512 * MIB,
+                total_mem: BOOT + 512 * MIB,
             }
         );
 
@@ -582,9 +581,8 @@ mod tests {
         let (session, outbound) = Session::spawn(
             config,
             Geometry {
-                boot_mem: bytes(BOOT),
                 block_size: bytes(BLOCK),
-                plugged: fixture.plugged.subscribe(),
+                total_mem: fixture.total_mem.subscribe(),
             },
             Clock::start(),
         );

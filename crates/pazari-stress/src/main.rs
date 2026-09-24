@@ -9,13 +9,13 @@ use anyhow::Result;
 use bytesize::ByteSize;
 use clap::Parser;
 use pazari_stress::{Fill, Options, Plan, Reporter, run};
+use pazari_systemd::logging;
 use pazari_types::Interval;
 use signal_hook::{
     consts::{SIGINT, SIGTERM},
     flag,
 };
 use tracing::error;
-use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -52,22 +52,17 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_writer(io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    logging::install("info");
 
     let mut out = Reporter::new(io::stdout().lock());
 
     match stress(&cli, &mut out) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            error!(%error, "the workload failed");
+            error!(%error, "workload failed");
 
             if let Err(error) = out.failed(&error.to_string()) {
-                error!(%error, "the failure went unreported");
+                error!(%error, "failed to report the error");
             }
 
             ExitCode::FAILURE

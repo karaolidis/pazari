@@ -83,7 +83,7 @@
                 "actuation_ms": quantiles([1000 * cycle["actuation"] for cycle in rounds]),
                 "round_trip_ms": quantiles([1000 * cycle["round_trip"] for cycle in rounds]),
                 "plug_step_bytes": quantiles(
-                    deltas(guest.agent.series("pazari_agent_plugged_bytes"))
+                    deltas(guest.agent.series("pazari_agent_total_mem_bytes"))
                 ),
                 "grant_requests": guest.agent.counter("pazari_agent_grant_requests_total"),
                 "grants": guest.agent.counter("pazari_agent_grants_total"),

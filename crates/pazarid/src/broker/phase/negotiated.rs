@@ -11,7 +11,6 @@ use crate::broker::{
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Negotiated {
     /// What the guest said its geometry was in `hello`.
-    pub boot_mem: u64,
     pub block_size: u64,
 
     /// The last guest-initiated id answered.
@@ -32,9 +31,8 @@ pub struct Negotiated {
 
 impl Negotiated {
     #[must_use]
-    pub const fn new(boot_mem: u64, block_size: u64, now: Timestamp) -> Self {
+    pub const fn new(block_size: u64, now: Timestamp) -> Self {
         Self {
-            boot_mem,
             block_size,
             answered: None,
             next_reclaim: 1,
@@ -86,7 +84,7 @@ impl Negotiated {
             guest = ctx.name(said.guest),
             peer = %said.peer,
             id,
-            "a request id that does not follow the last one",
+            "out-of-sequence request id",
         );
         ctx.close(said.guest, said.peer);
 
@@ -107,7 +105,7 @@ impl Negotiated {
             guest = ctx.name(said.guest),
             peer = %said.peer,
             id,
-            "an answer to a reclaim the host never asked for",
+            "reply to a reclaim that was never requested",
         );
         ctx.close(said.guest, said.peer);
 
@@ -124,7 +122,7 @@ impl State for Negotiated {
         warn!(
             guest = ctx.name(said.guest),
             peer = %said.peer,
-            "the guest said hello twice",
+            "duplicate hello",
         );
 
         ctx.close(said.guest, said.peer);
@@ -144,6 +142,16 @@ impl State for Negotiated {
         let Some(next) = self.accepted(ctx, said, id) else {
             return self.stay();
         };
+
+        debug!(
+            guest = ctx.name(said.guest),
+            id,
+            target,
+            ?reason,
+            ?urgency,
+            size = ?ctx.size(said.guest),
+            "a guest asked to grow",
+        );
 
         let ask = match (ctx.ceiling(said.guest), ctx.size(said.guest)) {
             (Some(ceiling), Some(size)) => {
@@ -183,11 +191,24 @@ impl State for Negotiated {
             return self.stay();
         };
 
+        debug!(
+            guest = ctx.name(said.guest),
+            id,
+            releasable,
+            size = ?ctx.size(said.guest),
+            "guest offered memory back",
+        );
+
+        let base = ctx
+            .size(said.guest)
+            .unwrap_or(0)
+            .saturating_sub(ctx.hotplugged(said.guest).unwrap_or(0));
+
         let ask = ctx
             .size(said.guest)
             .ok_or_else(|| ctx.unsized_deny())
             .map(|size| Ask::Release {
-                target: size.saturating_sub(releasable),
+                target: size.saturating_sub(releasable).max(base),
             });
 
         ctx.request(said, id, ask);
@@ -212,7 +233,7 @@ impl State for Negotiated {
 
         info!(
             guest = ctx.name(said.guest),
-            id, will_release, "the guest took on a release"
+            id, will_release, "guest accepted the release"
         );
 
         self.stay()
@@ -229,7 +250,7 @@ impl State for Negotiated {
 
         info!(
             guest = ctx.name(said.guest),
-            id, reason, "the guest refused a release"
+            id, reason, "guest refused the release"
         );
 
         self.stay()
@@ -242,20 +263,18 @@ impl State for Negotiated {
         self.heard = said.now;
         self.status = Some(status);
 
-        ctx.observe_plugged(said.guest, status.plugged);
+        ctx.observe_total_mem(said.guest, status.total_mem);
+        ctx.tell_geometry(said.guest, said.peer);
 
         if returned {
-            info!(
-                guest = ctx.name(said.guest),
-                "the guest is sending status again"
-            );
+            info!(guest = ctx.name(said.guest), "guest resumed sending status");
         }
 
         self.stay()
     }
 
     fn on_bye(self, ctx: &mut Context, said: Said<'_>) -> Phase {
-        debug!(guest = ctx.name(said.guest), peer = %said.peer, "the guest said goodbye");
+        debug!(guest = ctx.name(said.guest), peer = %said.peer, "guest sent goodbye");
 
         ctx.close(said.guest, said.peer);
 
@@ -279,10 +298,10 @@ pub struct Reclaim {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::testing::{BLOCK, BOOT, at};
+    use crate::broker::testing::{BLOCK, at};
 
     fn negotiated() -> Negotiated {
-        Negotiated::new(BOOT, BLOCK, at(0))
+        Negotiated::new(BLOCK, at(0))
     }
 
     #[test]

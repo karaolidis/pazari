@@ -11,9 +11,8 @@ pub fn guest_messages() -> Vec<GuestMessage> {
         GuestMessage::Hello {
             protocol: PROTOCOL_VERSION,
             agent_version: "0.1.0".to_owned(),
-            boot_mem: 2_147_483_648,
             block_size: 134_217_728,
-            plugged: 0,
+            total_mem: 0,
         },
         GuestMessage::GrantRequest {
             id: 1,
@@ -50,7 +49,7 @@ pub fn guest_messages() -> Vec<GuestMessage> {
             reason: "workload working set is pinned".to_owned(),
         },
         GuestMessage::Status(Status {
-            plugged: 4_294_967_296,
+            total_mem: 4_294_967_296,
             available: 1_073_741_824,
             high_events: 12,
             max_events: 0,
@@ -69,9 +68,13 @@ pub fn host_messages() -> Vec<HostMessage> {
             protocol: PROTOCOL_VERSION,
             ceiling: 8_589_934_592,
             status_interval_ms: Duration::from_millis(1000),
+            hotplugged: 133_656_576,
         },
         HostMessage::Ceiling {
             ceiling: 4_294_967_296,
+        },
+        HostMessage::Geometry {
+            hotplugged: 133_656_576,
         },
         HostMessage::Grant {
             id: 1,
@@ -132,22 +135,16 @@ fn millis() -> impl Strategy<Value = Duration> {
 
 pub fn guest_message() -> impl Strategy<Value = GuestMessage> {
     prop_oneof![
-        (
-            any::<u16>(),
-            any::<String>(),
-            any::<u64>(),
-            any::<u64>(),
-            any::<u64>(),
-        )
-            .prop_map(|(protocol, agent_version, boot_mem, block_size, plugged)| {
+        (any::<u16>(), any::<String>(), any::<u64>(), any::<u64>(),).prop_map(
+            |(protocol, agent_version, block_size, total_mem)| {
                 GuestMessage::Hello {
                     protocol,
                     agent_version,
-                    boot_mem,
                     block_size,
-                    plugged,
+                    total_mem,
                 }
-            }),
+            }
+        ),
         (
             any::<u64>(),
             any::<u64>(),
@@ -187,7 +184,7 @@ pub fn guest_message() -> impl Strategy<Value = GuestMessage> {
         )
             .prop_map(
                 |(
-                    plugged,
+                    total_mem,
                     available,
                     high_events,
                     max_events,
@@ -196,7 +193,7 @@ pub fn guest_message() -> impl Strategy<Value = GuestMessage> {
                     swap_used,
                     workload_usage,
                 )| GuestMessage::Status(Status {
-                    plugged,
+                    total_mem,
                     available,
                     high_events,
                     max_events,
@@ -212,16 +209,18 @@ pub fn guest_message() -> impl Strategy<Value = GuestMessage> {
 
 pub fn host_message() -> impl Strategy<Value = HostMessage> {
     prop_oneof![
-        (any::<u16>(), any::<u64>(), millis()).prop_map(
-            |(protocol, ceiling, status_interval_ms)| {
+        (any::<u16>(), any::<u64>(), millis(), any::<u64>()).prop_map(
+            |(protocol, ceiling, status_interval_ms, hotplugged)| {
                 HostMessage::Welcome {
                     protocol,
                     ceiling,
                     status_interval_ms,
+                    hotplugged,
                 }
             }
         ),
         any::<u64>().prop_map(|ceiling| HostMessage::Ceiling { ceiling }),
+        any::<u64>().prop_map(|hotplugged| HostMessage::Geometry { hotplugged }),
         (any::<u64>(), any::<u64>()).prop_map(|(id, target)| HostMessage::Grant { id, target }),
         (any::<u64>(), deny_reason(), prop::option::of(millis())).prop_map(
             |(id, reason, retry_after_ms)| HostMessage::Deny {

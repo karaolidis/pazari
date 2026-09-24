@@ -149,6 +149,7 @@ pub fn sized_with(policy: Policy) -> Broker {
             now: at(0),
             guest: id(cid),
             size: BOOT,
+            hotplugged: 0,
         });
     }
 
@@ -156,15 +157,15 @@ pub fn sized_with(policy: Policy) -> Broker {
 }
 
 pub fn greet(broker: &mut Broker, now: Timestamp, cid: u32) {
-    greet_at(broker, now, cid, BOOT);
+    greet_at(broker, now, cid, BOOT, 0);
 }
 
-pub fn greet_at(broker: &mut Broker, now: Timestamp, cid: u32, plugged: u64) {
+pub fn greet_at(broker: &mut Broker, now: Timestamp, cid: u32, total_mem: u64, hotplugged: u64) {
     connect(broker, now, cid);
 
     assert_eq!(
-        message(broker, now, cid, hello_at(plugged)),
-        vec![welcome(cid, CEILING)],
+        message(broker, now, cid, hello_at(total_mem)),
+        vec![welcome(cid, CEILING, hotplugged)],
     );
 }
 
@@ -172,6 +173,14 @@ pub fn welcomed(cid: u32) -> Broker {
     let mut broker = sized();
 
     greet(&mut broker, at(0), cid);
+
+    broker
+}
+
+pub fn plugged(cid: u32) -> Broker {
+    let mut broker = welcomed(cid);
+
+    sizes(&mut broker, at(1), cid, BOOT + GIB);
 
     broker
 }
@@ -205,6 +214,7 @@ pub fn sizes(broker: &mut Broker, now: Timestamp, cid: u32, size: u64) -> Vec<Ac
         now,
         guest: id(cid),
         size,
+        hotplugged: size.saturating_sub(BOOT),
     })
 }
 
@@ -212,13 +222,12 @@ pub fn hello() -> GuestMessage {
     hello_at(BOOT)
 }
 
-pub fn hello_at(plugged: u64) -> GuestMessage {
+pub fn hello_at(total_mem: u64) -> GuestMessage {
     GuestMessage::Hello {
         protocol: PROTOCOL_VERSION,
         agent_version: "0.1.0".to_owned(),
-        boot_mem: BOOT,
         block_size: BLOCK,
-        plugged,
+        total_mem,
     }
 }
 
@@ -240,31 +249,39 @@ pub const fn release(id: u64, current: u64, releasable: u64) -> GuestMessage {
     }
 }
 
-pub const fn report(plugged: u64, available: u64) -> GuestMessage {
-    GuestMessage::Status(status(plugged, available))
+pub const fn report(total_mem: u64, available: u64) -> GuestMessage {
+    GuestMessage::Status(status(total_mem, available))
 }
 
-pub const fn status(plugged: u64, available: u64) -> Status {
+pub const fn status(total_mem: u64, available: u64) -> Status {
     Status {
-        plugged,
+        total_mem,
         available,
         high_events: 0,
         max_events: 0,
         psi_some10: 0.0,
         psi_full10: 0.0,
         swap_used: 0,
-        workload_usage: plugged.saturating_sub(available),
+        workload_usage: total_mem.saturating_sub(available),
     }
 }
 
-pub fn welcome(cid: u32, ceiling: u64) -> Action {
+pub fn welcome(cid: u32, ceiling: u64, hotplugged: u64) -> Action {
     Action::Send {
         peer: vsock(cid),
         message: HostMessage::Welcome {
             protocol: PROTOCOL_VERSION,
             ceiling,
             status_interval_ms: policy().welcome_status_interval.get(),
+            hotplugged,
         },
+    }
+}
+
+pub fn geometry(cid: u32, hotplugged: u64) -> Action {
+    Action::Send {
+        peer: vsock(cid),
+        message: HostMessage::Geometry { hotplugged },
     }
 }
 
@@ -312,7 +329,7 @@ pub fn view(spec: &GuestSpec, size: u64, requested: Option<u64>) -> GuestView<'_
     GuestView {
         id: GuestId::from_index(0),
         spec,
-        boot_mem: Some(BOOT),
+        hotplugged: Some(0),
         size,
         requested,
         status: None,

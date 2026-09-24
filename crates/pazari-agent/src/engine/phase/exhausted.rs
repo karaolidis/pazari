@@ -1,4 +1,5 @@
 use pazari_types::Timestamp;
+use tracing::warn;
 
 use crate::engine::{
     config::ExhaustionMode,
@@ -24,6 +25,24 @@ impl Exhausted {
             ),
             ExhaustionMode::Kill | ExhaustionMode::Stall { .. } => (Band::Collapsed, None),
         };
+
+        if exhausted_since.is_none() {
+            warn!(
+                usage = ctx.last.workload_usage,
+                total_mem = ctx.limits.total_mem(),
+                ceiling = ?ctx.limits.ceiling(),
+                "workload demand exceeds its ceiling",
+            );
+        }
+
+        if band == Band::Collapsed && ctx.limits.band() != Band::Collapsed {
+            warn!(
+                usage = ctx.last.workload_usage,
+                total_mem = ctx.limits.total_mem(),
+                exhaustion = ?ctx.config.exhaustion,
+                "at the ceiling with nothing left to request; releasing the brake",
+            );
+        }
 
         ctx.apply_limits(band);
 
@@ -56,6 +75,13 @@ impl State for Exhausted {
             && now >= self.since.saturating_add(timeout.get())
             && ctx.limits.band() != Band::Collapsed
         {
+            warn!(
+                usage = ctx.last.workload_usage,
+                total_mem = ctx.limits.total_mem(),
+                ?timeout,
+                "workload stalled for its whole timeout; releasing the brake",
+            );
+
             ctx.apply_limits(Band::Collapsed);
 
             return Phase::Exhausted(Self {
@@ -74,7 +100,7 @@ impl State for Exhausted {
         self.stay()
     }
 
-    fn on_plugged(self, ctx: &mut Context, now: Timestamp, changed: bool) -> Phase {
+    fn on_total_changed(self, ctx: &mut Context, now: Timestamp, changed: bool) -> Phase {
         if changed {
             return Steady::settle(ctx, now);
         }
@@ -191,9 +217,9 @@ mod tests {
         );
 
         assert_eq!(
-            engine.handle(Event::PluggedChanged {
+            engine.handle(Event::TotalChanged {
                 now: at(202),
-                plugged: 2560 * MIB,
+                total_mem: 2560 * MIB,
             }),
             vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
         );
@@ -217,9 +243,9 @@ mod tests {
         assert_eq!(engine.mode(), Mode::Exhausted);
 
         assert_eq!(
-            engine.handle(Event::PluggedChanged {
+            engine.handle(Event::TotalChanged {
                 now: at(200),
-                plugged: 2560 * MIB,
+                total_mem: 2560 * MIB,
             }),
             vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
         );

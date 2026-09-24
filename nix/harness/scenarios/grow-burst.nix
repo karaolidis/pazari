@@ -28,7 +28,7 @@
         guest = run.guest
 
         size = run.daemon.gauge("pazarid_guest_size_bytes", guest.labels)
-        plugged = guest.agent.gauge("pazari_agent_plugged_bytes")
+        plugged = guest.agent.gauge("pazari_agent_total_mem_bytes")
 
         grew(run, guest, size)
         followed(guest, plugged + BLOCK)

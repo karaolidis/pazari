@@ -9,7 +9,7 @@ pub(crate) mod fixtures;
 /// One reading of the guest's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Status {
-    pub plugged: u64,
+    pub total_mem: u64,
     pub available: u64,
     pub high_events: u64,
     pub max_events: u64,
@@ -25,9 +25,8 @@ pub enum GuestMessage {
     Hello {
         protocol: u16,
         agent_version: String,
-        boot_mem: u64,
         block_size: u64,
-        plugged: u64,
+        total_mem: u64,
     },
 
     GrantRequest {
@@ -98,10 +97,15 @@ pub enum HostMessage {
         ceiling: u64,
         #[serde_as(as = "DurationMilliSeconds<u64>")]
         status_interval_ms: Duration,
+        hotplugged: u64,
     },
 
     Ceiling {
         ceiling: u64,
+    },
+
+    Geometry {
+        hotplugged: u64,
     },
 
     Grant {
@@ -211,14 +215,14 @@ mod tests {
     fn guest_messages_match_their_golden_lines() {
         let messages = guest_messages();
         let expected = [
-            r#"{"type":"hello","protocol":1,"agent_version":"0.1.0","boot_mem":2147483648,"block_size":134217728,"plugged":0}"#,
+            r#"{"type":"hello","protocol":1,"agent_version":"0.1.0","block_size":134217728,"total_mem":0}"#,
             r#"{"type":"grant_request","id":1,"current":2147483648,"target":4294967296,"reason":"throttle","urgency":"high"}"#,
             r#"{"type":"grant_request","id":2,"current":2147483648,"target":3221225472,"reason":"preflight","urgency":"low"}"#,
             r#"{"type":"grant_request","id":3,"current":2147483648,"target":3221225472,"reason":"manual","urgency":"low"}"#,
             r#"{"type":"offer_release","id":4,"current":4294967296,"releasable":1073741824}"#,
             r#"{"type":"reclaim_ack","id":7,"will_release":536870912}"#,
             r#"{"type":"reclaim_nak","id":8,"reason":"workload working set is pinned"}"#,
-            r#"{"type":"status","plugged":4294967296,"available":1073741824,"high_events":12,"max_events":0,"psi_some10":12.5,"psi_full10":0.25,"swap_used":0,"workload_usage":3221225472}"#,
+            r#"{"type":"status","total_mem":4294967296,"available":1073741824,"high_events":12,"max_events":0,"psi_some10":12.5,"psi_full10":0.25,"swap_used":0,"workload_usage":3221225472}"#,
             r#"{"type":"bye"}"#,
         ];
 
@@ -232,8 +236,9 @@ mod tests {
     fn host_messages_match_their_golden_lines() {
         let messages = host_messages();
         let expected = [
-            r#"{"type":"welcome","protocol":1,"ceiling":8589934592,"status_interval_ms":1000}"#,
+            r#"{"type":"welcome","protocol":1,"ceiling":8589934592,"status_interval_ms":1000,"hotplugged":133656576}"#,
             r#"{"type":"ceiling","ceiling":4294967296}"#,
+            r#"{"type":"geometry","hotplugged":133656576}"#,
             r#"{"type":"grant","id":1,"target":3221225472}"#,
             r#"{"type":"deny","id":2,"reason":"host_pressure","retry_after_ms":5000}"#,
             r#"{"type":"deny","id":3,"reason":"ceiling"}"#,

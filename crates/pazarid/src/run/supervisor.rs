@@ -5,7 +5,7 @@ use tokio::{
     sync::{mpsc, watch},
     time::sleep,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     broker::{Event, GuestId},
@@ -89,9 +89,7 @@ impl<C: Connect> Supervisor<C> {
         let device = match self.connect.connect().await {
             Ok(device) => device,
             Err(error) => {
-                return self
-                    .retry("failed to open the guest's memory device", &error)
-                    .await;
+                return self.retry("failed to open the memory device", &error).await;
             }
         };
 
@@ -106,15 +104,13 @@ impl<C: Connect> Supervisor<C> {
             Err(error) => {
                 self.metrics.seed_failed();
 
-                return self
-                    .retry("failed to read the guest's memory size", &error)
-                    .await;
+                return self.retry("failed to read the memory size", &error).await;
             }
         }
 
         self.backoff.reset();
 
-        info!(guest = %self.name, "the guest's memory device answered");
+        info!(guest = %self.name, "memory device responded");
 
         self.serve(&driver).await
     }
@@ -135,14 +131,14 @@ impl<C: Connect> Supervisor<C> {
                     }
                 }
                 Step::Sized(Err(error)) => {
-                    return self
-                        .retry("the guest's memory device stopped answering", &error)
-                        .await;
+                    return self.retry("memory device stopped responding", &error).await;
                 }
                 Step::Target => {
                     let Some(bytes) = *self.targets.borrow_and_update() else {
                         continue;
                     };
+
+                    debug!(guest = %self.name, bytes, "resizing the memory device");
 
                     if let Err(error) = driver.actuator().set_requested(bytes).await {
                         self.metrics.refused();
@@ -151,7 +147,7 @@ impl<C: Connect> Supervisor<C> {
                             guest = %self.name,
                             bytes,
                             %error,
-                            "failed to resize the guest; leaving it to reconciliation",
+                            "resize failed; deferring to reconciliation",
                         );
                     }
                 }
@@ -163,7 +159,7 @@ impl<C: Connect> Supervisor<C> {
     async fn retry(&mut self, what: &'static str, error: &RuntimeError) -> bool {
         let delay = self.backoff.delay();
 
-        warn!(guest = %self.name, %error, ?delay, "{what}; trying again");
+        warn!(guest = %self.name, %error, ?delay, "{what}; retrying");
 
         sleep(delay).await;
 
@@ -189,6 +185,7 @@ mod tests {
     use crate::{
         broker::testing::{BOOT, GIB, MIB, ONE, id},
         run::metrics::Observer,
+        runtime::Reading,
     };
 
     const GROWN: u64 = 3072 * MIB;
@@ -308,7 +305,7 @@ mod tests {
     }
 
     impl Actuator for Socket {
-        fn size(&self) -> impl Future<Output = Result<u64, RuntimeError>> + Send {
+        fn reading(&self) -> impl Future<Output = Result<Reading, RuntimeError>> + Send {
             let mut state = self.locked();
 
             let blind = state.blindness > 0;
@@ -323,7 +320,7 @@ mod tests {
             future::ready(if blind {
                 Err(failed("the socket will not say what size it is"))
             } else {
-                Ok(size)
+                Ok(Reading::sized(size, BOOT))
             })
         }
 
@@ -348,14 +345,14 @@ mod tests {
             })
         }
 
-        async fn changed(&self) -> Result<u64, RuntimeError> {
+        async fn changed(&self) -> Result<Reading, RuntimeError> {
             let mut pending = self.pending.lock().await;
 
             match pending.recv().await {
                 Some(Ok(size)) => {
                     self.locked().size = size;
 
-                    Ok(size)
+                    Ok(Reading::sized(size, BOOT))
                 }
                 Some(Err(())) => Err(failed("the socket closed")),
                 None => future::pending().await,

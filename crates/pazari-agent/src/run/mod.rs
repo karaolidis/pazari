@@ -27,6 +27,13 @@ use crate::{
 pub async fn run(config: Config) -> Result<(), RunError> {
     let clock = Clock::start();
 
+    debug!(
+        engine = ?config.engine,
+        runtime = ?config.runtime,
+        session = ?config.session,
+        "resolved settings",
+    );
+
     let report = Preflight::new(&config.runtime).run(config.engine.reclaim_swappiness);
 
     if !report.passed() {
@@ -35,7 +42,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
 
     for check in report.checks() {
         if check.severity == Severity::Warn {
-            warn!(%check, "the guest is not set up the way the agent wants");
+            warn!(%check, "preflight warning");
         } else {
             debug!(%check, "preflight");
         }
@@ -43,19 +50,16 @@ pub async fn run(config: Config) -> Result<(), RunError> {
 
     let topology = Topology::new(&config.runtime.paths);
     let block_size = topology.block_size().await?;
-    let plugged = topology.plugged().await?;
+    let total_mem = topology.total_mem().await?;
 
     let boot = BootInfo {
-        boot_mem: config.runtime.boot_mem,
         block_size,
-        plugged,
+        total_mem,
     };
 
     info!(
-        boot_mem = boot.boot_mem.get(),
         block_size = boot.block_size.get(),
-        plugged,
-        "the guest's memory geometry"
+        total_mem, "guest memory geometry"
     );
 
     let (mut engine, actions) = Engine::try_new(config.engine, boot)?;
@@ -65,7 +69,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
             let (observer, published) = Observer::new();
             let exposition = Exposition::bind(address, published).await?;
 
-            info!(%address, "the agent is serving metrics");
+            info!(%address, "serving metrics");
 
             (observer, Some(exposition))
         }
@@ -78,7 +82,10 @@ pub async fn run(config: Config) -> Result<(), RunError> {
 
     applier
         .apply(actions, &mut |message| {
-            warn!(?message, "the engine spoke before the session opened");
+            warn!(
+                ?message,
+                "engine emitted a message before the session opened"
+            );
         })
         .await?;
 
@@ -90,14 +97,13 @@ pub async fn run(config: Config) -> Result<(), RunError> {
     let mut throttle = ThrottleWatcher::open(&config.runtime.cgroup, clock)?;
     let hotplug = HotplugListener::bind(topology, config.runtime.hotplug_debounce, clock)?;
 
-    let (plugged, latest) = watch::channel(plugged);
+    let (total_mem, latest) = watch::channel(total_mem);
 
     let (mut session, outbound) = Session::spawn(
         config.session,
         Geometry {
-            boot_mem: config.runtime.boot_mem,
             block_size,
-            plugged: latest,
+            total_mem: latest,
         },
         clock,
     );
@@ -116,7 +122,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
     let mut notifier = Notifier::new();
     notifier.ready();
 
-    info!("the agent is running");
+    info!("agent started");
 
     loop {
         let step = tokio::select! {
@@ -148,7 +154,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
         observer.refresh(&engine);
         observer.observe_actions(&actions);
 
-        plugged.send_replace(engine.plugged());
+        total_mem.send_replace(engine.total_mem());
 
         applier
             .apply(actions, &mut |message| outbound.send(message))
@@ -268,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn the_brake_is_released_on_whatever_cgroup_the_file_named() {
         let dir = cgroup_dir();
-        let config = RuntimeConfig::new(dir.path(), bytes(BOOT));
+        let config = RuntimeConfig::new(dir.path());
 
         fs::write(dir.path().join(MEMORY_HIGH), "1073741824\n").expect("a starting limit");
 
@@ -280,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn releasing_a_brake_that_is_already_off_is_still_a_release() {
         let dir = cgroup_dir();
-        let config = RuntimeConfig::new(dir.path(), bytes(BOOT));
+        let config = RuntimeConfig::new(dir.path());
 
         panic_open(&config).await.expect("the brake comes off");
         panic_open(&config).await.expect("and stays off");
@@ -291,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn a_cgroup_that_is_not_there_is_reported() {
         let dir = TempDir::new().expect("a temporary directory");
-        let config = RuntimeConfig::new(dir.path().join("absent"), bytes(BOOT));
+        let config = RuntimeConfig::new(dir.path().join("absent"));
 
         let error = panic_open(&config)
             .await
@@ -307,7 +313,7 @@ mod tests {
     async fn a_brake_stops_the_release_that_is_taking_the_memory_away() {
         let clock = Clock::start();
         let dir = cgroup_dir();
-        let runtime = RuntimeConfig::new(dir.path(), bytes(BOOT));
+        let runtime = RuntimeConfig::new(dir.path());
 
         let cgroup = Arc::new(AnyCgroup::open(&runtime).await.expect("a cgroupfs adapter"));
         let mut applier = Applier::new(cgroup, runtime.reclaim_chunk, clock);
@@ -368,15 +374,14 @@ mod tests {
 
         let listener = UnixListener::bind(&path).expect("a bound listener");
 
-        let runtime = RuntimeConfig::new(dir.path(), bytes(BOOT));
+        let runtime = RuntimeConfig::new(dir.path());
         let cgroup = Arc::new(AnyCgroup::open(&runtime).await.expect("a cgroupfs adapter"));
 
         let (mut engine, actions) = Engine::try_new(
             engine_config(),
             BootInfo {
-                boot_mem: bytes(BOOT),
                 block_size: bytes(BLOCK),
-                plugged: BOOT,
+                total_mem: BOOT,
             },
         )
         .expect("a workable boot");
@@ -395,7 +400,7 @@ mod tests {
         );
         assert_eq!(read(dir.path(), "memory.oom.group"), "1");
 
-        let (plugged, latest) = watch::channel(BOOT);
+        let (total_mem, latest) = watch::channel(BOOT);
 
         let (mut session, outbound) = Session::spawn(
             SessionConfig {
@@ -405,9 +410,8 @@ mod tests {
                 reconnect_max: Interval::try_new(Duration::from_millis(5)).expect("a tick"),
             },
             Geometry {
-                boot_mem: bytes(BOOT),
                 block_size: bytes(BLOCK),
-                plugged: latest,
+                total_mem: latest,
             },
             clock,
         );
@@ -425,13 +429,14 @@ mod tests {
             protocol: PROTOCOL_VERSION,
             ceiling: CEILING,
             status_interval_ms: Duration::from_millis(1),
+            hotplugged: 0,
         })
         .await
         .expect("a writable connection");
 
         let drive = async |event: Event, engine: &mut Engine, applier: &mut Applier<_>| {
             let actions = engine.handle(event);
-            plugged.send_replace(engine.plugged());
+            total_mem.send_replace(engine.total_mem());
             applier
                 .apply(actions, &mut |message| outbound.send(message))
                 .await
@@ -449,7 +454,10 @@ mod tests {
         assert!(
             matches!(
                 hear(&mut host).await,
-                GuestMessage::Status(Status { plugged: BOOT, .. })
+                GuestMessage::Status(Status {
+                    total_mem: BOOT,
+                    ..
+                })
             ),
             "the engine did not greet the host with its state"
         );
@@ -458,7 +466,7 @@ mod tests {
             Event::Tick {
                 now: clock.now(),
                 snapshot: Snapshot {
-                    plugged: BOOT,
+                    total_mem: BOOT,
                     workload_usage: 1200 * MIB,
                     available: BOOT - 1200 * MIB,
                     ..Snapshot::default()

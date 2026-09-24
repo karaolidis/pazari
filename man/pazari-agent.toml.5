@@ -215,6 +215,9 @@ what is wanted: a workload between two bursts looks idle for a moment.
 How much one offer to release hands back.
 Must be greater than zero; the default is
 .Cm 256MiB .
+.Pp
+No offer, and no answer to a host's reclaim goes past the memory the guest
+booted with.
 .It Cm shrink_cooldown No = Ar duration
 How long after a release before another one is allowed.
 Zero is legal here; the default is
@@ -337,12 +340,6 @@ Getting a containerised workload into it is not always a matter of naming the
 slice;
 .Xr pazari 7
 says where it goes wrong.
-.It Cm boot_mem No = Ar size
-What the guest booted with, excluding anything hot-plugged.
-Required; must be greater than zero.
-.Pp
-This is what the agent tells the host it started from, and the floor it will
-never offer memory back past.
 .It Cm hotplug_debounce No = Ar duration
 How long the hot-plug listener waits for one resize's uevent burst to end
 before it re-reads
@@ -473,6 +470,8 @@ How long to wait for the host's
 before giving up on the connection.
 The default is
 .Cm 10s .
+.Pp
+A daemon that has only just started may take a moment to answer.
 .It Cm reconnect_min No = Ar duration
 The first reconnect delay.
 The default is
@@ -667,12 +666,10 @@ The agent runs the checks of
 before it starts, and refuses to run if any of them fails.
 A warning does not stop it.
 .Pp
-Three further checks are made once the guest's memory geometry has been read,
-and each is fatal:
+Two further checks are made once the guest's memory geometry has been read, and
+each is fatal:
 .Va MemTotal
-must not be below
-.Cm runtime.boot_mem ;
-it must cover
+must cover
 .Cm service_reserve
 plus
 .Cm burst_reserve
@@ -694,7 +691,7 @@ Gauges:
 and
 .Va memory_max_bytes ,
 the limits as last written;
-.Va plugged_bytes ,
+.Va total_mem_bytes ,
 the guest's
 .Va MemTotal ;
 .Va ceiling_bytes ,
@@ -764,7 +761,6 @@ timeout = "300s"
 
 [runtime]
 cgroup = "/sys/fs/cgroup/workload.slice"
-boot_mem = "2GiB"
 
 [runtime.backend]
 kind = "systemd"

@@ -12,7 +12,7 @@ use pazari_types::{MemInfo, Pressure};
 use tokio::task;
 
 use crate::runtime::{
-    actuator::Actuator,
+    actuator::{Actuator, Reading},
     error::RuntimeError,
     memory::{self, HostMemory},
 };
@@ -52,8 +52,9 @@ struct State {
     completed: VecDeque<u64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MockActuator {
+    base: u64,
     completion: Completion,
     refuse: bool,
     state: Mutex<State>,
@@ -63,12 +64,14 @@ impl MockActuator {
     #[must_use]
     pub fn new(size: u64) -> Self {
         Self {
+            base: size,
+            completion: Completion::Immediate,
+            refuse: false,
             state: Mutex::new(State {
                 size,
                 requested: size,
                 ..State::default()
             }),
-            ..Self::default()
         }
     }
 
@@ -130,8 +133,10 @@ impl MockActuator {
 }
 
 impl Actuator for MockActuator {
-    fn size(&self) -> impl Future<Output = Result<u64, RuntimeError>> + Send {
-        future::ready(Ok(self.locked().size))
+    fn reading(&self) -> impl Future<Output = Result<Reading, RuntimeError>> + Send {
+        let size = self.locked().size;
+
+        future::ready(Ok(Reading::sized(size, self.base)))
     }
 
     fn requested(&self) -> impl Future<Output = Result<u64, RuntimeError>> + Send {
@@ -142,12 +147,12 @@ impl Actuator for MockActuator {
         future::ready(self.write(bytes))
     }
 
-    async fn changed(&self) -> Result<u64, RuntimeError> {
+    async fn changed(&self) -> Result<Reading, RuntimeError> {
         loop {
             if let Some(size) = self.take() {
                 task::yield_now().await;
 
-                return Ok(size);
+                return Ok(Reading::sized(size, self.base));
             }
 
             future::pending::<()>().await;

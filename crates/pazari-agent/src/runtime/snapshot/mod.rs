@@ -28,7 +28,7 @@ impl<C: Cgroup> Snapshots<C> {
         let pressure = self.cgroup.pressure().await?;
 
         Ok(Snapshot {
-            plugged: meminfo.total,
+            total_mem: meminfo.total,
             available: meminfo.available,
             workload_usage: self.cgroup.current().await?,
             swap_used: self.cgroup.swap_current().await?,
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(
             snapshot,
             Snapshot {
-                plugged: 2_096_756 * 1024,
+                total_mem: 2_096_756 * 1024,
                 available: 1_729_396 * 1024,
                 workload_usage: 1_610_612_736,
                 swap_used: 65_536,

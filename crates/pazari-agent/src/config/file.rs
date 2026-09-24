@@ -242,10 +242,6 @@ pub struct RuntimeSection {
     #[doku(example = "/sys/fs/cgroup/workload.slice")]
     cgroup: PathBuf,
 
-    /// What the guest booted with, excluding anything hot-plugged. Set me.
-    #[doku(as = "String", example = "2GiB")]
-    boot_mem: ByteSize,
-
     /// How long the hotplug listener waits for one resize's uevent to end.
     #[serde_inline_default(Duration::from_millis(250))]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
@@ -279,10 +275,7 @@ impl RuntimeSection {
             reclaim_chunk: NonZeroU64::new(self.reclaim_chunk.as_u64())
                 .bytes("runtime.reclaim_chunk")?,
             thp_always_fatal: self.thp_always_fatal,
-            ..RuntimeConfig::new(
-                self.cgroup,
-                NonZeroU64::new(self.boot_mem.as_u64()).bytes("runtime.boot_mem")?,
-            )
+            ..RuntimeConfig::new(self.cgroup)
         })
     }
 }

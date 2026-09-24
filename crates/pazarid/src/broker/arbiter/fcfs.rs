@@ -29,11 +29,9 @@ impl Arbiter for Fcfs {
         let mut most: Option<(GuestId, u64)> = None;
 
         for candidate in candidates {
-            let Some(boot_mem) = candidate.boot_mem else {
+            let Some(over) = candidate.hotplugged else {
                 continue;
             };
-
-            let over = candidate.size.saturating_sub(boot_mem);
 
             if over > 0 && most.is_none_or(|(_, held)| over > held) {
                 most = Some((candidate.id, over));
@@ -361,12 +359,13 @@ mod tests {
         GuestView {
             id: GuestId::from_index(index),
             size,
+            hotplugged: Some(size.saturating_sub(BOOT)),
             ..view(spec, size, None)
         }
     }
 
     #[test]
-    fn revocation_takes_from_the_guest_furthest_over_its_boot() {
+    fn revocation_takes_from_the_guest_holding_the_most_hot_plugged() {
         let spec = guest("one", CEILING);
         let candidates = [
             candidate(&spec, 0, BOOT + 64 * MIB),
@@ -405,10 +404,10 @@ mod tests {
     }
 
     #[test]
-    fn a_candidate_without_a_boot_memory_is_passed_over() {
+    fn a_candidate_whose_device_has_not_reported_is_passed_over() {
         let spec = guest("one", CEILING);
         let unsettled = GuestView {
-            boot_mem: None,
+            hotplugged: None,
             ..candidate(&spec, 0, BOOT + GIB)
         };
 

@@ -95,6 +95,14 @@ in
       '';
     };
 
+    logLevel = lib.mkOption {
+      type = lib.types.str;
+      default = "debug";
+      description = ''
+        `RUST_LOG` for the agent and the workload under it.
+      '';
+    };
+
     share = {
       tag = lib.mkOption {
         type = lib.types.str;
@@ -318,6 +326,8 @@ in
     };
 
     systemd = {
+      slices.system.sliceConfig.MemoryMin = "192M";
+
       network.networks."10-user" = {
         matchConfig.MACAddress = mac;
         address = [ "${address}/24" ];
@@ -368,6 +378,7 @@ in
             StandardOutput = "file:${cfg.share.mountPoint}/${cfg.workload.log}";
             StandardError = "journal";
             SyslogIdentifier = cfg.workload.unit;
+            Environment = [ "RUST_LOG=${cfg.logLevel}" ];
             Restart = "no";
           };
         };
@@ -378,17 +389,14 @@ in
       enable = true;
 
       inherit (cfg.workload) slice;
-      inherit (cfg) metricsPort;
+      inherit (cfg) metricsPort logLevel;
 
       openFirewall = true;
-      systemMemoryMin = "192M";
 
       settings = {
         tick_interval = "500ms";
 
         engine = engine // cfg.engine;
-
-        runtime.boot_mem = "${toString config.microvm.mem}MiB";
 
         transport = {
           kind = "vsock";

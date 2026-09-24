@@ -26,6 +26,7 @@ pub enum Event {
         now: Timestamp,
         guest: GuestId,
         size: u64,
+        hotplugged: u64,
     },
 
     HostAvailable {

@@ -46,6 +46,15 @@ in
       };
     };
 
+    logLevel = lib.mkOption {
+      type = lib.types.str;
+      default = "info";
+      example = "pazari_agent=debug";
+      description = ''
+        `RUST_LOG` for the agent.
+      '';
+    };
+
     metricsPort = lib.mkOption {
       type = lib.types.nullOr lib.types.port;
       default = null;
@@ -62,16 +71,6 @@ in
       '';
     };
 
-    systemMemoryMin = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "256M";
-      description = ''
-        `MemoryMin` for `system.slice`, i.e. what the kernel reclaims from the
-        guest's own services only as a last resort.
-      '';
-    };
-
     settings = lib.mkOption {
       type = format.type;
       default = { };
@@ -81,8 +80,6 @@ in
           burst_reserve = "256MiB";
           open_guard = "64MiB";
         };
-
-        runtime.boot_mem = "2GiB";
 
         transport.kind = "vsock";
       };
@@ -137,12 +134,6 @@ in
             ManagedOOMPreference = lib.mkDefault "omit";
           };
         };
-      }
-      // lib.optionalAttrs (cfg.systemMemoryMin != null) {
-        system = {
-          overrideStrategy = "asDropin";
-          sliceConfig.MemoryMin = cfg.systemMemoryMin;
-        };
       };
 
       services.pazari-agent = {
@@ -161,6 +152,7 @@ in
           RestartSec = "5s";
           Slice = "system.slice";
           SyslogIdentifier = "pazari-agent";
+          Environment = [ "RUST_LOG=${cfg.logLevel}" ];
 
           NoNewPrivileges = true;
           ProtectSystem = "strict";

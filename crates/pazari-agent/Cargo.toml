@@ -34,7 +34,6 @@ thiserror = "2.0.20"
 tokio = { version = "1.53.1", default-features = false, features = ["rt", "time", "sync", "net", "fs", "io-util", "macros", "signal"] }
 toml = "1.1.6"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]

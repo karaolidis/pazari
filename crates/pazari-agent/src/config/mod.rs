@@ -77,7 +77,6 @@ mod tests {
 
         [runtime]
         cgroup = "/sys/fs/cgroup/system.slice/workload.service"
-        boot_mem = "4GiB"
         hotplug_debounce = "1s"
         reclaim_chunk = "16MiB"
         thp_always_fatal = false
@@ -102,7 +101,6 @@ mod tests {
 
         [runtime]
         cgroup = "/sys/fs/cgroup/workload.slice"
-        boot_mem = "2GiB"
 
         [transport]
         kind = "vsock"
@@ -228,10 +226,7 @@ mod tests {
                 hotplug_debounce: interval(Duration::from_secs(1)),
                 reclaim_chunk: bytes(16 * MIB),
                 thp_always_fatal: false,
-                ..RuntimeConfig::new(
-                    "/sys/fs/cgroup/system.slice/workload.service",
-                    bytes(4096 * MIB)
-                )
+                ..RuntimeConfig::new("/sys/fs/cgroup/system.slice/workload.service")
             }
         );
 
@@ -252,7 +247,7 @@ mod tests {
 
         assert_eq!(
             config.runtime,
-            RuntimeConfig::new("/sys/fs/cgroup/workload.slice", bytes(2048 * MIB)),
+            RuntimeConfig::new("/sys/fs/cgroup/workload.slice"),
             "the runtime defaults have drifted from RuntimeConfig::new"
         );
 
@@ -310,8 +305,8 @@ mod tests {
     #[test]
     fn a_malformed_duration_names_the_field_that_carries_it() {
         let error = rejects(&MINIMAL.replace(
-            r#"boot_mem = "2GiB""#,
-            "boot_mem = \"2GiB\"\nhotplug_debounce = \"3 fortnights\"",
+            r#"cgroup = "/sys/fs/cgroup/workload.slice""#,
+            "cgroup = \"/sys/fs/cgroup/workload.slice\"\nhotplug_debounce = \"3 fortnights\"",
         ));
 
         assert!(
@@ -322,9 +317,12 @@ mod tests {
 
     #[test]
     fn a_malformed_size_names_the_field_that_carries_it() {
-        let error = rejects(&MINIMAL.replace(r#"boot_mem = "2GiB""#, r#"boot_mem = "2 lorries""#));
+        let error = rejects(&MINIMAL.replace(
+            r#"burst_reserve = "256MiB""#,
+            r#"burst_reserve = "2 lorries""#,
+        ));
 
-        assert!(error.contains("boot_mem"), "unexpected error: {error}");
+        assert!(error.contains("burst_reserve"), "unexpected error: {error}");
     }
 
     #[test]

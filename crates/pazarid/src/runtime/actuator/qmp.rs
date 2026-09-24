@@ -16,7 +16,7 @@ use tokio::{
 use tracing::debug;
 
 use crate::runtime::{
-    actuator::Actuator,
+    actuator::{Actuator, Reading},
     error::RuntimeError,
     qmp::{
         Endpoint, Held, MemoryDevice, MemorySummary, QOM_GET, QOM_SET, QUERY_DEVICES,
@@ -175,49 +175,47 @@ impl QmpActuator {
         read(&mut self.wire().await?, &self.qom, property, self.deadline).await
     }
 
-    fn report(&self, size: u64) -> Option<u64> {
-        (self.last.swap(size, Ordering::Relaxed) != size).then_some(size)
+    fn report(&self, hotplugged: u64) -> Option<Reading> {
+        let reading = Reading::plugged(self.boot(), hotplugged);
+
+        (self.last.swap(reading.size, Ordering::Relaxed) != reading.size).then_some(reading)
     }
 
-    async fn resampled(&self, poll: Interval) -> Result<u64, RuntimeError> {
+    async fn resampled(&self, poll: Interval) -> Result<Reading, RuntimeError> {
         loop {
-            if let Some(size) = self.report(self.size().await?) {
-                return Ok(size);
+            if let Some(reading) = self.report(self.property(SIZE).await?) {
+                return Ok(reading);
             }
 
             sleep(poll.get()).await;
         }
     }
 
-    async fn awaited(&self) -> Result<u64, RuntimeError> {
+    async fn awaited(&self) -> Result<Reading, RuntimeError> {
         loop {
             let mut client = self.client().await?;
             let mut sizes = client.watch();
 
-            let sampled = self
-                .boot()
-                .saturating_add(read(&mut client, &self.qom, SIZE, self.deadline).await?);
+            let sampled = read(&mut client, &self.qom, SIZE, self.deadline).await?;
 
-            if let Some(size) = self.report(sampled) {
-                return Ok(size);
+            if let Some(reading) = self.report(sampled) {
+                return Ok(reading);
             }
 
-            let raised = self
-                .boot()
-                .saturating_add(client.changed(&mut sizes).await?);
+            let raised = client.changed(&mut sizes).await?;
 
-            if let Some(size) = self.report(raised) {
-                return Ok(size);
+            if let Some(reading) = self.report(raised) {
+                return Ok(reading);
             }
         }
     }
 }
 
 impl Actuator for QmpActuator {
-    async fn size(&self) -> Result<u64, RuntimeError> {
-        let size = self.property(SIZE).await?;
+    async fn reading(&self) -> Result<Reading, RuntimeError> {
+        let hotplugged = self.property(SIZE).await?;
 
-        Ok(self.boot().saturating_add(size))
+        Ok(Reading::plugged(self.boot(), hotplugged))
     }
 
     async fn requested(&self) -> Result<u64, RuntimeError> {
@@ -248,7 +246,7 @@ impl Actuator for QmpActuator {
         }
     }
 
-    async fn changed(&self) -> Result<u64, RuntimeError> {
+    async fn changed(&self) -> Result<Reading, RuntimeError> {
         match self.mode {
             Mode::Held => self.awaited().await,
             Mode::PerOperation { poll } => self.resampled(poll).await,
@@ -455,7 +453,7 @@ mod tests {
         ])
         .await;
 
-        assert_eq!(actuator.size().await.unwrap(), BOOT + 1024 * MIB);
+        assert_eq!(actuator.reading().await.unwrap().size, BOOT + 1024 * MIB);
         assert_eq!(actuator.requested().await.unwrap(), BOOT + 1536 * MIB);
 
         assert_eq!(
@@ -589,7 +587,10 @@ mod tests {
             .await
             .expect("the device is there");
 
-        let error = actuator.size().await.expect_err("the server never answers");
+        let error = actuator
+            .reading()
+            .await
+            .expect_err("the server never answers");
 
         assert_eq!(
             error.to_string(),
@@ -611,9 +612,12 @@ mod tests {
             .await
             .expect("the device is there");
 
-        actuator.size().await.expect_err("the server never answers");
+        actuator
+            .reading()
+            .await
+            .expect_err("the server never answers");
 
-        assert_eq!(actuator.size().await.unwrap(), BOOT + 256 * MIB);
+        assert_eq!(actuator.reading().await.unwrap().size, BOOT + 256 * MIB);
         assert_eq!(server.connections(), 1);
         assert_eq!(server.commands().len(), STARTUP.len() + 2);
     }
@@ -629,7 +633,7 @@ mod tests {
 
         actuator.set_requested(BOOT + 1024 * MIB).await.unwrap();
 
-        assert_eq!(actuator.changed().await.unwrap(), BOOT + 1024 * MIB);
+        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 1024 * MIB);
     }
 
     #[tokio::test]
@@ -640,7 +644,7 @@ mod tests {
         ])
         .await;
 
-        assert_eq!(actuator.changed().await.unwrap(), BOOT + 2048 * MIB);
+        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 2048 * MIB);
     }
 
     #[tokio::test]
@@ -652,8 +656,8 @@ mod tests {
         ])
         .await;
 
-        assert_eq!(actuator.changed().await.unwrap(), BOOT + 256 * MIB);
-        assert_eq!(actuator.changed().await.unwrap(), BOOT + 512 * MIB);
+        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 256 * MIB);
+        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 512 * MIB);
     }
 
     #[tokio::test]
@@ -667,7 +671,7 @@ mod tests {
         ])
         .await;
 
-        assert_eq!(actuator.size().await.unwrap(), BOOT);
+        assert_eq!(actuator.reading().await.unwrap().size, BOOT);
 
         assert!(
             timeout(QUIET, actuator.changed()).await.is_err(),
@@ -693,7 +697,7 @@ mod tests {
             format!("the QMP connection to {} closed", server.path().display())
         );
 
-        assert_eq!(actuator.size().await.unwrap(), BOOT + 256 * MIB);
+        assert_eq!(actuator.reading().await.unwrap().size, BOOT + 256 * MIB);
         assert_eq!(server.connections(), 2);
         assert_eq!(
             server.commands(),
@@ -721,9 +725,12 @@ mod tests {
         let server = FakeQmp::start([first, second]);
         let actuator = open(&server, Mode::Held).await;
 
-        actuator.size().await.expect_err("the server hung up");
+        actuator.reading().await.expect_err("the server hung up");
 
-        assert_eq!(actuator.size().await.unwrap(), BOOT + 512 * MIB + 256 * MIB);
+        assert_eq!(
+            actuator.reading().await.unwrap().size,
+            BOOT + 512 * MIB + 256 * MIB
+        );
         assert_eq!(actuator.boot(), BOOT + 512 * MIB);
     }
 
@@ -740,7 +747,7 @@ mod tests {
 
         actuator.changed().await.expect_err("the server hung up");
 
-        assert_eq!(actuator.changed().await.unwrap(), BOOT + 1024 * MIB);
+        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 1024 * MIB);
         assert_eq!(server.connections(), 2);
     }
 
@@ -765,7 +772,7 @@ mod tests {
         settled(&server, STARTUP.len() + 1).await;
 
         let error = actuator
-            .size()
+            .reading()
             .await
             .expect_err("the reply is over the cap");
 
@@ -795,7 +802,7 @@ mod tests {
 
         let actuator = open(&server, polling()).await;
 
-        assert_eq!(actuator.size().await.unwrap(), BOOT + 256 * MIB);
+        assert_eq!(actuator.reading().await.unwrap().size, BOOT + 256 * MIB);
         actuator.set_requested(BOOT + 512 * MIB).await.unwrap();
 
         assert_eq!(server.connections(), 3);
@@ -825,7 +832,7 @@ mod tests {
 
         let actuator = open(&server, polling()).await;
 
-        assert_eq!(actuator.changed().await.unwrap(), BOOT + 768 * MIB);
+        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 768 * MIB);
         assert_eq!(server.connections(), 4);
     }
 
@@ -839,8 +846,8 @@ mod tests {
 
         let actuator = open(&server, polling()).await;
 
-        assert_eq!(actuator.changed().await.unwrap(), BOOT + 256 * MIB);
-        assert_eq!(actuator.changed().await.unwrap(), BOOT + 512 * MIB);
+        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 256 * MIB);
+        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 512 * MIB);
         assert_eq!(server.connections(), 3);
     }
 
@@ -852,7 +859,7 @@ mod tests {
         let actuator = open(&server, polling()).await;
 
         let error = actuator
-            .size()
+            .reading()
             .await
             .expect_err("the reply is over the cap");
 

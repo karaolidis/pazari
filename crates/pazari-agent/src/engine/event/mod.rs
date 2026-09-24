@@ -6,14 +6,13 @@ use pazari_types::Timestamp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootInfo {
-    pub boot_mem: NonZeroU64,
     pub block_size: NonZeroU64,
-    pub plugged: u64,
+    pub total_mem: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Snapshot {
-    pub plugged: u64,
+    pub total_mem: u64,
     pub workload_usage: u64,
     pub available: u64,
     pub swap_used: u64,
@@ -36,9 +35,9 @@ pub enum Event {
         max_events: u64,
     },
 
-    PluggedChanged {
+    TotalChanged {
         now: Timestamp,
-        plugged: u64,
+        total_mem: u64,
     },
 
     ReclaimFinished {
@@ -50,6 +49,7 @@ pub enum Event {
         now: Timestamp,
         ceiling: u64,
         status_interval: Duration,
+        hotplugged: u64,
     },
 
     Disconnected {

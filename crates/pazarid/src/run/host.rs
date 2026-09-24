@@ -56,7 +56,7 @@ pub async fn survey<M: HostMemory>(
     } else {
         info!(
             asked,
-            have, "the host's RAM and swap against what the guests may hold"
+            have, "host memory and swap against the guest ceilings"
         );
     }
 
@@ -90,7 +90,7 @@ async fn zram<M: HostMemory>(memory: &M) {
             warn!(
                 %error,
                 path = SWAPS,
-                "failed to look for zram swap, whose capacity would be overstated",
+                "failed to detect zram swap; its capacity may be overstated",
             );
 
             return;

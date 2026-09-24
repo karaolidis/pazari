@@ -144,7 +144,7 @@
             since=pressed,
         )
         guest.agent.reaches(
-            "pazari_agent_plugged_bytes",
+            "pazari_agent_total_mem_bytes",
             lambda value: value <= run.daemon.gauge(
                 "pazarid_guest_size_bytes", guest.labels
             )

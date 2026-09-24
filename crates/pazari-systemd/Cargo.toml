@@ -12,8 +12,11 @@ workspace = true
 
 [dependencies]
 sd-notify = "0.5.0"
+systemd-journal-logger = "2.2.2"
 tokio = { version = "1.53.1", default-features = false, features = ["time"] }
 tracing = "0.1.44"
+tracing-journald = "0.3.2"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", default-features = false, features = ["macros", "rt", "time"] }

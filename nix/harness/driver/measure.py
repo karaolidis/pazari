@@ -89,7 +89,7 @@ def cycles(guest):
     requests = steps(guest.agent.totals("pazari_agent_grant_requests_total"))
     grants = steps(guest.agent.totals("pazari_agent_grants_total"))
     denies = steps(guest.agent.totals("pazari_agent_denies_total"))
-    plugs = steps(guest.agent.series("pazari_agent_plugged_bytes"))
+    plugs = steps(guest.agent.series("pazari_agent_total_mem_bytes"))
 
     out = []
 

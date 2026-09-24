@@ -2,7 +2,7 @@ use std::{num::NonZeroU64, sync::Arc};
 
 use pazari_proto::GuestMessage;
 use pazari_types::Clock;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::{
     engine::{Action, Event},
@@ -39,6 +39,8 @@ impl<C: Cgroup + 'static> Applier<C> {
         send: &mut impl FnMut(GuestMessage),
     ) -> Result<(), RuntimeError> {
         for action in actions {
+            trace!(?action, "applying an action");
+
             match action {
                 Action::SetHigh(bytes) => self.cgroup.set_high(Limit::Bytes(bytes)).await?,
                 Action::SetMax(bytes) => self.cgroup.set_max(Limit::Bytes(bytes)).await?,
@@ -59,7 +61,7 @@ impl<C: Cgroup + 'static> Applier<C> {
         }
 
         if let Some(reclaim) = self.reclaimer().handle() {
-            debug!("cancelling the running release");
+            debug!("cancelling the in-flight release");
             reclaim.cancel();
         }
     }

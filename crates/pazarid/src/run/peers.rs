@@ -69,7 +69,7 @@ impl Peers {
         ));
 
         if self.links.insert(peer, Link { id, outbound }).is_some() {
-            debug!("letting go of a connection the peer replaced");
+            debug!("dropping a connection the peer replaced");
         }
     }
 
@@ -97,12 +97,12 @@ impl Peers {
 
     pub fn send(&self, peer: &PeerId, message: HostMessage) {
         let Some(link) = self.links.get(peer) else {
-            warn!(%peer, ?message, "nothing to send on; dropping a message");
+            warn!(%peer, ?message, "no connection; dropping a message");
             return;
         };
 
         if let Err(error) = link.outbound.try_send(message) {
-            warn!(%peer, %error, "the connection is behind; dropping a message");
+            warn!(%peer, %error, "connection queue is full; dropping a message");
         }
     }
 
@@ -135,8 +135,8 @@ async fn pump(
     };
 
     match transport::pump(&mut stream, &reports, tagged, &mut outgoing).await {
-        Ended::Closed => debug!(%peer, "the guest closed the connection"),
-        Ended::Recv(error) => warn!(%peer, %error, "the connection failed"),
+        Ended::Closed => debug!(%peer, "guest closed the connection"),
+        Ended::Recv(error) => warn!(%peer, %error, "connection failed"),
         Ended::Send(error) => warn!(%peer, %error, "failed to send to the guest"),
         // The daemon let go of this connection; nobody is left to tell.
         Ended::Local => return,
@@ -174,9 +174,8 @@ mod tests {
         GuestMessage::Hello {
             protocol: PROTOCOL_VERSION,
             agent_version: "0.1.0".to_owned(),
-            boot_mem: 1 << 31,
             block_size: 1 << 27,
-            plugged: 1 << 31,
+            total_mem: 1 << 31,
         }
     }
 

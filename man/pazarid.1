@@ -125,9 +125,17 @@ separately from the VM manager's; see
 .Sh ENVIRONMENT
 .Bl -tag -width Ds
 .It Ev RUST_LOG
-The log filter for standard error.
+The log filter, in the directive syntax the
+.Va tracing
+crate's environment filter reads.
 The default is
 .Cm info .
+.It Ev JOURNAL_STREAM
+Set by systemd.
+Where it names the daemon's own standard error, records go to the journal at
+their own priority, their fields under an
+.Cm F_
+prefix; otherwise they go to standard error.
 .It Ev NOTIFY_SOCKET
 Where the daemon tells systemd it is ready, and where it sends watchdog pings.
 Set by systemd under

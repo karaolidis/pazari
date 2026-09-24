@@ -2,7 +2,10 @@ use pazari_types::Clock;
 
 use crate::{
     broker::{Action, Event, GuestId},
-    runtime::{actuator::Actuator, error::RuntimeError},
+    runtime::{
+        actuator::{Actuator, Reading},
+        error::RuntimeError,
+    },
 };
 
 /// One guest's actuation between the broker and its memory device.
@@ -50,18 +53,19 @@ impl<A: Actuator> Driver<A> {
     }
 
     pub async fn seed(&self) -> Result<Event, RuntimeError> {
-        Ok(self.size(self.actuator.size().await?))
+        Ok(self.sized(self.actuator.reading().await?))
     }
 
     pub async fn changed(&self) -> Result<Event, RuntimeError> {
-        Ok(self.size(self.actuator.changed().await?))
+        Ok(self.sized(self.actuator.changed().await?))
     }
 
-    fn size(&self, size: u64) -> Event {
+    fn sized(&self, reading: Reading) -> Event {
         Event::Size {
             now: self.clock.now(),
             guest: self.guest,
-            size,
+            size: reading.size,
+            hotplugged: reading.hotplugged,
         }
     }
 }
@@ -158,7 +162,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(driver.actuator().requested().await.unwrap(), 1536 * MIB);
-        assert_eq!(driver.actuator().size().await.unwrap(), BOOT);
+        assert_eq!(driver.actuator().reading().await.unwrap().size, BOOT);
     }
 
     #[tokio::test]
@@ -184,6 +188,6 @@ mod tests {
             "unexpected error: {error}"
         );
         assert_eq!(driver.actuator().calls(), Vec::<u64>::new());
-        assert_eq!(driver.actuator().size().await.unwrap(), BOOT);
+        assert_eq!(driver.actuator().reading().await.unwrap().size, BOOT);
     }
 }

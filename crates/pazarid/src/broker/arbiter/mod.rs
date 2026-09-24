@@ -38,7 +38,7 @@ pub struct GuestView<'a> {
 
     pub spec: &'a GuestSpec,
 
-    pub boot_mem: Option<u64>,
+    pub hotplugged: Option<u64>,
 
     pub size: u64,
 

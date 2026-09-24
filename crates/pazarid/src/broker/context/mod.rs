@@ -47,16 +47,34 @@ impl Context {
     }
 
     pub fn answer(&mut self, peer: &PeerId, id: u64, decision: Decision) {
+        let guest = self.guests.lookup(peer).map(|guest| self.name(guest));
+
         let message = match decision {
-            Decision::Grant { target } => HostMessage::Grant { id, target },
+            Decision::Grant { target } => {
+                debug!(?guest, id, target, "granting memory");
+
+                HostMessage::Grant { id, target }
+            }
             Decision::Deny {
                 reason,
                 retry_after,
-            } => HostMessage::Deny {
-                id,
-                reason,
-                retry_after_ms: retry_after,
-            },
+            } => {
+                debug!(
+                    ?guest,
+                    id,
+                    ?reason,
+                    ?retry_after,
+                    available = ?self.host.available,
+                    floor = self.policy.host_floor,
+                    "denying",
+                );
+
+                HostMessage::Deny {
+                    id,
+                    reason,
+                    retry_after_ms: retry_after,
+                }
+            }
         };
 
         self.send(peer, message);
@@ -136,9 +154,22 @@ impl Context {
             .unwrap_or(0)
     }
 
-    pub fn observe_plugged(&mut self, guest: GuestId, plugged: u64) {
+    #[must_use]
+    pub fn hotplugged(&self, guest: GuestId) -> Option<u64> {
+        self.guests.state(guest).and_then(|state| state.hotplugged)
+    }
+
+    pub fn tell_geometry(&mut self, guest: GuestId, peer: &PeerId) {
+        let Some(hotplugged) = self.hotplugged(guest) else {
+            return;
+        };
+
+        self.send(peer, HostMessage::Geometry { hotplugged });
+    }
+
+    pub fn observe_total_mem(&mut self, guest: GuestId, total_mem: u64) {
         if let Some(state) = self.guests.state_mut(guest) {
-            state.observe(plugged);
+            state.observe(total_mem);
         }
     }
 
@@ -216,7 +247,7 @@ impl Context {
         });
     }
 
-    pub fn settled(&mut self, guest: GuestId, size: u64) {
+    pub fn settled(&mut self, guest: GuestId, size: u64, hotplugged: u64) {
         let name = self.guests.name(guest).to_owned();
 
         let Some(state) = self.guests.state_mut(guest) else {
@@ -224,6 +255,7 @@ impl Context {
         };
 
         state.size = Some(size);
+        state.hotplugged = Some(hotplugged);
 
         let Some(reconcile) = state.reconcile else {
             return;
@@ -239,7 +271,7 @@ impl Context {
             guest = name,
             size,
             target = reconcile.target,
-            "an actuation completed"
+            "actuation completed"
         );
     }
 }

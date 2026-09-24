@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use pazari_proto::{DenyReason, GrantReason, GuestMessage, Urgency};
 use pazari_types::Timestamp;
+use tracing::debug;
 
 use crate::engine::{
     context::Context,
@@ -28,6 +29,8 @@ impl Growing {
         ctx.apply_limits(Band::Open);
 
         if !ctx.connected {
+            debug!("cannot request memory: no host session");
+
             return Self::at(exhausted_since, Growth::Blocked);
         }
 
@@ -36,7 +39,16 @@ impl Growing {
         };
 
         let id = ctx.take_id();
-        let current = ctx.limits.plugged();
+        let current = ctx.limits.total_mem();
+
+        debug!(
+            id,
+            current,
+            target,
+            usage = ctx.last.workload_usage,
+            ceiling = ?ctx.limits.ceiling(),
+            "requesting more memory from the host",
+        );
 
         ctx.send(GuestMessage::GrantRequest {
             id,
@@ -100,9 +112,9 @@ impl State for Growing {
         self.stay()
     }
 
-    fn on_plugged(self, ctx: &mut Context, now: Timestamp, changed: bool) -> Phase {
+    fn on_total_changed(self, ctx: &mut Context, now: Timestamp, changed: bool) -> Phase {
         match self.state {
-            Growth::Settling { target, .. } if ctx.limits.plugged() >= target => {
+            Growth::Settling { target, .. } if ctx.limits.total_mem() >= target => {
                 Steady::settle(ctx, now)
             }
             _ => {
@@ -123,7 +135,7 @@ impl State for Growing {
         let expires = now.saturating_add(ctx.config.settle_grace.get());
         let settling = Self::at(self.exhausted_since, Growth::Settling { target, expires });
 
-        settling.on_plugged(ctx, now, false)
+        settling.on_total_changed(ctx, now, false)
     }
 
     fn on_deny(
@@ -143,6 +155,13 @@ impl State for Growing {
         }
 
         let backoff = retry_after.unwrap_or_else(|| ctx.config.deny_backoff.get());
+
+        debug!(
+            id,
+            ?reason,
+            ?backoff,
+            "backing off before retrying the request"
+        );
 
         Self::at(
             self.exhausted_since,
@@ -240,14 +259,14 @@ mod tests {
         assert_eq!(engine.mode(), Mode::AwaitingGrant);
 
         assert_eq!(
-            engine.handle(Event::PluggedChanged {
+            engine.handle(Event::TotalChanged {
                 now: at(102),
-                plugged: 2560 * MIB,
+                total_mem: 2560 * MIB,
             }),
             vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
         );
         assert_eq!(engine.mode(), Mode::Steady);
-        assert_eq!(engine.plugged(), 2560 * MIB);
+        assert_eq!(engine.total_mem(), 2560 * MIB);
     }
 
     #[test]
@@ -265,9 +284,9 @@ mod tests {
         );
 
         assert_eq!(
-            engine.handle(Event::PluggedChanged {
+            engine.handle(Event::TotalChanged {
                 now: at(102),
-                plugged: 2304 * MIB,
+                total_mem: 2304 * MIB,
             }),
             vec![Action::SetMax(2048 * MIB), Action::SetHigh(1792 * MIB)]
         );
@@ -277,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn a_partial_plug_settles_from_actual_plugged_after_the_grace() {
+    fn a_partial_plug_settles_from_the_total_it_reached_after_the_grace() {
         let mut engine = started();
 
         wake(&mut engine, at(100), 1);
@@ -291,9 +310,9 @@ mod tests {
         );
 
         assert_eq!(
-            engine.handle(Event::PluggedChanged {
+            engine.handle(Event::TotalChanged {
                 now: at(102),
-                plugged: 2304 * MIB,
+                total_mem: 2304 * MIB,
             }),
             vec![Action::SetMax(2048 * MIB), Action::SetHigh(1984 * MIB)]
         );

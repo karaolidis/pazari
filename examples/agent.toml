@@ -6,14 +6,9 @@ tick_interval = "1s"
 # Set me.
 service_reserve = "256MiB"
 
-# The standing headroom the brake releases when the workload is throttled,
-# i.e. a burst the workload can take while waiting for more memory from
-# the host. Set me.
+# The headroom between `memory.high` and `memory.max`: how far the
+# workload can overrun the brake before it reaches its hard limit. Set me.
 burst_reserve = "256MiB"
-
-# The sliver of the burst reserve the brake holds back while a grant is in
-# flight to stop an overshoot. Set me.
-open_guard = "64MiB"
 
 # How much more memory a grant asks for.
 grow_step = "512MiB"
@@ -24,12 +19,11 @@ deny_backoff = "5s"
 # How long a resize is left to settle.
 settle_grace = "10s"
 
-# The share of its budget the workload must stay under to count as idle.
-idle_threshold = 0.5
+# How soon after a grow a brake still doubles the next request.
+escalate_within = "10s"
 
-# How many consecutive idle intervals it takes before the agent offers
-# memory back.
-idle_intervals = 3
+# Intervals of a spare `shrink_step` over the reserves before a release.
+release_intervals = 3
 
 # How much an offer to release gives back at a time.
 shrink_step = "256MiB"
@@ -40,17 +34,6 @@ shrink_cooldown = "30s"
 # The `swappiness=` argument for `memory.reclaim`. Leave the key out to
 # reclaim at the guest's own `vm.swappiness`.
 reclaim_swappiness = 0
-
-# How much memory one titration step claims while the agent is still
-# finding the workload's working set.
-titrate_step = "64MiB"
-
-# How long each titration step is given before the next one.
-titrate_interval = "10s"
-
-# The memory pressure, in percent of wall time, at which titration decides
-# it has found the edge of the working set.
-titrate_psi_threshold = 5.0
 
 # What the agent does once the workload wants more than the ceiling
 # allows.

@@ -2,22 +2,70 @@ mod exhausted;
 mod growing;
 mod releasing;
 mod steady;
-mod titrating;
 
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use enum_dispatch::enum_dispatch;
-use pazari_proto::DenyReason;
+use pazari_proto::{DenyReason, GuestMessage};
 use pazari_types::Timestamp;
 
-use crate::engine::{
-    Mode,
-    context::Context,
-    phase::{
-        exhausted::Exhausted, growing::Growing, releasing::Releasing, steady::Steady,
-        titrating::Titrating,
-    },
+pub use crate::engine::phase::{
+    exhausted::Exhausted, growing::Growing, releasing::Releasing, steady::Steady,
 };
+use crate::engine::{
+    action::Action,
+    config::EngineConfig,
+    counters::Pressure,
+    effects::Effects,
+    limits::{Brake, Limits},
+    world::{Guest, World},
+};
+
+#[derive(Debug)]
+pub struct Step<'a> {
+    pub world: &'a mut World,
+    pub fx: &'a mut Effects,
+    pub now: Timestamp,
+}
+
+impl Step<'_> {
+    pub const fn config(&self) -> &EngineConfig {
+        &self.world.config
+    }
+
+    pub const fn limits(&self) -> Limits {
+        self.world.limits()
+    }
+
+    pub const fn guest(&self) -> Guest {
+        self.world.guest()
+    }
+
+    pub fn brake(&mut self, brake: Brake) {
+        self.world.brake(brake, self.fx);
+    }
+
+    pub fn emit(&mut self, action: Action) {
+        self.fx.emit(action);
+    }
+
+    pub fn send(&mut self, message: GuestMessage) {
+        self.world.send(message, self.fx);
+    }
+
+    pub fn nak(&mut self, id: u64, reason: &str) {
+        self.world.nak(id, reason, self.fx);
+    }
+}
+
+pub fn spare(step: &Step<'_>, pressure: Pressure) -> bool {
+    !pressure.throttled
+        && !pressure.breached
+        && step
+            .world
+            .slack()
+            .is_some_and(|slack| slack >= step.config().shrink_step.get())
+}
 
 #[enum_dispatch]
 pub trait State: Copy {
@@ -25,30 +73,33 @@ pub trait State: Copy {
 
     fn busy(self) -> &'static str;
 
-    fn advance(self, _ctx: &mut Context, _now: Timestamp) -> Phase {
+    fn brake(self, step: &mut Step<'_>) -> Phase;
+
+    fn resume(self, step: &mut Step<'_>) -> Phase;
+
+    fn advance(self, _step: &mut Step<'_>, _pressure: Pressure) -> Phase {
         self.stay()
     }
 
-    fn brake(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        Growing::start(ctx, now, None)
+    fn on_interval(self, _step: &mut Step<'_>, _pressure: Pressure) -> Phase {
+        self.stay()
     }
 
-    fn on_total_changed(self, ctx: &mut Context, _now: Timestamp, changed: bool) -> Phase {
+    fn on_total_changed(self, step: &mut Step<'_>, changed: bool) -> Phase {
         if changed {
-            ctx.reapply_limits();
+            step.world.rebrake(step.fx);
         }
 
         self.stay()
     }
 
-    fn on_grant(self, _ctx: &mut Context, _now: Timestamp, _id: u64, _target: u64) -> Phase {
+    fn on_grant(self, _step: &mut Step<'_>, _id: u64, _target: u64) -> Phase {
         self.stay()
     }
 
     fn on_deny(
         self,
-        _ctx: &mut Context,
-        _now: Timestamp,
+        _step: &mut Step<'_>,
         _id: u64,
         _reason: DenyReason,
         _retry_after: Option<Duration>,
@@ -56,43 +107,32 @@ pub trait State: Copy {
         self.stay()
     }
 
-    fn on_reclaim_request(self, ctx: &mut Context, id: u64, _desired: u64) -> Phase {
-        ctx.nak(id, self.busy());
+    fn on_reclaim_request(self, step: &mut Step<'_>, id: u64, _desired: u64) -> Phase {
+        step.nak(id, self.busy());
 
         self.stay()
     }
 
-    fn on_reclaim_finished(self, _ctx: &mut Context, _now: Timestamp, _reclaimed: u64) -> Phase {
+    fn on_reclaim_finished(self, _step: &mut Step<'_>, _reclaimed: u64) -> Phase {
         self.stay()
     }
 
-    fn on_interval(self, ctx: &mut Context, _now: Timestamp, _throttled: bool) -> Phase {
-        ctx.idle.reset();
-
-        self.stay()
-    }
-
-    fn on_ceiling_raised(self, _ctx: &mut Context, _now: Timestamp) -> Option<Phase> {
+    fn on_ceiling_raised(self, _step: &mut Step<'_>) -> Option<Phase> {
         None
     }
 
-    fn on_connected(self) -> Phase {
+    fn on_connected(self, _step: &mut Step<'_>) -> Phase {
         self.stay()
     }
 
-    fn on_disconnected(self, _ctx: &mut Context, _now: Timestamp) -> Phase {
+    fn on_disconnected(self, _step: &mut Step<'_>) -> Phase {
         self.stay()
-    }
-
-    fn resume(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        Growing::start(ctx, now, None)
     }
 }
 
 #[enum_dispatch(State)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    Titrating(Titrating),
     Steady(Steady),
     Growing(Growing),
     Releasing(Releasing),
@@ -100,25 +140,35 @@ pub enum Phase {
 }
 
 impl Phase {
-    pub fn start() -> Self {
-        Self::Titrating(Titrating::default())
+    pub const NAMES: [&'static str; 4] = ["steady", "awaiting_grant", "releasing", "exhausted"];
+
+    #[must_use]
+    pub const fn start() -> Self {
+        Self::Steady(Steady::start())
     }
 
-    pub const fn mode(self) -> Mode {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
-            Self::Titrating(_) => Mode::Titrating,
-            Self::Steady(_) => Mode::Steady,
-            Self::Growing(_) => Mode::AwaitingGrant,
-            Self::Releasing(_) => Mode::Releasing,
-            Self::Exhausted(_) => Mode::Exhausted,
+            Self::Steady(_) => "steady",
+            Self::Growing(_) => "awaiting_grant",
+            Self::Releasing(_) => "releasing",
+            Self::Exhausted(_) => "exhausted",
         }
     }
 
+    #[must_use]
     pub const fn pending_request(self) -> Option<u64> {
         match self {
             Self::Growing(growing) => growing.pending_request(),
             Self::Releasing(releasing) => releasing.pending_request(),
             _ => None,
         }
+    }
+}
+
+impl fmt::Display for Phase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
     }
 }

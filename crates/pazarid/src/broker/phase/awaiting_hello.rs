@@ -1,13 +1,7 @@
 use pazari_proto::{GuestMessage, HostMessage, PROTOCOL_VERSION};
-use pazari_transport::PeerId;
-use pazari_types::Timestamp;
 use tracing::{info, warn};
 
-use crate::broker::{
-    context::Context,
-    phase::{Negotiated, Phase, Said, State},
-    registry::GuestId,
-};
+use crate::broker::phase::{Negotiated, Phase, State, Step};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Held {
@@ -25,44 +19,43 @@ impl AwaitingHello {
         Self { held: None }
     }
 
-    pub fn welcome(
-        self,
-        ctx: &mut Context,
-        now: Timestamp,
-        guest: GuestId,
-        peer: &PeerId,
-    ) -> Phase {
+    pub fn welcome(self, step: &mut Step<'_>) -> Phase {
         let Some(held) = self.held else {
             return self.stay();
         };
 
-        let Some(ceiling) = ctx.ceiling(guest) else {
+        let Some(ceiling) = step.ceiling() else {
             return self.stay();
         };
 
-        let Some(hotplugged) = ctx.hotplugged(guest) else {
+        let Some(hotplugged) = step.world.hotplugged(step.guest) else {
             return self.stay();
         };
 
         info!(
-            guest = ctx.name(guest),
-            %peer,
+            guest = step.name(),
+            peer = %step.peer,
             ceiling = ceiling.get(),
             hotplugged,
             "sending welcome",
         );
 
-        ctx.send(
-            peer,
-            HostMessage::Welcome {
-                protocol: PROTOCOL_VERSION,
-                ceiling: ceiling.get(),
-                status_interval_ms: ctx.policy.welcome_status_interval.get(),
-                hotplugged,
-            },
-        );
+        let status_interval_ms = step.policy().welcome_status_interval.get();
 
-        Phase::Negotiated(Negotiated::new(held.block_size, now))
+        step.send(HostMessage::Welcome {
+            protocol: PROTOCOL_VERSION,
+            ceiling: ceiling.get(),
+            status_interval_ms,
+            hotplugged,
+        });
+
+        Phase::Negotiated(Negotiated::new(held.block_size, step.now))
+    }
+
+    fn reject(self, step: &mut Step<'_>) -> Phase {
+        step.close();
+
+        self.stay()
     }
 }
 
@@ -71,20 +64,18 @@ impl State for AwaitingHello {
         Phase::AwaitingHello(self)
     }
 
-    fn refuse(self, ctx: &mut Context, said: Said<'_>, what: &'static str) -> Phase {
+    fn refuse(self, step: &mut Step<'_>, what: &'static str) -> Phase {
         warn!(
-            guest = ctx.name(said.guest),
-            peer = %said.peer,
+            guest = step.name(),
+            peer = %step.peer,
             said = what,
             "guest sent a message before hello",
         );
 
-        ctx.close(said.guest, said.peer);
-
-        self.stay()
+        self.reject(step)
     }
 
-    fn on_hello(self, ctx: &mut Context, said: Said<'_>, message: GuestMessage) -> Phase {
+    fn on_hello(self, step: &mut Step<'_>, message: GuestMessage) -> Phase {
         let GuestMessage::Hello {
             protocol,
             agent_version,
@@ -92,61 +83,50 @@ impl State for AwaitingHello {
             total_mem,
         } = message
         else {
-            return self.refuse(ctx, said, "something other than hello");
+            return self.refuse(step, "something other than hello");
         };
 
         if self.held.is_some() {
-            warn!(
-                guest = ctx.name(said.guest),
-                peer = %said.peer,
-                "duplicate hello",
-            );
-            ctx.close(said.guest, said.peer);
+            warn!(guest = step.name(), peer = %step.peer, "duplicate hello");
 
-            return self.stay();
+            return self.reject(step);
         }
 
         if protocol != PROTOCOL_VERSION {
             warn!(
-                guest = ctx.name(said.guest),
-                peer = %said.peer,
+                guest = step.name(),
+                peer = %step.peer,
                 theirs = protocol,
                 ours = PROTOCOL_VERSION,
                 "guest protocol version mismatch",
             );
-            ctx.close(said.guest, said.peer);
 
-            return self.stay();
+            return self.reject(step);
         }
 
         if block_size == 0 || total_mem == 0 {
             warn!(
-                guest = ctx.name(said.guest),
-                peer = %said.peer,
+                guest = step.name(),
+                peer = %step.peer,
                 block_size,
                 total_mem,
                 "guest declared an impossible geometry",
             );
-            ctx.close(said.guest, said.peer);
 
-            return self.stay();
+            return self.reject(step);
         }
 
-        if ctx.ceiling(said.guest).is_none() {
-            warn!(
-                peer = %said.peer,
-                "hello from an unregistered guest",
-            );
-            ctx.close(said.guest, said.peer);
+        if step.ceiling().is_none() {
+            warn!(peer = %step.peer, "hello from an unregistered guest");
 
-            return self.stay();
+            return self.reject(step);
         }
 
-        ctx.observe_total_mem(said.guest, total_mem);
+        step.world.observe_total_mem(step.guest, total_mem);
 
         info!(
-            guest = ctx.name(said.guest),
-            peer = %said.peer,
+            guest = step.name(),
+            peer = %step.peer,
             agent_version,
             block_size,
             total_mem,
@@ -157,12 +137,12 @@ impl State for AwaitingHello {
             held: Some(Held { block_size }),
         };
 
-        let next = held.welcome(ctx, said.now, said.guest, said.peer);
+        let next = held.welcome(step);
 
         if matches!(next, Phase::AwaitingHello(_)) {
             info!(
-                guest = ctx.name(said.guest),
-                peer = %said.peer,
+                guest = step.name(),
+                peer = %step.peer,
                 "delaying welcome until the memory device reports",
             );
         }

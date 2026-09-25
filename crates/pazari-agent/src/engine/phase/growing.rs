@@ -1,76 +1,83 @@
 use std::time::Duration;
 
-use pazari_proto::{DenyReason, GrantReason, GuestMessage, Urgency};
-use pazari_types::Timestamp;
+use pazari_proto::{DenyReason, GuestMessage};
+use pazari_types::{Deadline, Timestamp};
 use tracing::debug;
 
 use crate::engine::{
-    context::Context,
-    limits::Band,
-    phase::{Phase, State, exhausted::Exhausted, steady::Steady},
+    counters::Pressure,
+    limits::Brake,
+    phase::{Phase, State, Step, exhausted::Exhausted, steady::Steady},
+    scale::GrowScale,
+    world::RequestId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Growth {
+enum Stage {
     Blocked,
-    Requesting { id: u64, target: u64 },
-    Backoff { retry_at: Timestamp },
-    Settling { target: u64, expires: Timestamp },
+    Requesting { id: RequestId, target: u64 },
+    Backoff { retry_at: Deadline },
+    Settling { target: u64, expires: Deadline },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Growing {
+    scale: GrowScale,
     exhausted_since: Option<Timestamp>,
-    state: Growth,
+    stage: Stage,
 }
 
 impl Growing {
-    pub fn start(ctx: &mut Context, now: Timestamp, exhausted_since: Option<Timestamp>) -> Phase {
-        ctx.apply_limits(Band::Open);
+    pub fn start(
+        step: &mut Step<'_>,
+        scale: GrowScale,
+        exhausted_since: Option<Timestamp>,
+    ) -> Phase {
+        step.brake(Brake::Engaged);
 
-        if !ctx.connected {
+        if !step.world.connected() {
             debug!("cannot request memory: no host session");
 
-            return Self::at(exhausted_since, Growth::Blocked);
+            return Self::at(scale, exhausted_since, Stage::Blocked);
         }
 
-        let Some(target) = ctx.grow_target() else {
-            return Exhausted::enter(ctx, now, exhausted_since);
+        let Some(target) = step.world.grow_target(scale) else {
+            return Exhausted::enter(step, scale, exhausted_since);
         };
 
-        let id = ctx.take_id();
-        let current = ctx.limits.total_mem();
+        let id = step.world.take_id();
+        let current = step.limits().total_mem();
 
         debug!(
-            id,
+            id = id.get(),
             current,
             target,
-            usage = ctx.last.workload_usage,
-            ceiling = ?ctx.limits.ceiling(),
+            steps = scale.factor(),
+            usage = step.guest().usage(),
+            ceiling = ?step.limits().ceiling(),
             "requesting more memory from the host",
         );
 
-        ctx.send(GuestMessage::GrantRequest {
-            id,
+        step.send(GuestMessage::GrantRequest {
+            id: id.get(),
             current,
             target,
-            reason: GrantReason::Throttle,
-            urgency: Urgency::High,
         });
 
-        Self::at(exhausted_since, Growth::Requesting { id, target })
+        Self::at(scale, exhausted_since, Stage::Requesting { id, target })
     }
 
-    const fn at(exhausted_since: Option<Timestamp>, state: Growth) -> Phase {
+    const fn at(scale: GrowScale, exhausted_since: Option<Timestamp>, stage: Stage) -> Phase {
         Phase::Growing(Self {
+            scale,
             exhausted_since,
-            state,
+            stage,
         })
     }
 
     pub const fn pending_request(self) -> Option<u64> {
-        match self.state {
-            Growth::Requesting { id, .. } => Some(id),
+        match self.stage {
+            Stage::Requesting { id, .. } => Some(id.get()),
             _ => None,
         }
     }
@@ -80,9 +87,9 @@ impl Growing {
     }
 
     const fn blocked(self) -> Phase {
-        match self.state {
-            Growth::Requesting { .. } | Growth::Backoff { .. } => {
-                Self::at(self.exhausted_since, Growth::Blocked)
+        match self.stage {
+            Stage::Requesting { .. } | Stage::Backoff { .. } => {
+                Self::at(self.scale, self.exhausted_since, Stage::Blocked)
             }
             _ => Phase::Growing(self),
         }
@@ -98,28 +105,37 @@ impl State for Growing {
         "a grant request is outstanding"
     }
 
-    fn advance(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        match self.state {
-            Growth::Backoff { retry_at } if now >= retry_at => {
-                Self::start(ctx, now, self.exhausted_since)
+    fn brake(self, _step: &mut Step<'_>) -> Phase {
+        self.stay()
+    }
+
+    fn resume(self, step: &mut Step<'_>) -> Phase {
+        match self.stage {
+            Stage::Settling { .. } => self.stay(),
+            _ => Self::start(step, self.scale, self.exhausted_since),
+        }
+    }
+
+    fn advance(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
+        match self.stage {
+            Stage::Backoff { retry_at } if retry_at.reached(step.now) => {
+                Self::start(step, self.scale, self.exhausted_since)
             }
-            Growth::Settling { expires, .. } if now >= expires => Steady::settle(ctx, now),
+            Stage::Settling { expires, .. } if expires.reached(step.now) => {
+                Steady::settled(step, self.scale)
+            }
             _ => self.stay(),
         }
     }
 
-    fn brake(self, _ctx: &mut Context, _now: Timestamp) -> Phase {
-        self.stay()
-    }
-
-    fn on_total_changed(self, ctx: &mut Context, now: Timestamp, changed: bool) -> Phase {
-        match self.state {
-            Growth::Settling { target, .. } if ctx.limits.total_mem() >= target => {
-                Steady::settle(ctx, now)
+    fn on_total_changed(self, step: &mut Step<'_>, changed: bool) -> Phase {
+        match self.stage {
+            Stage::Settling { target, .. } if step.limits().total_mem() >= target => {
+                Steady::settled(step, self.scale)
             }
             _ => {
                 if changed {
-                    ctx.reapply_limits();
+                    step.world.rebrake(step.fx);
                 }
 
                 self.stay()
@@ -127,21 +143,24 @@ impl State for Growing {
         }
     }
 
-    fn on_grant(self, ctx: &mut Context, now: Timestamp, id: u64, target: u64) -> Phase {
+    fn on_grant(self, step: &mut Step<'_>, id: u64, target: u64) -> Phase {
         if !self.answers(id) {
             return self.stay();
         }
 
-        let expires = now.saturating_add(ctx.config.settle_grace.get());
-        let settling = Self::at(self.exhausted_since, Growth::Settling { target, expires });
+        let expires = Deadline::after(step.now, step.config().settle_grace.get());
+        let settling = Self::at(
+            self.scale,
+            self.exhausted_since,
+            Stage::Settling { target, expires },
+        );
 
-        settling.on_total_changed(ctx, now, false)
+        settling.on_total_changed(step, false)
     }
 
     fn on_deny(
         self,
-        ctx: &mut Context,
-        now: Timestamp,
+        step: &mut Step<'_>,
         id: u64,
         reason: DenyReason,
         retry_after: Option<Duration>,
@@ -150,11 +169,11 @@ impl State for Growing {
             return self.stay();
         }
 
-        if reason == DenyReason::Ceiling || ctx.grow_target().is_none() {
-            return Exhausted::enter(ctx, now, self.exhausted_since);
+        if reason == DenyReason::Ceiling || step.world.grow_target(self.scale).is_none() {
+            return Exhausted::enter(step, self.scale, self.exhausted_since);
         }
 
-        let backoff = retry_after.unwrap_or_else(|| ctx.config.deny_backoff.get());
+        let backoff = retry_after.unwrap_or_else(|| step.config().deny_backoff.get());
 
         debug!(
             id,
@@ -164,26 +183,24 @@ impl State for Growing {
         );
 
         Self::at(
+            self.scale,
             self.exhausted_since,
-            Growth::Backoff {
-                retry_at: now.saturating_add(backoff),
+            Stage::Backoff {
+                retry_at: Deadline::after(step.now, backoff),
             },
         )
     }
 
-    fn on_connected(self) -> Phase {
-        self.blocked()
-    }
-
-    fn on_disconnected(self, _ctx: &mut Context, _now: Timestamp) -> Phase {
-        self.blocked()
-    }
-
-    fn resume(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        match self.state {
-            Growth::Settling { .. } => self.stay(),
-            _ => Self::start(ctx, now, self.exhausted_since),
+    fn on_connected(self, _step: &mut Step<'_>) -> Phase {
+        Self {
+            scale: GrowScale::ONE,
+            ..self
         }
+        .blocked()
+    }
+
+    fn on_disconnected(self, _step: &mut Step<'_>) -> Phase {
+        self.blocked()
     }
 }
 
@@ -193,7 +210,31 @@ mod tests {
 
     use pazari_proto::{DenyReason, GuestMessage, HostMessage};
 
-    use crate::engine::{Action, Event, Mode, testing::*};
+    use crate::engine::{Action, Event, Phase, testing::*};
+
+    #[test]
+    fn a_brake_inside_the_escalation_window_doubles_the_next_ask() {
+        let mut engine = started();
+
+        grown(&mut engine);
+
+        assert_eq!(
+            wake(&mut engine, at(110), 2),
+            vec![request(2, 2560 * MIB, 3584 * MIB),],
+        );
+    }
+
+    #[test]
+    fn a_brake_after_the_escalation_window_asks_for_one_plain_step() {
+        let mut engine = started();
+
+        grown(&mut engine);
+
+        assert_eq!(
+            wake(&mut engine, at(200), 2),
+            vec![request(2, 2560 * MIB, 3072 * MIB),],
+        );
+    }
 
     #[test]
     fn the_request_target_covers_the_deficit_and_rounds_up_to_a_block() {
@@ -203,28 +244,28 @@ mod tests {
 
         assert_eq!(
             wake(&mut engine, at(61), 1),
-            vec![Action::SetHigh(OPEN0), request(1, BOOT, 2816 * MIB)]
+            vec![request(1, BOOT, 2816 * MIB)]
         );
     }
 
     #[test]
     fn the_request_target_is_clamped_and_aligned_under_the_ceiling() {
-        let mut engine = titrated(config(), 2200 * MIB);
+        let mut engine = started_with(config(), 2200 * MIB);
 
         assert_eq!(
             wake(&mut engine, at(100), 1),
-            vec![Action::SetHigh(OPEN0), request(1, BOOT, 2176 * MIB)]
+            vec![request(1, BOOT, 2176 * MIB)]
         );
     }
 
     #[test]
-    fn a_grant_wait_keeps_the_guard_engaged() {
+    fn a_grant_wait_holds_the_brake_where_it_stands() {
         let mut engine = started();
 
         wake(&mut engine, at(100), 1);
 
         assert_eq!(engine.pending_request(), Some(1));
-        assert_eq!(engine.high(), OPEN0);
+        assert_eq!(engine.high(), HIGH0);
         assert!(engine.high() < engine.max());
     }
 
@@ -256,7 +297,7 @@ mod tests {
             ),
             vec![]
         );
-        assert_eq!(engine.mode(), Mode::AwaitingGrant);
+        assert!(matches!(engine.phase(), Phase::Growing(_)));
 
         assert_eq!(
             engine.handle(Event::TotalChanged {
@@ -265,7 +306,7 @@ mod tests {
             }),
             vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
         );
-        assert_eq!(engine.mode(), Mode::Steady);
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
         assert_eq!(engine.total_mem(), 2560 * MIB);
     }
 
@@ -290,7 +331,7 @@ mod tests {
             }),
             vec![Action::SetMax(2048 * MIB), Action::SetHigh(1792 * MIB)]
         );
-        assert_eq!(engine.mode(), Mode::Steady);
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
         assert_eq!(engine.max(), 2048 * MIB);
         assert_eq!(engine.high(), 1792 * MIB);
     }
@@ -314,9 +355,9 @@ mod tests {
                 now: at(102),
                 total_mem: 2304 * MIB,
             }),
-            vec![Action::SetMax(2048 * MIB), Action::SetHigh(1984 * MIB)]
+            vec![Action::SetMax(2048 * MIB), Action::SetHigh(1792 * MIB)]
         );
-        assert_eq!(engine.mode(), Mode::AwaitingGrant);
+        assert!(matches!(engine.phase(), Phase::Growing(_)));
 
         assert_eq!(
             tick(&mut engine, at(110), snap(2304 * MIB, BUSY, 1)),
@@ -324,9 +365,10 @@ mod tests {
         );
         assert_eq!(
             tick(&mut engine, at(111), snap(2304 * MIB, BUSY, 1)),
-            vec![Action::SetHigh(1792 * MIB)]
+            vec![]
         );
-        assert_eq!(engine.mode(), Mode::Steady);
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
+        assert_eq!(engine.high(), 1792 * MIB);
     }
 
     #[test]
@@ -445,6 +487,6 @@ mod tests {
             vec![]
         );
         assert_eq!(engine.pending_request(), Some(1));
-        assert_eq!(engine.mode(), Mode::AwaitingGrant);
+        assert!(matches!(engine.phase(), Phase::Growing(_)));
     }
 }

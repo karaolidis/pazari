@@ -5,8 +5,7 @@ use std::{
 };
 
 use pazari_proto::{
-    Codec, DenyReason, GrantReason, GuestMessage, HostMessage, JsonLinesCodec, PROTOCOL_VERSION,
-    Status, Urgency,
+    Codec, DenyReason, GuestMessage, HostMessage, JsonLinesCodec, PROTOCOL_VERSION, Status,
 };
 
 pub use crate::{GuestStream, HostStream};
@@ -35,8 +34,6 @@ pub fn guest_messages() -> Vec<GuestMessage> {
             id: 1,
             current: 2_147_483_648,
             target: 4_294_967_296,
-            reason: GrantReason::Throttle,
-            urgency: Urgency::High,
         },
         GuestMessage::Status(Status {
             total_mem: 2_147_483_648,

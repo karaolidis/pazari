@@ -33,8 +33,6 @@ pub enum GuestMessage {
         id: u64,
         current: u64,
         target: u64,
-        reason: GrantReason,
-        urgency: Urgency,
     },
 
     OfferRelease {
@@ -71,21 +69,6 @@ impl GuestMessage {
             Self::Bye {} => "bye",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GrantReason {
-    Throttle,
-    Preflight,
-    Manual,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Urgency {
-    Low,
-    High,
 }
 
 #[serde_as]
@@ -216,9 +199,7 @@ mod tests {
         let messages = guest_messages();
         let expected = [
             r#"{"type":"hello","protocol":1,"agent_version":"0.1.0","block_size":134217728,"total_mem":0}"#,
-            r#"{"type":"grant_request","id":1,"current":2147483648,"target":4294967296,"reason":"throttle","urgency":"high"}"#,
-            r#"{"type":"grant_request","id":2,"current":2147483648,"target":3221225472,"reason":"preflight","urgency":"low"}"#,
-            r#"{"type":"grant_request","id":3,"current":2147483648,"target":3221225472,"reason":"manual","urgency":"low"}"#,
+            r#"{"type":"grant_request","id":1,"current":2147483648,"target":4294967296}"#,
             r#"{"type":"offer_release","id":4,"current":4294967296,"releasable":1073741824}"#,
             r#"{"type":"reclaim_ack","id":7,"will_release":536870912}"#,
             r#"{"type":"reclaim_nak","id":8,"reason":"workload working set is pinned"}"#,

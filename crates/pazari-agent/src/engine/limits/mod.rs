@@ -1,32 +1,25 @@
 use std::num::NonZeroU64;
 
-use crate::engine::{action::Action, config::EngineConfig};
+use crate::engine::{action::Action, config::EngineConfig, effects::Effects};
 
-/// Where `memory.high` sits relative to `memory.max`.
+/// Where `memory.high` sits under `memory.max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Band {
-    /// `high == max - guard`.
-    Open,
-    /// `high == max`.
-    Collapsed,
-    /// `high == max - R`.
-    Steady,
-    /// Wherever titration left it.
-    Hold,
+pub enum Brake {
+    Engaged,
+    Released,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     service_reserve: u64,
     burst_reserve: NonZeroU64,
-    open_guard: NonZeroU64,
 
     total_mem: u64,
     ceiling: Option<u64>,
 
     high: u64,
     max: u64,
-    band: Band,
+    brake: Brake,
 }
 
 impl Limits {
@@ -36,12 +29,11 @@ impl Limits {
         Self {
             service_reserve: config.service_reserve,
             burst_reserve: config.burst_reserve,
-            open_guard: config.open_guard,
             total_mem,
             ceiling: None,
-            high: max,
+            high: max.saturating_sub(config.burst_reserve.get()),
             max,
-            band: Band::Hold,
+            brake: Brake::Engaged,
         }
     }
 
@@ -61,12 +53,12 @@ impl Limits {
         self.max
     }
 
-    pub const fn band(self) -> Band {
-        self.band
+    pub const fn brake(self) -> Brake {
+        self.brake
     }
 
-    pub const fn is_open(self) -> bool {
-        matches!(self.band, Band::Open | Band::Collapsed)
+    pub const fn released(self) -> bool {
+        self.high >= self.max
     }
 
     pub const fn service_reserve(self) -> u64 {
@@ -86,7 +78,7 @@ impl Limits {
         self.total_mem.saturating_sub(self.service_reserve)
     }
 
-    pub const fn steady_high(self) -> u64 {
+    pub const fn engaged_high(self) -> u64 {
         self.budget().saturating_sub(self.burst_reserve.get())
     }
 
@@ -102,42 +94,40 @@ impl Limits {
         raised
     }
 
-    pub fn apply(&mut self, band: Band, out: &mut Vec<Action>) {
-        self.band = band;
+    pub fn apply(&mut self, brake: Brake, fx: &mut Effects) {
+        self.brake = brake;
 
         let max = self.budget();
 
-        let high = match band {
-            Band::Open => max.saturating_sub(self.open_guard.get()),
-            Band::Collapsed => max,
-            Band::Steady => max.saturating_sub(self.burst_reserve.get()),
-            Band::Hold => self.high.min(max),
+        let high = match brake {
+            Brake::Engaged => self.engaged_high(),
+            Brake::Released => max,
         };
 
         if max >= self.max {
-            self.set_max(max, out);
-            self.set_high(high, out);
+            self.set_max(max, fx);
+            self.set_high(high, fx);
         } else {
-            self.set_high(high, out);
-            self.set_max(max, out);
+            self.set_high(high, fx);
+            self.set_max(max, fx);
         }
     }
 
-    pub fn reapply(&mut self, out: &mut Vec<Action>) {
-        self.apply(self.band, out);
+    pub fn reapply(&mut self, fx: &mut Effects) {
+        self.apply(self.brake, fx);
     }
 
-    pub fn set_high(&mut self, value: u64, out: &mut Vec<Action>) {
+    pub fn set_high(&mut self, value: u64, fx: &mut Effects) {
         if value != self.high {
             self.high = value;
-            out.push(Action::SetHigh(value));
+            fx.emit(Action::SetHigh(value));
         }
     }
 
-    fn set_max(&mut self, value: u64, out: &mut Vec<Action>) {
+    fn set_max(&mut self, value: u64, fx: &mut Effects) {
         if value != self.max {
             self.max = value;
-            out.push(Action::SetMax(value));
+            fx.emit(Action::SetMax(value));
         }
     }
 }
@@ -148,25 +138,23 @@ mod tests {
 
     const S: u64 = 256;
     const R: u64 = 128;
-    const G: u64 = 32;
 
     fn limits(total_mem: u64, high: u64, max: u64) -> Limits {
         Limits {
             service_reserve: S,
             burst_reserve: NonZeroU64::new(R).unwrap(),
-            open_guard: NonZeroU64::new(G).unwrap(),
             total_mem,
             ceiling: None,
             high,
             max,
-            band: Band::Steady,
+            brake: Brake::Engaged,
         }
     }
 
-    fn applied(mut limits: Limits, band: Band) -> Vec<Action> {
-        let mut out = Vec::new();
-        limits.apply(band, &mut out);
-        out
+    fn applied(mut limits: Limits, brake: Brake) -> Vec<Action> {
+        let mut fx = Effects::default();
+        limits.apply(brake, &mut fx);
+        fx.drain()
     }
 
     #[test]
@@ -174,7 +162,7 @@ mod tests {
         let grown = limits(4096, 1664, 1792);
 
         assert_eq!(
-            applied(grown, Band::Steady),
+            applied(grown, Brake::Engaged),
             vec![Action::SetMax(3840), Action::SetHigh(3712)]
         );
     }
@@ -184,55 +172,40 @@ mod tests {
         let shrunk = limits(1024, 1664, 1792);
 
         assert_eq!(
-            applied(shrunk, Band::Steady),
+            applied(shrunk, Brake::Engaged),
             vec![Action::SetHigh(640), Action::SetMax(768)]
         );
     }
 
     #[test]
-    fn an_open_band_holds_back_the_guard() {
+    fn a_released_brake_puts_high_on_max() {
         assert_eq!(
-            applied(limits(2048, 1664, 1792), Band::Open),
-            vec![Action::SetHigh(1792 - G)]
-        );
-    }
-
-    #[test]
-    fn a_collapsed_band_puts_high_on_max() {
-        assert_eq!(
-            applied(limits(2048, 1664, 1792), Band::Collapsed),
+            applied(limits(2048, 1664, 1792), Brake::Released),
             vec![Action::SetHigh(1792)]
         );
     }
 
     #[test]
-    fn a_held_band_keeps_high_where_titration_left_it() {
-        assert_eq!(applied(limits(2048, 1000, 1792), Band::Hold), vec![]);
+    fn limits_already_in_place_emit_nothing() {
+        assert_eq!(applied(limits(2048, 1664, 1792), Brake::Engaged), vec![]);
+    }
+
+    #[test]
+    fn the_brake_is_remembered_for_the_next_plug() {
+        let mut limits = limits(2048, 1664, 1792);
+        let mut fx = Effects::default();
+
+        limits.apply(Brake::Released, &mut fx);
+        assert_eq!(limits.brake(), Brake::Released);
+
+        fx.drain();
+        limits.set_total_mem(4096);
+        limits.reapply(&mut fx);
 
         assert_eq!(
-            applied(limits(1024, 1000, 1792), Band::Hold),
-            vec![Action::SetHigh(768), Action::SetMax(768)]
+            fx.drain(),
+            vec![Action::SetMax(3840), Action::SetHigh(3840)]
         );
-    }
-
-    #[test]
-    fn limits_already_in_place_emit_nothing() {
-        assert_eq!(applied(limits(2048, 1664, 1792), Band::Steady), vec![]);
-    }
-
-    #[test]
-    fn the_band_is_remembered_for_the_next_plug() {
-        let mut limits = limits(2048, 1664, 1792);
-        let mut out = Vec::new();
-
-        limits.apply(Band::Open, &mut out);
-        assert_eq!(limits.band(), Band::Open);
-
-        out.clear();
-        limits.set_total_mem(4096);
-        limits.reapply(&mut out);
-
-        assert_eq!(out, vec![Action::SetMax(3840), Action::SetHigh(3840 - G)]);
     }
 
     #[test]

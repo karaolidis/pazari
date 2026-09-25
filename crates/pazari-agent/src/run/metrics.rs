@@ -3,7 +3,7 @@ use pazari_metrics::{
 };
 use pazari_proto::{GuestMessage, HostMessage};
 
-use crate::engine::{Action, Engine, Event, Mode, Snapshot};
+use crate::engine::{Action, Engine, Event, Phase, Snapshot};
 
 const PREFIX: &str = "pazari_agent";
 
@@ -85,22 +85,21 @@ impl Observer {
             return;
         };
 
-        let mode = engine.mode();
+        let phase = engine.phase();
+        let name = phase.name();
 
-        for candidate in Mode::ALL {
+        for candidate in Phase::NAMES {
             series
                 .mode
-                .get_or_create(&ModeLabel {
-                    mode: candidate.as_str(),
-                })
-                .set(i64::from(candidate == mode));
+                .get_or_create(&ModeLabel { mode: candidate })
+                .set(i64::from(candidate == name));
         }
 
-        if mode == Mode::Exhausted && series.was != Some(Mode::Exhausted) {
+        if matches!(phase, Phase::Exhausted(_)) && series.was != Some(name) {
             series.exhaustions.inc();
         }
 
-        series.was = Some(mode);
+        series.was = Some(name);
 
         series.limits.high.set_saturating(engine.high());
         series.limits.max.set_saturating(engine.max());
@@ -109,7 +108,10 @@ impl Observer {
             .limits
             .ceiling
             .set_saturating(engine.ceiling().unwrap_or(0));
-        series.limits.band_open.set(i64::from(engine.band_open()));
+        series
+            .limits
+            .brake_released
+            .set(i64::from(engine.brake_released()));
         series.connected.set(i64::from(engine.is_connected()));
     }
 }
@@ -134,7 +136,7 @@ struct Series {
     connections: Counter,
     disconnections: Counter,
 
-    was: Option<Mode>,
+    was: Option<&'static str>,
 }
 
 impl Series {
@@ -210,20 +212,20 @@ struct Limits {
     max: Gauge,
     total_mem: Gauge,
     ceiling: Gauge,
-    band_open: Gauge,
+    brake_released: Gauge,
 }
 
 impl Limits {
     fn register(&self, registry: &mut Registry) {
         registry.register_with_unit(
             "memory_high",
-            "The workload cgroup's memory.high",
+            "The limit the agent last wrote to memory.high",
             Unit::Bytes,
             self.high.clone(),
         );
         registry.register_with_unit(
             "memory_max",
-            "The workload cgroup's memory.max",
+            "The limit the agent last wrote to memory.max",
             Unit::Bytes,
             self.max.clone(),
         );
@@ -240,9 +242,9 @@ impl Limits {
             self.ceiling.clone(),
         );
         registry.register(
-            "band_open",
-            "Whether the brake is off and the workload may burst",
-            self.band_open.clone(),
+            "brake_released",
+            "Whether memory.high has been let up onto memory.max",
+            self.brake_released.clone(),
         );
     }
 }
@@ -274,18 +276,18 @@ impl Reading {
         );
         registry.register_with_unit(
             "swap_used",
-            "What the guest had swapped out",
+            "What the workload cgroup had swapped out",
             Unit::Bytes,
             self.swap_used.clone(),
         );
         registry.register(
             "high_events",
-            "The workload cgroup's memory.events high, as the kernel counts it",
+            "The workload cgroup's memory.events high",
             self.high_events.clone(),
         );
         registry.register(
             "max_events",
-            "The workload cgroup's memory.events max, as the kernel counts it",
+            "The workload cgroup's memory.events max",
             self.max_events.clone(),
         );
         registry.register(
@@ -337,7 +339,7 @@ mod tests {
         observer.refresh(&engine);
 
         carries(&registry, "pazari_agent_mode{mode=\"steady\"} 1");
-        carries(&registry, "pazari_agent_mode{mode=\"titrating\"} 0");
+        carries(&registry, "pazari_agent_mode{mode=\"exhausted\"} 0");
         carries(
             &registry,
             &format!("pazari_agent_memory_high_bytes {HIGH0}"),
@@ -345,7 +347,7 @@ mod tests {
         carries(&registry, &format!("pazari_agent_memory_max_bytes {MAX0}"));
         carries(&registry, &format!("pazari_agent_total_mem_bytes {BOOT}"));
         carries(&registry, &format!("pazari_agent_ceiling_bytes {CEILING}"));
-        carries(&registry, "pazari_agent_band_open 0");
+        carries(&registry, "pazari_agent_brake_released 0");
         carries(&registry, "pazari_agent_connected 1");
 
         engine.handle(Event::Disconnected { now: at(200) });
@@ -362,12 +364,12 @@ mod tests {
         observer.refresh(&engine);
 
         carries(&registry, "pazari_agent_ceiling_bytes 0");
-        carries(&registry, "pazari_agent_mode{mode=\"titrating\"} 1");
+        carries(&registry, "pazari_agent_mode{mode=\"steady\"} 1");
         carries(&registry, "pazari_agent_connected 0");
     }
 
     #[test]
-    fn a_tick_publishes_the_reading_it_carried() {
+    fn a_tick_publishes_the_workload_cgroup_it_read() {
         let (observer, registry) = Observer::new();
 
         observer.observe_event(&Event::Tick {
@@ -472,7 +474,7 @@ mod tests {
     #[test]
     fn falling_into_exhaustion_is_counted_once_per_fall() {
         let (mut observer, registry) = Observer::new();
-        let mut engine = titrated(config(), 2560 * MIB);
+        let mut engine = started_with(config(), 2560 * MIB);
 
         observer.refresh(&engine);
         wake(&mut engine, at(100), 1);

@@ -2,9 +2,7 @@ use std::time::Duration;
 
 use proptest::prelude::*;
 
-use crate::{
-    DenyReason, GrantReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status, Urgency,
-};
+use crate::{DenyReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status};
 
 pub fn guest_messages() -> Vec<GuestMessage> {
     vec![
@@ -18,22 +16,6 @@ pub fn guest_messages() -> Vec<GuestMessage> {
             id: 1,
             current: 2_147_483_648,
             target: 4_294_967_296,
-            reason: GrantReason::Throttle,
-            urgency: Urgency::High,
-        },
-        GuestMessage::GrantRequest {
-            id: 2,
-            current: 2_147_483_648,
-            target: 3_221_225_472,
-            reason: GrantReason::Preflight,
-            urgency: Urgency::Low,
-        },
-        GuestMessage::GrantRequest {
-            id: 3,
-            current: 2_147_483_648,
-            target: 3_221_225_472,
-            reason: GrantReason::Manual,
-            urgency: Urgency::Low,
         },
         GuestMessage::OfferRelease {
             id: 4,
@@ -108,18 +90,6 @@ pub fn host_messages() -> Vec<HostMessage> {
     ]
 }
 
-fn grant_reason() -> impl Strategy<Value = GrantReason> {
-    prop_oneof![
-        Just(GrantReason::Throttle),
-        Just(GrantReason::Preflight),
-        Just(GrantReason::Manual),
-    ]
-}
-
-fn urgency() -> impl Strategy<Value = Urgency> {
-    prop_oneof![Just(Urgency::Low), Just(Urgency::High)]
-}
-
 fn deny_reason() -> impl Strategy<Value = DenyReason> {
     prop_oneof![
         Just(DenyReason::Ceiling),
@@ -145,22 +115,13 @@ pub fn guest_message() -> impl Strategy<Value = GuestMessage> {
                 }
             }
         ),
-        (
-            any::<u64>(),
-            any::<u64>(),
-            any::<u64>(),
-            grant_reason(),
-            urgency(),
-        )
-            .prop_map(|(id, current, target, reason, urgency)| {
-                GuestMessage::GrantRequest {
-                    id,
-                    current,
-                    target,
-                    reason,
-                    urgency,
-                }
-            }),
+        (any::<u64>(), any::<u64>(), any::<u64>()).prop_map(|(id, current, target)| {
+            GuestMessage::GrantRequest {
+                id,
+                current,
+                target,
+            }
+        }),
         (any::<u64>(), any::<u64>(), any::<u64>()).prop_map(|(id, current, releasable)| {
             GuestMessage::OfferRelease {
                 id,

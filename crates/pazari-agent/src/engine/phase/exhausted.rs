@@ -1,62 +1,95 @@
-use pazari_types::Timestamp;
+use pazari_types::{Deadline, Timestamp};
 use tracing::warn;
 
 use crate::engine::{
     config::ExhaustionMode,
-    context::Context,
-    limits::Band,
-    phase::{Phase, State, growing::Growing, steady::Steady},
+    counters::Pressure,
+    limits::Brake,
+    phase::{Phase, State, Step, growing::Growing, spare, steady::Steady},
+    scale::{Escalation, GrowScale},
+    streak::Streak,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Exhausted {
+    scale: GrowScale,
     since: Timestamp,
-    retry_at: Option<Timestamp>,
+    retry_at: Option<Deadline>,
+    recovery: Streak,
 }
 
 impl Exhausted {
-    pub fn enter(ctx: &mut Context, now: Timestamp, exhausted_since: Option<Timestamp>) -> Phase {
-        let since = exhausted_since.unwrap_or(now);
-
-        let (band, retry_at) = match ctx.config.exhaustion {
-            ExhaustionMode::Stall { timeout } if now < since.saturating_add(timeout.get()) => (
-                Band::Open,
-                Some(now.saturating_add(ctx.config.deny_backoff.get())),
-            ),
-            ExhaustionMode::Kill | ExhaustionMode::Stall { .. } => (Band::Collapsed, None),
-        };
+    pub fn enter(
+        step: &mut Step<'_>,
+        scale: GrowScale,
+        exhausted_since: Option<Timestamp>,
+    ) -> Phase {
+        let since = exhausted_since.unwrap_or(step.now);
 
         if exhausted_since.is_none() {
             warn!(
-                usage = ctx.last.workload_usage,
-                total_mem = ctx.limits.total_mem(),
-                ceiling = ?ctx.limits.ceiling(),
+                usage = step.guest().usage(),
+                total_mem = step.limits().total_mem(),
+                ceiling = ?step.limits().ceiling(),
                 "workload demand exceeds its ceiling",
             );
         }
 
-        if band == Band::Collapsed && ctx.limits.band() != Band::Collapsed {
-            warn!(
-                usage = ctx.last.workload_usage,
-                total_mem = ctx.limits.total_mem(),
-                exhaustion = ?ctx.config.exhaustion,
-                "at the ceiling with nothing left to request; releasing the brake",
-            );
-        }
+        let retry_at = if Self::stalling(step, since) {
+            Some(Deadline::after(step.now, step.config().deny_backoff.get()))
+        } else {
+            if !step.limits().released() {
+                warn!(
+                    usage = step.guest().usage(),
+                    total_mem = step.limits().total_mem(),
+                    exhaustion = ?step.config().exhaustion,
+                    "at the ceiling with nothing left to request; releasing the brake",
+                );
+            }
 
-        ctx.apply_limits(band);
+            None
+        };
 
-        Phase::Exhausted(Self { since, retry_at })
+        Self::at(step, scale, since, retry_at)
     }
 
-    fn retry(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        if ctx.connected {
-            return Growing::start(ctx, now, Some(self.since));
+    fn at(
+        step: &mut Step<'_>,
+        scale: GrowScale,
+        since: Timestamp,
+        retry_at: Option<Deadline>,
+    ) -> Phase {
+        step.brake(if retry_at.is_some() {
+            Brake::Engaged
+        } else {
+            Brake::Released
+        });
+
+        Phase::Exhausted(Self {
+            scale,
+            since,
+            retry_at,
+            recovery: Streak::BROKEN,
+        })
+    }
+
+    fn stalling(step: &Step<'_>, since: Timestamp) -> bool {
+        match step.config().exhaustion {
+            ExhaustionMode::Stall { timeout } => {
+                !Deadline::after(since, timeout.get()).reached(step.now)
+            }
+            ExhaustionMode::Kill => false,
+        }
+    }
+
+    fn retry(self, step: &mut Step<'_>) -> Phase {
+        if step.world.connected() && step.world.grow_target(self.scale).is_some() {
+            return Growing::start(step, self.scale, Some(self.since));
         }
 
         Phase::Exhausted(Self {
-            since: self.since,
-            retry_at: Some(now.saturating_add(ctx.config.deny_backoff.get())),
+            retry_at: Some(Deadline::after(step.now, step.config().deny_backoff.get())),
+            ..self
         })
     }
 }
@@ -70,60 +103,59 @@ impl State for Exhausted {
         "the workload is stalled at its ceiling"
     }
 
-    fn advance(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        if let ExhaustionMode::Stall { timeout } = ctx.config.exhaustion
-            && now >= self.since.saturating_add(timeout.get())
-            && ctx.limits.band() != Band::Collapsed
-        {
+    fn brake(self, _step: &mut Step<'_>) -> Phase {
+        self.stay()
+    }
+
+    fn on_connected(self, _step: &mut Step<'_>) -> Phase {
+        Phase::Exhausted(Self {
+            scale: GrowScale::ONE,
+            ..self
+        })
+    }
+
+    fn resume(self, step: &mut Step<'_>) -> Phase {
+        Growing::start(step, self.scale, Some(self.since))
+    }
+
+    fn advance(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
+        if !Self::stalling(step, self.since) && !step.limits().released() {
             warn!(
-                usage = ctx.last.workload_usage,
-                total_mem = ctx.limits.total_mem(),
-                ?timeout,
+                usage = step.guest().usage(),
+                total_mem = step.limits().total_mem(),
+                exhaustion = ?step.config().exhaustion,
                 "workload stalled for its whole timeout; releasing the brake",
             );
 
-            ctx.apply_limits(Band::Collapsed);
-
-            return Phase::Exhausted(Self {
-                since: self.since,
-                retry_at: None,
-            });
+            return Self::at(step, self.scale, self.since, None);
         }
 
         match self.retry_at {
-            Some(at) if now >= at => self.retry(ctx, now),
+            Some(at) if at.reached(step.now) => self.retry(step),
             _ => self.stay(),
         }
     }
 
-    fn brake(self, _ctx: &mut Context, _now: Timestamp) -> Phase {
-        self.stay()
-    }
-
-    fn on_total_changed(self, ctx: &mut Context, now: Timestamp, changed: bool) -> Phase {
+    fn on_total_changed(self, step: &mut Step<'_>, changed: bool) -> Phase {
         if changed {
-            return Steady::settle(ctx, now);
+            return Steady::settled(step, self.scale);
         }
 
         self.stay()
     }
 
-    fn on_interval(self, ctx: &mut Context, _now: Timestamp, throttled: bool) -> Phase {
-        if !ctx.quiet_streak(throttled) {
-            return self.stay();
+    fn on_interval(self, step: &mut Step<'_>, pressure: Pressure) -> Phase {
+        let recovery = self.recovery.then(spare(step, pressure));
+
+        if !recovery.reached(step.config().release_intervals) {
+            return Phase::Exhausted(Self { recovery, ..self });
         }
 
-        ctx.idle.reset();
-
-        Steady::recover(ctx)
+        Steady::recovered(step, Escalation::NONE)
     }
 
-    fn on_ceiling_raised(self, ctx: &mut Context, now: Timestamp) -> Option<Phase> {
-        Some(Growing::start(ctx, now, None))
-    }
-
-    fn resume(self, ctx: &mut Context, now: Timestamp) -> Phase {
-        Growing::start(ctx, now, Some(self.since))
+    fn on_ceiling_raised(self, step: &mut Step<'_>) -> Option<Phase> {
+        Some(Growing::start(step, self.scale, None))
     }
 }
 
@@ -131,11 +163,11 @@ impl State for Exhausted {
 mod tests {
     use pazari_proto::{DenyReason, HostMessage};
 
-    use crate::engine::{Action, EngineConfig, Event, ExhaustionMode, Mode, testing::*};
+    use crate::engine::{Action, EngineConfig, Event, ExhaustionMode, Phase, testing::*};
 
     #[test]
-    fn a_ceiling_deny_stalls_with_the_band_open_and_stops_asking() {
-        let mut engine = titrated(config(), 2560 * MIB);
+    fn a_ceiling_deny_stalls_under_the_brake_and_stops_asking() {
+        let mut engine = started_with(config(), 2560 * MIB);
 
         wake(&mut engine, at(100), 1);
         host(
@@ -148,9 +180,9 @@ mod tests {
             },
         );
 
-        assert_eq!(engine.mode(), Mode::Exhausted);
-        assert!(engine.band_open());
-        assert_eq!(engine.high(), OPEN0);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
+        assert!(!engine.brake_released());
+        assert_eq!(engine.high(), HIGH0);
 
         let mut asked = Vec::new();
         for second in 101..=130 {
@@ -175,14 +207,14 @@ mod tests {
         }
 
         assert_eq!(asked, vec![105, 110]);
-        assert_eq!(engine.mode(), Mode::Exhausted);
-        assert!(engine.band_open());
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
+        assert!(engine.brake_released());
         assert_eq!(engine.high(), MAX0);
     }
 
     #[test]
     fn a_raised_ceiling_ends_the_stall() {
-        let mut engine = titrated(config(), 2560 * MIB);
+        let mut engine = started_with(config(), 2560 * MIB);
 
         wake(&mut engine, at(100), 1);
         host(
@@ -205,7 +237,7 @@ mod tests {
             ),
             vec![request(2, BOOT, 2560 * MIB)]
         );
-        assert_eq!(engine.mode(), Mode::AwaitingGrant);
+        assert!(matches!(engine.phase(), Phase::Growing(_)));
 
         host(
             &mut engine,
@@ -223,12 +255,12 @@ mod tests {
             }),
             vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
         );
-        assert_eq!(engine.mode(), Mode::Steady);
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
     }
 
     #[test]
     fn an_unsolicited_plug_retires_the_stall() {
-        let mut engine = titrated(config(), 2560 * MIB);
+        let mut engine = started_with(config(), 2560 * MIB);
 
         wake(&mut engine, at(100), 1);
         host(
@@ -240,7 +272,7 @@ mod tests {
                 retry_after_ms: None,
             },
         );
-        assert_eq!(engine.mode(), Mode::Exhausted);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
 
         assert_eq!(
             engine.handle(Event::TotalChanged {
@@ -249,14 +281,12 @@ mod tests {
             }),
             vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
         );
-        assert_eq!(engine.mode(), Mode::Steady);
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
 
-        assert_eq!(
-            wake(&mut engine, at(201), 2),
-            vec![Action::SetHigh(2240 * MIB)]
-        );
-        assert_eq!(engine.mode(), Mode::Exhausted);
-        assert!(engine.band_open());
+        assert_eq!(wake(&mut engine, at(201), 2), vec![]);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
+        assert!(!engine.brake_released());
+        assert_eq!(engine.high(), 2048 * MIB);
     }
 
     #[test]
@@ -265,7 +295,7 @@ mod tests {
             exhaustion: ExhaustionMode::Kill,
             ..config()
         };
-        let mut engine = titrated(config, 2560 * MIB);
+        let mut engine = started_with(config, 2560 * MIB);
 
         wake(&mut engine, at(100), 1);
         host(
@@ -285,26 +315,26 @@ mod tests {
             );
         }
 
-        assert_eq!(engine.mode(), Mode::Exhausted);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
         assert_eq!(engine.pending_request(), None);
-        assert!(engine.band_open());
+        assert!(engine.brake_released());
     }
 
     #[test]
     fn a_target_already_at_the_ceiling_exhausts_without_asking() {
-        let mut engine = titrated(config(), BOOT);
+        let mut engine = started_with(config(), BOOT);
 
-        assert_eq!(wake(&mut engine, at(100), 1), vec![Action::SetHigh(OPEN0)]);
-        assert_eq!(engine.mode(), Mode::Exhausted);
+        assert_eq!(wake(&mut engine, at(100), 1), vec![]);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
         assert_eq!(engine.pending_request(), None);
     }
 
     #[test]
     fn a_stall_recovers_after_sustained_calm() {
-        let mut engine = titrated(config(), BOOT);
+        let mut engine = started_with(config(), BOOT);
 
         wake(&mut engine, at(100), 1);
-        assert_eq!(engine.mode(), Mode::Exhausted);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
 
         for second in 101..=104 {
             assert_eq!(
@@ -313,23 +343,21 @@ mod tests {
                 "unexpected action at t+{second}"
             );
         }
-        assert_eq!(engine.mode(), Mode::Exhausted);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
 
         assert_eq!(tick(&mut engine, at(105), snap(BOOT, CALM, 1)), vec![]);
         assert_eq!(tick(&mut engine, at(106), snap(BOOT, CALM, 1)), vec![]);
-        assert_eq!(engine.mode(), Mode::Exhausted);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
 
-        assert_eq!(
-            tick(&mut engine, at(107), snap(BOOT, CALM, 1)),
-            vec![Action::SetHigh(HIGH0)]
-        );
-        assert_eq!(engine.mode(), Mode::Steady);
-        assert!(!engine.band_open());
+        assert_eq!(tick(&mut engine, at(107), snap(BOOT, CALM, 1)), vec![]);
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
+        assert!(!engine.brake_released());
+        assert_eq!(engine.high(), HIGH0);
     }
 
     #[test]
     fn recovery_needs_usage_back_under_the_steady_line() {
-        let mut engine = titrated(config(), BOOT);
+        let mut engine = started_with(config(), BOOT);
 
         wake(&mut engine, at(100), 1);
 
@@ -343,19 +371,19 @@ mod tests {
             }
         }
 
-        assert_eq!(engine.mode(), Mode::Exhausted);
-        assert!(engine.band_open());
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
+        assert!(engine.brake_released());
         assert_eq!(engine.high(), MAX0);
     }
 
     #[test]
     fn a_disconnected_stall_still_collapses() {
-        let mut engine = titrated(config(), BOOT);
+        let mut engine = started_with(config(), BOOT);
 
         wake(&mut engine, at(100), 1);
         engine.handle(Event::Disconnected { now: at(101) });
-        assert_eq!(engine.mode(), Mode::Exhausted);
-        assert_eq!(engine.high(), OPEN0);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
+        assert_eq!(engine.high(), HIGH0);
 
         for second in 102..=111 {
             assert_eq!(
@@ -373,8 +401,8 @@ mod tests {
     }
 
     #[test]
-    fn a_raised_ceiling_re_engages_the_guard_after_the_collapse() {
-        let mut engine = titrated(config(), BOOT);
+    fn a_raised_ceiling_re_engages_the_brake_after_the_collapse() {
+        let mut engine = started_with(config(), BOOT);
 
         wake(&mut engine, at(100), 1);
         tick(&mut engine, at(112), snap(BOOT, STALLED, 1));
@@ -388,15 +416,15 @@ mod tests {
                     ceiling: 2560 * MIB
                 },
             ),
-            vec![Action::SetHigh(OPEN0), request(1, BOOT, 2560 * MIB)]
+            vec![Action::SetHigh(HIGH0), request(1, BOOT, 2560 * MIB)]
         );
-        assert_eq!(engine.mode(), Mode::AwaitingGrant);
+        assert!(matches!(engine.phase(), Phase::Growing(_)));
         assert!(engine.high() < engine.max());
     }
 
     #[test]
     fn a_throttle_resets_the_recovery_count() {
-        let mut engine = titrated(config(), BOOT);
+        let mut engine = started_with(config(), BOOT);
 
         wake(&mut engine, at(100), 1);
 
@@ -405,13 +433,11 @@ mod tests {
         assert_eq!(tick(&mut engine, at(103), snap(BOOT, CALM, 2)), vec![]);
         assert_eq!(tick(&mut engine, at(104), snap(BOOT, CALM, 2)), vec![]);
         assert_eq!(tick(&mut engine, at(105), snap(BOOT, CALM, 2)), vec![]);
-        assert_eq!(engine.mode(), Mode::Exhausted);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
 
-        assert_eq!(
-            tick(&mut engine, at(106), snap(BOOT, CALM, 2)),
-            vec![Action::SetHigh(HIGH0)]
-        );
-        assert_eq!(engine.mode(), Mode::Steady);
+        assert_eq!(tick(&mut engine, at(106), snap(BOOT, CALM, 2)), vec![]);
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
+        assert_eq!(engine.high(), HIGH0);
     }
 
     #[test]
@@ -420,7 +446,7 @@ mod tests {
             exhaustion: ExhaustionMode::Kill,
             ..config()
         };
-        let mut engine = titrated(config, 2560 * MIB);
+        let mut engine = started_with(config, 2560 * MIB);
 
         wake(&mut engine, at(100), 1);
         host(
@@ -432,7 +458,7 @@ mod tests {
                 retry_after_ms: None,
             },
         );
-        assert_eq!(engine.mode(), Mode::Exhausted);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
 
         assert_eq!(tick(&mut engine, at(101), snap(BOOT, CALM, 1)), vec![]);
 
@@ -442,6 +468,6 @@ mod tests {
             tick(&mut engine, at(104), snap(BOOT, CALM, 1)),
             vec![Action::SetHigh(HIGH0)]
         );
-        assert_eq!(engine.mode(), Mode::Steady);
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
     }
 }

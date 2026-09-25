@@ -1,4 +1,4 @@
-.Dd September 23, 2026
+.Dd September 25, 2026
 .Dt PAZARI-STRESS 1
 .Os pazari
 .Sh NAME
@@ -6,390 +6,259 @@
 .Nd deterministic memory workload generator
 .Sh SYNOPSIS
 .Nm
-.Op Fl -interval Ar duration
 .Op Fl -arena Ar size
+.Op Fl -fill Cm index | random
+.Op Fl -interval Ar duration
 .Op Fl -no-reserve
 .Op Fl -no-thp
-.Op Fl -fill Cm index | random
 .Ar phase ...
 .Sh DESCRIPTION
 .Nm
-touches memory to a written plan and reports what it did, one JSON object per
-line, on standard output.
-It is meant for tests: the load has a shape that is known in advance, and the
-record of what the load did is a file rather than a graph.
+allocates and frees memory according to a plan given on the command line, and
+writes a JSON record of its progress to standard output.
+It is intended for testing
+.Xr pazari-agent 1
+and
+.Xr pazarid 1 .
 .Pp
-The tool holds exactly one mapping, the
-.Em arena :
-anonymous, private, readable and writable, sized once at startup and never
-resized.
-Inside the arena it keeps a
-.Em frontier ,
-the byte offset up to which pages have been touched.
-Every phase of the plan moves the frontier, or deliberately does not:
+The tool maps a single anonymous region, the arena, at startup.
+It tracks a frontier: the offset below which pages are resident.
+Each phase moves the frontier or leaves it in place:
 .Bl -tag -width "release" -offset indent
 .It Cm grow
-Advances the frontier, writing into pages the run has not touched since they
-were last dropped.
-Each such write is a page fault.
+Advance the frontier, faulting in each page it passes.
 .It Cm release
-Retreats the frontier, dropping the pages behind it with
+Move the frontier back, dropping pages with
 .Dv MADV_DONTNEED .
 .It Cm churn
-Rewrites what is already resident without moving the frontier.
+Rewrite resident pages without moving the frontier.
 .It Cm hold
-Touches nothing.
+Do nothing for a time.
 .El
 .Pp
-A
-.Cm grow
-that advances over pages an earlier
-.Cm release
-dropped faults them in again.
-.Pp
-The run is single-threaded and synchronous.
-It makes no allocation the plan did not ask for.
-A phase that reports no progress is therefore one the kernel is not letting
-proceed.
+The tool is single-threaded and allocates nothing beyond the plan, so a phase
+that stops progressing is being held back by the kernel.
 .Sh OPTIONS
 .Bl -tag -width Ds
-.It Fl -interval Ar duration
-How often a running phase reports its progress.
-The default is
-.Cm 500ms .
-Parsed as a free-form duration, so
-.Cm 250ms ,
-.Cm 2s
-and
-.Cm 1m 30s
-are all accepted.
 .It Fl -arena Ar size
-How much address space to map.
-The default is the plan's own peak frontier, which is the smallest arena the
-plan can run in.
-Name a larger one to map more than the plan will touch; a plan that never
-grows has no peak of its own and must be given an arena.
-A plan whose frontier would run past the arena is refused before the mapping
-is made.
-.It Fl -no-reserve
-Map the arena
-.Dv MAP_NORESERVE ,
-so that it is never committed up front.
-Without this the whole arena is charged to
-.Va Committed_AS
-at
-.Xr mmap 2
-time, and under strict overcommit an arena larger than memory plus swap
-cannot be mapped at all.
-With it, nothing is charged until a page is touched.
-Either way the cgroup the agent brakes only ever sees the pages the tool has
-actually written.
-.It Fl -no-thp
-Apply
-.Dv MADV_NOHUGEPAGE
-to the arena, keeping transparent huge pages out of it.
-Without this, a guest on
-.Va transparent_hugepage=always
-faults the arena in 2MiB at a time, and a workload that overshoots
-.Va memory.high
-by a huge page overshoots it by 512 times what the brake expected.
+Size of the arena.
+Defaults to the plan's peak frontier.
+Required if the plan never grows.
 .It Fl -fill Cm index | random
-What every touched page is filled with.
-The default is
-.Cm index .
-See
-.Sx FILL PATTERNS .
+What to write into each page.
+.Cm index ,
+the default, writes one word per page.
+.Cm random
+fills each page with pseudo-random data, which a compressed swap device such as
+zram cannot shrink.
+.It Fl -interval Ar duration
+How often a running phase reports progress.
+Default
+.Cm 500ms .
+.It Fl -no-reserve
+Map the arena with
+.Dv MAP_NORESERVE ,
+so it is not charged to
+.Va Committed_AS
+when mapped.
+Needed for an arena larger than memory plus swap under strict overcommit.
+.It Fl -no-thp
+Exclude the arena from transparent huge pages with
+.Dv MADV_NOHUGEPAGE .
 .El
 .Sh PHASES
-A phase spec is a kind, an
-.Ql = ,
-its target, and then comma-separated
+Each
+.Ar phase
+is a kind, a target, and optional
 .Ar key Ns = Ns Ar value
-options:
+settings:
 .Bd -literal -offset indent
-grow=2GiB[,rate=100MiB/s][,chunk=1MiB]
-churn=30s,rate=500MiB/s[,chunk=1MiB]
-hold=30s
-release=1GiB[,rate=100MiB/s][,chunk=64MiB]
+grow=SIZE[,rate=SIZE/s][,chunk=SIZE]
+release=SIZE[,rate=SIZE/s][,chunk=SIZE]
+churn=DURATION,rate=SIZE/s[,chunk=SIZE]
+hold=DURATION
 .Ed
 .Pp
-Phases run in the order they are given.
-.Bl -tag -width "release" -offset indent
-.It Cm grow Ns = Ns Ar size
-Advances the frontier by
-.Ar size .
+Phases run in order.
 .Cm rate
-is optional; the default
+limits throughput and is required for
+.Cm churn .
+Without it, a phase runs as fast as it can.
 .Cm chunk
-is
-.Cm 1MiB .
-.It Cm churn Ns = Ns Ar duration
-Rewrites the resident set for
-.Ar duration .
-.Cm rate
-is required, because a churn has no other end to reach; the default
-.Cm chunk
-is
-.Cm 1MiB .
-.It Cm hold Ns = Ns Ar duration
-Waits
-.Ar duration ,
-touching nothing.
-Takes no options.
-.It Cm release Ns = Ns Ar size
-Retreats the frontier by
-.Ar size .
-.Cm rate
-is optional; the default
-.Cm chunk
-is
-.Cm 64MiB .
-.El
-.Pp
-.Cm rate
-is a byte count per second, written with a
-.Ql /s
-suffix.
-.Cm chunk
-is how much memory one pass of the inner loop moves before the pacer is
-consulted again; a smaller chunk paces more evenly and costs more overhead.
-.Pp
-Byte counts are parsed with both scales: the binary suffixes
-.Cm KiB , MiB , GiB
+is how much memory is moved between rate checks; smaller chunks pace more
+evenly.
+It defaults to 1MiB for
+.Cm grow
 and
-.Cm TiB
-count 1024, and the decimal suffixes
-.Cm kB , MB , GB
-and
-.Cm TB
-count 1000.
-A bare number is a count of bytes.
-Zero is never a legal target, rate, chunk or arena.
+.Cm churn ,
+and 64MiB for
+.Cm release .
 .Pp
-The whole plan is parsed and checked before anything is mapped.
-A release that would retreat past the start of the arena, a churn over an
-arena nothing has grown into yet, and a plan that reaches past the arena are
-all refused at that point, naming the phase by its index.
-.Ss Page granularity
-The frontier is a byte offset, but memory moves in pages.
+Sizes and durations are written as in
+.Xr pazari-agent.toml 5 .
+Zero is not allowed for any size, rate or chunk.
+.Pp
+The whole plan is checked before anything is mapped.
+A plan that releases below the start of the arena, churns an empty arena, or
+grows past the arena is rejected.
 .Pp
 A
 .Cm grow
-faults in every page its range reaches, including a page the range only ends
-inside.
+faults in every page it touches, including a partial final page.
 A
 .Cm release
-drops only the pages its range holds whole: half a page cannot go back while
-the other half is still live, so a range that starts or ends inside a page
-leaves that page resident.
-.Sh FILL PATTERNS
-.Bl -tag -width Ds
-.It Cm index
-One word at the start of the page, derived from the page's own ordinal.
-Cheap, and every page ends up distinct.
-.It Cm random
-The whole page filled with inline xorshift output, seeded from the page's own
-ordinal.
-Incompressible, so a zram device cannot hold the page for less than it costs.
-Use it wherever a compressed swap device would otherwise make the guest look
-roomier than it is.
-.El
+drops only whole pages, so a range that ends mid-page leaves that page
+resident.
 .Sh OUTPUT
-The tool writes its events to standard output and its logs to standard error,
-so a caller can redirect the stream to a file and still see what went wrong.
-.Pp
-Each event is one JSON object on one line, carrying a
+Events are written to standard output as one JSON object per line; logs go to
+standard error.
+Every event has a
 .Va type
-member naming the event in
-.Cm snake_case .
-Memory quantities are counts of bytes as JSON integers in the
-.Vt u64
-range.
+field.
+Byte counts are integers, and
 .Va elapsed_ms
-is milliseconds since the process started, taken from a monotonic clock.
+is milliseconds since the process started, from a monotonic clock.
 .Pp
-An event stream is exactly one
-.Cm started ,
-then for each phase in order one
+A run writes one
+.Cm started
+event, then for each phase one
 .Cm phase ,
 zero or more
-.Cm progress ,
+.Cm progress
 and one
 .Cm completed ,
-and then one terminal event.
-An interruption or a failure replaces the rest of the stream.
-.Ss started
-The first event.
-.Bl -tag -width "no_reserve" -offset indent
-.It Va pid
-The workload's process id.
-.It Va page_size
-The guest's page size.
-.It Va arena
-What was mapped, rounded up to a whole page.
-.It Va no_reserve
-Whether the arena was mapped
-.Dv MAP_NORESERVE .
-.It Va no_thp
-Whether huge pages were kept out of the arena.
-.It Va fill
-.Cm index
+and finally one of
+.Cm done ,
+.Cm interrupted
 or
-.Cm random .
-.It Va plan
-The parsed plan, one object per phase, in the order it runs.
-Each entry carries the
-.Va spec
-it was parsed from, its
+.Cm failed .
+An interruption or failure ends the stream early.
+.Bl -tag -width "interrupted"
+.It Cm started
+.Va pid ,
+.Va page_size ,
+.Va arena
+(rounded up to a page),
+.Va no_reserve ,
+.Va no_thp ,
+.Va fill ,
+and
+.Va plan ,
+an array of the parsed phases.
+Each phase has
+.Va spec ,
 .Va kind ,
-its
 .Va target_bytes
 or
 .Va target_ms ,
-its
 .Va chunk ,
-and its
+and
 .Va rate_bps
-if it has one.
-.El
-.Ss phase
-Emitted once as a phase starts.
-Exactly one of
-.Va target_bytes
-and
-.Va target_ms
-is present, decided by
-.Va kind .
-.Bl -tag -width "target_bytes" -offset indent
-.It Va index
-The phase's position in the plan, from zero.
-.It Va kind
-.Cm grow , churn , hold
-or
-.Cm release .
-.It Va target_bytes
-What a
-.Cm grow
-or a
-.Cm release
-moves.
-.It Va target_ms
-How long a
-.Cm churn
-or a
-.Cm hold
-runs.
-.El
-.Ss progress
-Emitted every
-.Fl -interval
-while a phase runs, for every kind of phase.
-A phase that ends before its first interval is due reports no
-.Cm progress
-at all.
-.Bl -tag -width "elapsed_ms" -offset indent
-.It Va index
-The running phase.
-.It Va elapsed_ms
-Since the process started.
-.It Va touched
-What this phase has moved so far: bytes written for a
-.Cm grow
-and a
-.Cm churn ,
-bytes released for a
-.Cm release ,
-and zero for a
-.Cm hold .
-It resets at the start of every phase.
-.It Va frontier
-Where the frontier stands now.
-.It Va rate_bps
-What was moved since the last
-.Cm progress ,
-per second.
-This is the number that falls when the brake catches the workload.
-.El
-.Ss completed
-Emitted once a phase reaches its target.
-Carries
+if set.
+.It Cm phase
 .Va index
+(from 0),
+.Va kind ,
 and
+.Va target_bytes
+for
+.Cm grow
+and
+.Cm release
+or
+.Va target_ms
+for
+.Cm churn
+and
+.Cm hold .
+.It Cm progress
+.Va index ,
+.Va elapsed_ms ,
+.Va touched
+(bytes moved so far in this phase; 0 for
+.Cm hold ) ,
+.Va frontier ,
+and
+.Va rate_bps
+since the previous report.
+A falling
+.Va rate_bps
+shows the throttle taking effect.
+A phase shorter than
+.Fl -interval
+reports no progress.
+.It Cm completed
+.Va index ,
 .Va elapsed_ms .
-.Ss done
-The last event of a run that finished its plan.
-Carries
+.It Cm done
 .Va elapsed_ms .
-.Ss interrupted
-The last event of a run stopped by
+.It Cm interrupted
+.Va index
+of the running phase and
+.Va elapsed_ms ,
+after
 .Dv SIGTERM
 or
 .Dv SIGINT .
-Carries
-.Va index ,
-the phase that was running, and
-.Va elapsed_ms .
-.Ss failed
-The last event of a run that could not carry on.
-Carries
+.It Cm failed
 .Va elapsed_ms
 and
 .Va error ,
-a human-readable string for logs.
+a human-readable message.
+.El
 .Sh ENVIRONMENT
 .Bl -tag -width Ds
 .It Ev RUST_LOG
-The log filter, in the directive syntax the
-.Va tracing
-crate's environment filter reads.
-The default is
+Log filter, in
+.Va tracing-subscriber
+.Va EnvFilter
+syntax.
+Defaults to
 .Cm info .
-The event stream on standard output is not a log, and this does not filter it.
+Does not affect the event stream.
 .It Ev JOURNAL_STREAM
 Set by systemd.
-Where it names the generator's own standard error, records go to the journal at
-their own priority, their fields under an
-.Cm F_
-prefix; otherwise they go to standard error.
+When it refers to standard error, logs go to the journal directly, with
+structured fields prefixed
+.Cm F_ .
 .El
 .Sh EXIT STATUS
-.Bl -tag -width Ds
+.Bl -tag -width Ds -compact
 .It 0
 The run ended with
 .Cm done
-or with
+or
 .Cm interrupted .
 .It 1
 The run ended with
 .Cm failed .
 .It 2
-The command line itself was refused, before any event was written.
+The command line was invalid; no events were written.
 .El
 .Sh EXAMPLES
-Grow two gigabytes at a paced rate, sit on them, and hand most of them back:
+Grow to 2GiB, hold, then return most of it:
 .Bd -literal -offset indent
-pazari-stress --no-reserve \e
+$ pazari-stress --no-reserve \e
     grow=2GiB,rate=384MiB/s hold=30s release=1536MiB hold=60s
 .Ed
 .Pp
-Burst as fast as the kernel will allow, which is what a brake has to survive:
+Allocate as fast as possible, to test the brake:
 .Bd -literal -offset indent
-pazari-stress --arena 4GiB grow=200MiB,rate=200MiB/s grow=3GiB hold=300s
+$ pazari-stress --arena 4GiB grow=200MiB,rate=200MiB/s grow=3GiB hold=300s
 .Ed
 .Pp
-Fill with incompressible pages, so that a zram device cannot hide the cost:
+Use incompressible pages, for guests with zram:
 .Bd -literal -offset indent
-pazari-stress --fill random --no-thp grow=1GiB,rate=128MiB/s hold=120s
+$ pazari-stress --fill random --no-thp grow=1GiB,rate=128MiB/s hold=120s
 .Ed
 .Pp
-Read the stream back as it is written:
+Show only progress events:
 .Bd -literal -offset indent
-pazari-stress grow=1GiB hold=10s | jq -c 'select(.type == "progress")'
+$ pazari-stress grow=1GiB hold=10s | jq -c 'select(.type == "progress")'
 .Ed
 .Sh SEE ALSO
 .Xr pazari-agent 1 ,
 .Xr pazarid 1 ,
-.Xr pazari 7
-.Pp
 .Xr madvise 2 ,
-.Xr mmap 2
+.Xr mmap 2 ,
+.Xr pazari 7

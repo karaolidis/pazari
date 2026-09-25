@@ -11,9 +11,4 @@ pub enum EngineError {
         burst_reserve: u64,
         block_size: u64,
     },
-
-    #[error(
-        "a {open_guard} byte open guard leaves nothing of the {burst_reserve} byte burst reserve to release"
-    )]
-    GuardSwallowsReserve { open_guard: u64, burst_reserve: u64 },
 }

@@ -78,7 +78,6 @@ in
         engine = {
           service_reserve = "256MiB";
           burst_reserve = "256MiB";
-          open_guard = "64MiB";
         };
 
         transport.kind = "vsock";

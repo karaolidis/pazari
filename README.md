@@ -1,21 +1,26 @@
 # pazari
 
-Guest-initiated VM memory negotiation.
+Guest-initiated memory negotiation for virtual machines.
 
-Virtual machines are sized by guesswork: a static allocation chosen before
-anyone knows what the workload will do, and so either wasteful or too small.
-`pazari` ("παζάρι", "paˈza.ɾi", haggling) inverts that. A guest agent brakes
-the workload with the cgroup `memory.high` throttle instead of letting the
-kernel kill it, and spends the time the brake buys asking a host daemon for
-more memory.
+VMs are usually given a fixed amount of memory, chosen before anyone knows what
+the workload needs. With `pazari`, the guest asks for memory when it needs it
+and gives it back when it doesn't. An agent in the guest throttles the workload
+with the cgroup `memory.high` limit before it runs out, and asks a daemon on the
+host for more while it is throttled.
+
+The name is Greek for haggling: παζάρι, /paˈza.ɾi/.
 
 ## Components
 
-- `pazari-agent` - guest agent; cgroup-driven detection, braking, and requests.
-- `pazarid` - host daemon; arbitration across guests and virtio-mem actuation.
-- `pazari-stress` - deterministic memory workload generator for testing.
+- `pazari-agent` runs in the guest. It throttles the workload cgroup and asks
+  the host for memory.
+- `pazarid` runs on the host. It decides which guests may grow and resizes their
+  virtio-mem devices over QMP.
+- `pazari-stress` generates predictable memory load for testing.
 
 ## Quickstart
+
+On the host:
 
 ```nix
 {
@@ -44,7 +49,7 @@ more memory.
 }
 ```
 
-The guest's half, inside the VM:
+In the guest:
 
 ```nix
 {
@@ -57,7 +62,6 @@ The guest's half, inside the VM:
       engine = {
         service_reserve = "512MiB";
         burst_reserve = "256MiB";
-        open_guard = "64MiB";
       };
 
       transport.kind = "vsock";
@@ -66,8 +70,9 @@ The guest's half, inside the VM:
 }
 ```
 
-The VM itself needs a virtio-mem device to grow into, and the daemon needs a
-QMP socket of its own rather than the one microvm.nix already drives:
+The VM needs a virtio-mem device to grow into, and a QMP socket for the daemon
+separate from the one microvm.nix uses. The `UMask` makes that socket accessible
+to the daemon's group.
 
 ```nix
 {
@@ -88,18 +93,21 @@ QMP socket of its own rather than the one microvm.nix already drives:
 }
 ```
 
+See `pazari(7)` for guest kernel requirements and for running containerised
+workloads.
+
 ## Documentation
 
-| Page                   | What it covers                                     |
-| ---------------------- | -------------------------------------------------- |
-| `pazari(7)`            | What this is, and how to deploy it.                |
-| `pazari-agent(1)`      | The guest agent, its subcommands, and preflight.   |
-| `pazarid(1)`           | The host daemon.                                   |
-| `pazari-stress(1)`     | The workload generator and its event stream.       |
-| `pazari-agent.toml(5)` | Every agent setting, and how to size the reserves. |
-| `pazarid.toml(5)`      | Every daemon setting.                              |
+| Page                   | Covers                                       |
+| ---------------------- | -------------------------------------------- |
+| `pazari(7)`            | Overview and deployment.                     |
+| `pazari-agent(1)`      | The guest agent, its commands and preflight. |
+| `pazarid(1)`           | The host daemon.                             |
+| `pazari-stress(1)`     | The load generator and its output.           |
+| `pazari-agent.toml(5)` | Agent settings and sizing the reserves.      |
+| `pazarid.toml(5)`      | Daemon settings.                             |
 
-Annotated configuration files are in `examples/`.
+Annotated example configurations are in `examples/`.
 
 ## Development
 
@@ -111,8 +119,10 @@ nix build
 nix fmt
 ```
 
+Integration tests and measurements run in VMs:
+
 ```sh
 nix flake check
 nix build .#checks.x86_64-linux.test-grow-burst -L
-nix build .#measure-brake-crawl -L
+nix build .#measure-brake-hold -L
 ```

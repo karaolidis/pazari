@@ -11,13 +11,11 @@ use std::{
 use pazari_agent::{
     engine::{
         Action as GuestAction, BootInfo, Engine, EngineConfig, Event as GuestEvent, ExhaustionMode,
-        IdleThreshold, Mode as GuestMode, Snapshot,
+        Phase as GuestPhase, Snapshot,
     },
     session::{Geometry, Outbound, Session, SessionConfig},
 };
-use pazari_proto::{
-    DenyReason, GrantReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status, Urgency,
-};
+use pazari_proto::{DenyReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status};
 use pazari_transport::{
     AnyConnection, AnyConnector, AnyListener, Listener, PeerId, UnixConnector, UnixListener,
 };
@@ -43,7 +41,6 @@ const BLOCK: u64 = 128 * MIB;
 const BOOT: u64 = 2048 * MIB;
 const SERVICE: u64 = 256 * MIB;
 const BURST: u64 = 256 * MIB;
-const GUARD: u64 = 64 * MIB;
 const CEILING: u64 = 4096 * MIB;
 
 const FLOOR: u64 = GIB;
@@ -117,18 +114,14 @@ fn engine_config() -> EngineConfig {
     EngineConfig {
         service_reserve: SERVICE,
         burst_reserve: bytes(BURST),
-        open_guard: bytes(GUARD),
         grow_step: bytes(512 * MIB),
         deny_backoff: brief(),
         settle_grace: patient(),
-        idle_threshold: IdleThreshold::try_new(0.5).expect("a half is a deadband"),
-        idle_intervals: count(3),
+        escalate_within: patient(),
+        release_intervals: count(3),
         shrink_step: bytes(RELEASE),
         shrink_cooldown: Delay::ZERO,
         reclaim_swappiness: None,
-        titrate_step: bytes(64 * MIB),
-        titrate_interval: brief(),
-        titrate_psi_threshold: Psi::try_new(5.0).expect("5% is a psi"),
         exhaustion: ExhaustionMode::Kill,
         tick_interval: seconds(1),
     }
@@ -139,8 +132,6 @@ const fn request(id: u64, current: u64, target: u64) -> GuestMessage {
         id,
         current,
         target,
-        reason: GrantReason::Throttle,
-        urgency: Urgency::High,
     }
 }
 
@@ -601,9 +592,8 @@ impl Harness {
         })
         .await;
 
-        assert_eq!(
-            self.engine.mode(),
-            GuestMode::Steady,
+        assert!(
+            matches!(self.engine.phase(), GuestPhase::Steady(_)),
             "the guest did not settle on the memory it was given"
         );
     }
@@ -633,7 +623,9 @@ impl Harness {
     }
 
     fn size(&self) -> Option<u64> {
-        self.broker.guest(self.guest).and_then(|guest| guest.size)
+        self.broker
+            .guest(self.guest)
+            .and_then(pazarid::broker::Guest::size)
     }
 
     fn requested(&self) -> Option<u64> {
@@ -840,7 +832,6 @@ async fn a_throttled_guest_is_grown_and_recomputes_its_limits() {
     assert_eq!(
         harness.acted(mark),
         vec![
-            GuestAction::SetHigh(BOOT - SERVICE - GUARD),
             GuestAction::SetMax(GROWN - SERVICE),
             GuestAction::SetHigh(GROWN - SERVICE - BURST),
         ]
@@ -876,7 +867,7 @@ async fn a_grow_the_host_cannot_afford_is_denied_and_asked_for_again() {
         }]
     );
     assert_eq!(harness.actuated(mark), Vec::<u64>::new());
-    assert_eq!(harness.engine.mode(), GuestMode::AwaitingGrant);
+    assert!(matches!(harness.engine.phase(), GuestPhase::Growing(_)));
     assert_eq!(harness.engine.pending_request(), None);
     assert_eq!(harness.total_mem, BOOT);
 
@@ -903,7 +894,7 @@ async fn a_grow_the_host_cannot_afford_is_denied_and_asked_for_again() {
         1,
         "the host answered one request twice"
     );
-    assert_eq!(harness.engine.mode(), GuestMode::Steady);
+    assert!(matches!(harness.engine.phase(), GuestPhase::Steady(_)));
     assert_eq!(harness.engine.total_mem(), GROWN);
 }
 
@@ -954,7 +945,7 @@ async fn an_idle_guest_offers_memory_back_and_is_shrunk() {
         ]
     );
 
-    assert_eq!(harness.engine.mode(), GuestMode::Steady);
+    assert!(matches!(harness.engine.phase(), GuestPhase::Steady(_)));
     assert_eq!(harness.engine.total_mem(), SHRUNK);
     assert_eq!(harness.engine.max(), SHRUNK - SERVICE);
     assert_eq!(harness.engine.high(), SHRUNK - SERVICE - BURST);

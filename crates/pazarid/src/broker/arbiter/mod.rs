@@ -2,7 +2,7 @@ mod fcfs;
 
 use std::{fmt, time::Duration};
 
-use pazari_proto::{DenyReason, GrantReason, Status, Urgency};
+use pazari_proto::{DenyReason, Status};
 use pazari_types::Timestamp;
 
 pub use crate::broker::arbiter::fcfs::Fcfs;
@@ -15,12 +15,12 @@ use crate::broker::{
 pub enum Ask {
     Grow {
         target: u64,
-        reason: GrantReason,
-        urgency: Urgency,
     },
 
     /// The guest has already freed the difference.
-    Release { target: u64 },
+    Release {
+        target: u64,
+    },
 }
 
 impl Ask {
@@ -115,6 +115,13 @@ pub enum Decision {
     },
 }
 
+impl Decision {
+    pub const UNKNOWN: Self = Self::Deny {
+        reason: DenyReason::Policy,
+        retry_after: None,
+    };
+}
+
 /// The replaceable half of the broker.
 pub trait Arbiter: fmt::Debug + Send {
     fn decide(&mut self, request: &Request<'_>) -> Decision;
@@ -133,11 +140,7 @@ mod tests {
 
     #[test]
     fn an_ask_names_the_size_it_is_after() {
-        let grow = Ask::Grow {
-            target: 3072 * MIB,
-            reason: GrantReason::Throttle,
-            urgency: Urgency::High,
-        };
+        let grow = Ask::Grow { target: 3072 * MIB };
 
         assert_eq!(grow.target(), 3072 * MIB);
         assert_eq!(Ask::Release { target: 1024 * MIB }.target(), 1024 * MIB);

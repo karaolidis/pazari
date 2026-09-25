@@ -100,7 +100,7 @@ mod tests {
 
     use serde::{Serialize, de::DeserializeOwned};
 
-    use crate::{Bounded, Delay, Fraction, Interval, Psi, Swappiness};
+    use crate::{Bounded, Delay, Interval, Psi, Swappiness};
 
     fn round_trips<T>(raw: T::Raw)
     where
@@ -129,7 +129,6 @@ mod tests {
     fn every_bounded_type_survives_its_own_serialisation() {
         round_trips::<Interval>(Duration::from_millis(1_500));
         round_trips::<Delay>(Duration::from_secs(30));
-        round_trips::<Fraction>(0.5);
         round_trips::<Psi>(5.5);
         round_trips::<Swappiness>(60);
     }
@@ -138,7 +137,6 @@ mod tests {
     fn every_rejection_names_its_type_and_bounds() {
         rejects::<Interval>(Duration::ZERO);
         rejects::<Delay>(Duration::from_secs(86_401));
-        rejects::<Fraction>(1.5);
         rejects::<Psi>(101.0);
         rejects::<Swappiness>(201);
     }

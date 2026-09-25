@@ -403,9 +403,9 @@ def crawl_figure(run, path, arms, claim=None):
 
     frame(
         sweep,
-        "how long a guard of each size held",
-        "open_guard (MiB)",
+        "how long a brake of each width held",
+        "burst_reserve (MiB)",
         "seconds from the refusal to memory.max",
     )
 
-    save(figure, run, path, "brake crawl")
+    save(figure, run, path, "brake hold")

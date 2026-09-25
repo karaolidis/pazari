@@ -17,7 +17,6 @@
       services.pazari-agent.harness = {
         engine = {
           burst_reserve = "512MiB";
-          open_guard = "384MiB";
 
           exhaustion.kind = "kill";
         };

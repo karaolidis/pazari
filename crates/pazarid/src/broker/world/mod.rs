@@ -2,51 +2,86 @@ use std::num::NonZeroU64;
 
 use pazari_proto::{DenyReason, HostMessage};
 use pazari_transport::PeerId;
-use pazari_types::Timestamp;
+use pazari_types::{Deadline, Timestamp};
 use tracing::debug;
 
 use crate::broker::{
     action::Action,
     arbiter::{Arbiter, Ask, Decision, HostView, Request},
-    guest::{Guests, Reconcile},
-    phase::Said,
+    effects::Effects,
+    guest::{Guest, Guests, Reconcile},
     policy::Policy,
     registry::{GuestId, Registry},
+    session::Session,
 };
 
 #[derive(Debug)]
-pub struct Context {
-    pub policy: Policy,
-    pub guests: Guests,
-    pub arbiter: Box<dyn Arbiter>,
-    pub host: HostView,
-
-    out: Vec<Action>,
+pub struct World {
+    policy: Policy,
+    guests: Guests,
+    arbiter: Box<dyn Arbiter>,
+    host: HostView,
 }
 
-impl Context {
+impl World {
     pub fn new(policy: Policy, registry: Registry, arbiter: impl Arbiter + 'static) -> Self {
         Self {
             policy,
             guests: Guests::new(registry),
             arbiter: Box::new(arbiter),
             host: HostView::default(),
-            out: Vec::new(),
         }
     }
 
-    pub fn emit(&mut self, action: Action) {
-        self.out.push(action);
+    pub const fn policy(&self) -> &Policy {
+        &self.policy
     }
 
-    pub fn send(&mut self, peer: &PeerId, message: HostMessage) {
-        self.emit(Action::Send {
-            peer: peer.clone(),
-            message,
-        });
+    pub const fn guests(&self) -> &Guests {
+        &self.guests
     }
 
-    pub fn answer(&mut self, peer: &PeerId, id: u64, decision: Decision) {
+    pub const fn guests_mut(&mut self) -> &mut Guests {
+        &mut self.guests
+    }
+
+    pub const fn host(&self) -> HostView {
+        self.host
+    }
+
+    pub const fn observe_host(&mut self, host: HostView) {
+        self.host = host;
+    }
+
+    #[must_use]
+    pub fn name(&self, guest: GuestId) -> &str {
+        self.guests.name(guest)
+    }
+
+    #[must_use]
+    pub fn ceiling(&self, guest: GuestId) -> Option<NonZeroU64> {
+        self.guests.ceiling(guest)
+    }
+
+    #[must_use]
+    pub fn size(&self, guest: GuestId) -> Option<u64> {
+        self.guests.state(guest)?.size()
+    }
+
+    #[must_use]
+    pub fn hotplugged(&self, guest: GuestId) -> Option<u64> {
+        self.guests.state(guest).and_then(Guest::hotplugged)
+    }
+
+    #[must_use]
+    pub fn offset(&self, guest: GuestId) -> u64 {
+        self.guests
+            .state(guest)
+            .and_then(Guest::offset)
+            .unwrap_or(0)
+    }
+
+    pub fn answer(&self, peer: &PeerId, id: u64, decision: Decision, fx: &mut Effects) {
         let guest = self.guests.lookup(peer).map(|guest| self.name(guest));
 
         let message = match decision {
@@ -77,44 +112,29 @@ impl Context {
             }
         };
 
-        self.send(peer, message);
+        fx.send(peer, message);
     }
 
-    pub fn close(&mut self, guest: GuestId, peer: &PeerId) {
+    pub fn close(&mut self, guest: GuestId, peer: &PeerId, fx: &mut Effects) {
         if let Some(state) = self.guests.state_mut(guest) {
             state.session = None;
         }
 
-        self.emit(Action::Close { peer: peer.clone() });
+        fx.close(peer);
     }
 
-    pub fn close_unknown(&mut self, peer: &PeerId) {
-        self.emit(Action::Close { peer: peer.clone() });
+    pub fn open_session(&mut self, guest: GuestId, peer: PeerId) -> bool {
+        self.guests
+            .state_mut(guest)
+            .is_some_and(|state| state.session.replace(Session::new(peer)).is_some())
     }
 
-    pub fn drain(&mut self) -> Vec<Action> {
-        std::mem::take(&mut self.out)
+    pub fn drop_session(&mut self, guest: GuestId) -> bool {
+        self.guests
+            .state_mut(guest)
+            .is_some_and(|state| state.session.take().is_some())
     }
 
-    #[must_use]
-    pub fn name(&self, guest: GuestId) -> &str {
-        self.guests.name(guest)
-    }
-
-    #[must_use]
-    pub fn ceiling(&self, guest: GuestId) -> Option<NonZeroU64> {
-        self.guests.ceiling(guest)
-    }
-
-    #[must_use]
-    pub const fn unknown_deny(&self) -> Decision {
-        Decision::Deny {
-            reason: DenyReason::Policy,
-            retry_after: None,
-        }
-    }
-
-    #[must_use]
     pub const fn unsized_deny(&self) -> Decision {
         Decision::Deny {
             reason: DenyReason::Policy,
@@ -126,7 +146,7 @@ impl Context {
         let (asking, others) = self.guests.views(guest);
 
         let Some(asking) = asking else {
-            return self.unknown_deny();
+            return Decision::UNKNOWN;
         };
 
         let request = Request {
@@ -141,30 +161,25 @@ impl Context {
         self.arbiter.decide(&request)
     }
 
-    #[must_use]
-    pub fn size(&self, guest: GuestId) -> Option<u64> {
-        self.guests.state(guest)?.size
+    pub fn revoke(&mut self) -> Option<(GuestId, u64)> {
+        let revocation = self.policy.revocation?;
+
+        let candidates: Vec<_> = self
+            .guests
+            .iter()
+            .filter(|(_, entry)| entry.state.geometry.is_some() && !entry.state.asked())
+            .map(|(id, entry)| entry.view(id))
+            .collect();
+
+        self.arbiter.revoke(&candidates, revocation)
     }
 
-    #[must_use]
-    pub fn offset(&self, guest: GuestId) -> u64 {
-        self.guests
-            .state(guest)
-            .and_then(|state| state.offset)
-            .unwrap_or(0)
-    }
-
-    #[must_use]
-    pub fn hotplugged(&self, guest: GuestId) -> Option<u64> {
-        self.guests.state(guest).and_then(|state| state.hotplugged)
-    }
-
-    pub fn tell_geometry(&mut self, guest: GuestId, peer: &PeerId) {
+    pub fn tell_geometry(&self, guest: GuestId, peer: &PeerId, fx: &mut Effects) {
         let Some(hotplugged) = self.hotplugged(guest) else {
             return;
         };
 
-        self.send(peer, HostMessage::Geometry { hotplugged });
+        fx.send(peer, HostMessage::Geometry { hotplugged });
     }
 
     pub fn observe_total_mem(&mut self, guest: GuestId, total_mem: u64) {
@@ -173,60 +188,26 @@ impl Context {
         }
     }
 
-    pub fn request(&mut self, said: Said<'_>, id: u64, ask: Result<Ask, Decision>) {
-        let ask = match ask {
-            Ok(ask) => ask,
-            Err(decision) => {
-                self.answer(said.peer, id, decision);
-
-                return;
-            }
-        };
-
-        let decision = self.arbitrate(said.now, said.guest, ask);
-
-        let Decision::Grant { target } = decision else {
-            self.answer(said.peer, id, decision);
-
-            return;
-        };
-
-        let Some(ceiling) = self.ceiling(said.guest) else {
-            let deny = self.unknown_deny();
-            self.answer(said.peer, id, deny);
-
-            return;
-        };
-
-        let target = target.min(ceiling.get());
-
-        let granted = target.saturating_sub(self.offset(said.guest));
-
-        self.answer(said.peer, id, Decision::Grant { target: granted });
-
-        if matches!(ask, Ask::Grow { .. })
-            && let Some(state) = self.guests.state_mut(said.guest)
-        {
-            state.granted = Some(said.now);
+    pub fn note_granted(&mut self, guest: GuestId, now: Timestamp) {
+        if let Some(state) = self.guests.state_mut(guest) {
+            state.granted = Some(now);
         }
-
-        self.actuate(said.now, said.guest, target);
     }
 
-    pub fn actuate(&mut self, now: Timestamp, guest: GuestId, target: u64) {
-        let deadline = now.saturating_add(self.policy.reconcile_deadline.get());
+    pub fn actuate(&mut self, now: Timestamp, guest: GuestId, target: u64, fx: &mut Effects) {
+        let deadline = Deadline::after(now, self.policy.reconcile_deadline.get());
 
         let Some(state) = self.guests.state_mut(guest) else {
             return;
         };
 
-        let Some(size) = state.size else {
+        let Some(size) = state.size() else {
             return;
         };
 
         if target == size {
             if state.reconcile.take().is_some() {
-                self.emit(Action::SetRequested {
+                fx.emit(Action::SetRequested {
                     guest,
                     bytes: target,
                 });
@@ -241,21 +222,20 @@ impl Context {
             deadline,
         });
 
-        self.emit(Action::SetRequested {
+        fx.emit(Action::SetRequested {
             guest,
             bytes: target,
         });
     }
 
-    pub fn settled(&mut self, guest: GuestId, size: u64, hotplugged: u64) {
+    pub fn settle(&mut self, guest: GuestId, size: u64, hotplugged: u64) {
         let name = self.guests.name(guest).to_owned();
 
         let Some(state) = self.guests.state_mut(guest) else {
             return;
         };
 
-        state.size = Some(size);
-        state.hotplugged = Some(hotplugged);
+        state.settle(size, hotplugged);
 
         let Some(reconcile) = state.reconcile else {
             return;

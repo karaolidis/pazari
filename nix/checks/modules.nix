@@ -42,7 +42,6 @@ let
         engine = {
           service_reserve = "256MiB";
           burst_reserve = "256MiB";
-          open_guard = "64MiB";
         };
 
         transport = {
@@ -117,7 +116,7 @@ in
     }
     {
       name = "the settings the deployment sets survive";
-      ok = guestSettings.engine.open_guard == "64MiB" && guestSettings.transport.kind == "vsock";
+      ok = guestSettings.engine.burst_reserve == "256MiB" && guestSettings.transport.kind == "vsock";
     }
     {
       name = "the metrics port becomes a listen address";

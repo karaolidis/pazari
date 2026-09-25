@@ -45,23 +45,17 @@ let
   engine = {
     service_reserve = "640MiB";
     burst_reserve = "256MiB";
-    open_guard = "64MiB";
 
     grow_step = "512MiB";
     deny_backoff = "2s";
     settle_grace = "5s";
 
-    idle_threshold = 0.5;
-    idle_intervals = 3;
+    release_intervals = 3;
 
     shrink_step = "256MiB";
     shrink_cooldown = "5s";
 
     reclaim_swappiness = 0;
-
-    titrate_step = "4GiB";
-    titrate_interval = "500ms";
-    titrate_psi_threshold = 5.0;
 
     exhaustion = {
       kind = "stall";
@@ -245,7 +239,6 @@ in
       default = { };
       example = {
         burst_reserve = "512MiB";
-        open_guard = "384MiB";
       };
       description = ''
         What the scenario changes about the agent's engine settings.

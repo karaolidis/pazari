@@ -8,7 +8,7 @@ use crate::{
     config::file::File, engine::EngineConfig, runtime::RuntimeConfig, session::SessionConfig,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub engine: EngineConfig,
     pub runtime: RuntimeConfig,
@@ -39,13 +39,10 @@ mod tests {
     use pazari_transport::{
         AnyConnector, UnixConnector, VsockConnector, adapter::vsock::VMADDR_CID_HOST,
     };
-    use pazari_types::{Delay, Interval, Psi, Swappiness};
+    use pazari_types::{Delay, Interval, Swappiness};
 
     use super::*;
-    use crate::{
-        engine::{ExhaustionMode, IdleThreshold},
-        runtime::Backend,
-    };
+    use crate::{engine::ExhaustionMode, runtime::Backend};
 
     const MIB: u64 = 1 << 20;
 
@@ -59,18 +56,14 @@ mod tests {
         [engine]
         service_reserve = "0B"
         burst_reserve = "192MiB"
-        open_guard = "32MiB"
         grow_step = "1GiB"
         deny_backoff = "2s 500ms"
         settle_grace = "15s"
-        idle_threshold = 0.75
-        idle_intervals = 5
+        escalate_within = "20s"
+        release_intervals = 5
         shrink_step = "128MiB"
         shrink_cooldown = "0s"
         reclaim_swappiness = 0
-        titrate_step = "32MiB"
-        titrate_interval = "5s"
-        titrate_psi_threshold = 12.5
 
         [engine.exhaustion]
         kind = "kill"
@@ -97,7 +90,6 @@ mod tests {
         [engine]
         service_reserve = "256MiB"
         burst_reserve = "256MiB"
-        open_guard = "64MiB"
 
         [runtime]
         cgroup = "/sys/fs/cgroup/workload.slice"
@@ -199,18 +191,14 @@ mod tests {
             EngineConfig {
                 service_reserve: 0,
                 burst_reserve: bytes(192 * MIB),
-                open_guard: bytes(32 * MIB),
                 grow_step: bytes(1024 * MIB),
                 deny_backoff: interval(Duration::from_millis(2_500)),
                 settle_grace: interval(Duration::from_secs(15)),
-                idle_threshold: IdleThreshold::try_new(0.75).expect("three quarters is a deadband"),
-                idle_intervals: count(5),
+                escalate_within: interval(Duration::from_secs(20)),
+                release_intervals: count(5),
                 shrink_step: bytes(128 * MIB),
                 shrink_cooldown: Delay::ZERO,
                 reclaim_swappiness: Some(Swappiness::NONE),
-                titrate_step: bytes(32 * MIB),
-                titrate_interval: interval(Duration::from_secs(5)),
-                titrate_psi_threshold: Psi::try_new(12.5).expect("12.5% is a psi"),
                 exhaustion: ExhaustionMode::Kill,
                 tick_interval: interval(Duration::from_millis(500)),
             }
@@ -256,18 +244,14 @@ mod tests {
             EngineConfig {
                 service_reserve: 256 * MIB,
                 burst_reserve: bytes(256 * MIB),
-                open_guard: bytes(64 * MIB),
                 grow_step: bytes(512 * MIB),
                 deny_backoff: interval(Duration::from_secs(5)),
                 settle_grace: interval(Duration::from_secs(10)),
-                idle_threshold: IdleThreshold::try_new(0.5).expect("a half is a deadband"),
-                idle_intervals: count(3),
+                escalate_within: interval(Duration::from_secs(10)),
+                release_intervals: count(3),
                 shrink_step: bytes(256 * MIB),
                 shrink_cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
                 reclaim_swappiness: None,
-                titrate_step: bytes(64 * MIB),
-                titrate_interval: interval(Duration::from_secs(10)),
-                titrate_psi_threshold: Psi::try_new(5.0).expect("5% is a psi"),
                 exhaustion: ExhaustionMode::Stall {
                     timeout: interval(Duration::from_secs(60)),
                 },
@@ -342,11 +326,11 @@ mod tests {
 
     #[test]
     fn a_quantity_outside_its_range_names_the_field_and_the_range() {
-        let error = rejects(&MINIMAL.replace("[runtime]", "idle_threshold = 0.95\n\n[runtime]"));
+        let error = rejects(&MINIMAL.replace("[runtime]", "reclaim_swappiness = 201\n\n[runtime]"));
 
         assert_eq!(
             error,
-            "engine.idle_threshold: IdleThreshold rejects 0.95: expected (0, 0.9]"
+            "engine.reclaim_swappiness: Swappiness rejects 201: expected [0, 200]"
         );
     }
 

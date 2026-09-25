@@ -1,12 +1,24 @@
-use pazari_proto::{DenyReason, GrantReason, Status, Urgency};
-use pazari_types::Timestamp;
+use pazari_proto::{DenyReason, Status};
+use pazari_types::{Deadline, Timestamp};
 use tracing::{debug, info, warn};
 
 use crate::broker::{
     arbiter::{Ask, Decision},
-    context::Context,
-    phase::{Phase, Said, State},
+    phase::{Phase, State, Step},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reclaim {
+    pub id: u64,
+
+    pub desired: u64,
+
+    pub deadline: Deadline,
+
+    pub committed: Option<u64>,
+
+    pub refused: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Negotiated {
@@ -75,18 +87,18 @@ impl Negotiated {
         }
     }
 
-    fn accepted(mut self, ctx: &mut Context, said: Said<'_>, id: u64) -> Option<Self> {
+    fn accepted(mut self, step: &mut Step<'_>, id: u64) -> Option<Self> {
         if self.accept(id) {
             return Some(self);
         }
 
         warn!(
-            guest = ctx.name(said.guest),
-            peer = %said.peer,
+            guest = step.name(),
+            peer = %step.peer,
             id,
             "out-of-sequence request id",
         );
-        ctx.close(said.guest, said.peer);
+        step.close();
 
         None
     }
@@ -100,16 +112,44 @@ impl Negotiated {
         if target < ceiling { target } else { ceiling }
     }
 
-    fn stray_reclaim(self, ctx: &mut Context, said: Said<'_>, id: u64) -> Phase {
+    fn stray_reclaim(self, step: &mut Step<'_>, id: u64) -> Phase {
         warn!(
-            guest = ctx.name(said.guest),
-            peer = %said.peer,
+            guest = step.name(),
+            peer = %step.peer,
             id,
             "reply to a reclaim that was never requested",
         );
-        ctx.close(said.guest, said.peer);
+        step.close();
 
         self.stay()
+    }
+
+    fn request(step: &mut Step<'_>, id: u64, ask: Result<Ask, Decision>) {
+        let ask = match ask {
+            Ok(ask) => ask,
+            Err(decision) => return step.answer(id, decision),
+        };
+
+        let decision = step.world.arbitrate(step.now, step.guest, ask);
+
+        let Decision::Grant { target } = decision else {
+            return step.answer(id, decision);
+        };
+
+        let Some(ceiling) = step.ceiling() else {
+            return step.answer(id, Decision::UNKNOWN);
+        };
+
+        let target = target.min(ceiling.get());
+        let granted = target.saturating_sub(step.world.offset(step.guest));
+
+        step.answer(id, Decision::Grant { target: granted });
+
+        if matches!(ask, Ask::Grow { .. }) {
+            step.world.note_granted(step.guest, step.now);
+        }
+
+        step.world.actuate(step.now, step.guest, target, step.fx);
     }
 }
 
@@ -118,51 +158,37 @@ impl State for Negotiated {
         Phase::Negotiated(self)
     }
 
-    fn refuse(self, ctx: &mut Context, said: Said<'_>, _what: &'static str) -> Phase {
-        warn!(
-            guest = ctx.name(said.guest),
-            peer = %said.peer,
-            "duplicate hello",
-        );
+    fn refuse(self, step: &mut Step<'_>, _what: &'static str) -> Phase {
+        warn!(guest = step.name(), peer = %step.peer, "duplicate hello");
 
-        ctx.close(said.guest, said.peer);
+        step.close();
 
         self.stay()
     }
 
-    fn on_grant_request(
-        self,
-        ctx: &mut Context,
-        said: Said<'_>,
-        id: u64,
-        target: u64,
-        reason: GrantReason,
-        urgency: Urgency,
-    ) -> Phase {
-        let Some(next) = self.accepted(ctx, said, id) else {
+    fn on_grant_request(self, step: &mut Step<'_>, id: u64, target: u64) -> Phase {
+        let Some(next) = self.accepted(step, id) else {
             return self.stay();
         };
 
         debug!(
-            guest = ctx.name(said.guest),
+            guest = step.name(),
             id,
             target,
-            ?reason,
-            ?urgency,
-            size = ?ctx.size(said.guest),
+            size = ?step.size(),
             "a guest asked to grow",
         );
 
-        let ask = match (ctx.ceiling(said.guest), ctx.size(said.guest)) {
+        let ask = match (step.ceiling(), step.size()) {
             (Some(ceiling), Some(size)) => {
                 let ceiling = ceiling.get();
-                let wanted = target.saturating_add(ctx.offset(said.guest)).min(ceiling);
+                let wanted = target
+                    .saturating_add(step.world.offset(step.guest))
+                    .min(ceiling);
 
                 if wanted > size {
                     Ok(Ask::Grow {
                         target: self.blocks(size, wanted, ceiling),
-                        reason,
-                        urgency,
                     })
                 } else {
                     Err(Decision::Deny {
@@ -171,60 +197,48 @@ impl State for Negotiated {
                     })
                 }
             }
-            (None, _) => Err(ctx.unknown_deny()),
-            (_, None) => Err(ctx.unsized_deny()),
+            (None, _) => Err(Decision::UNKNOWN),
+            (_, None) => Err(step.world.unsized_deny()),
         };
 
-        ctx.request(said, id, ask);
+        Self::request(step, id, ask);
 
         next.stay()
     }
 
-    fn on_offer_release(
-        self,
-        ctx: &mut Context,
-        said: Said<'_>,
-        id: u64,
-        releasable: u64,
-    ) -> Phase {
-        let Some(next) = self.accepted(ctx, said, id) else {
+    fn on_offer_release(self, step: &mut Step<'_>, id: u64, releasable: u64) -> Phase {
+        let Some(next) = self.accepted(step, id) else {
             return self.stay();
         };
 
         debug!(
-            guest = ctx.name(said.guest),
+            guest = step.name(),
             id,
             releasable,
-            size = ?ctx.size(said.guest),
+            size = ?step.size(),
             "guest offered memory back",
         );
 
-        let base = ctx
-            .size(said.guest)
+        let base = step
+            .size()
             .unwrap_or(0)
-            .saturating_sub(ctx.hotplugged(said.guest).unwrap_or(0));
+            .saturating_sub(step.world.hotplugged(step.guest).unwrap_or(0));
 
-        let ask = ctx
-            .size(said.guest)
-            .ok_or_else(|| ctx.unsized_deny())
+        let ask = step
+            .size()
+            .ok_or_else(|| step.world.unsized_deny())
             .map(|size| Ask::Release {
                 target: size.saturating_sub(releasable).max(base),
             });
 
-        ctx.request(said, id, ask);
+        Self::request(step, id, ask);
 
         next.stay()
     }
 
-    fn on_reclaim_ack(
-        mut self,
-        ctx: &mut Context,
-        said: Said<'_>,
-        id: u64,
-        will_release: u64,
-    ) -> Phase {
+    fn on_reclaim_ack(mut self, step: &mut Step<'_>, id: u64, will_release: u64) -> Phase {
         if !self.answers_reclaim(id) {
-            return self.stray_reclaim(ctx, said, id);
+            return self.stray_reclaim(step, id);
         }
 
         if let Some(reclaim) = self.reclaim.as_mut() {
@@ -232,67 +246,51 @@ impl State for Negotiated {
         }
 
         info!(
-            guest = ctx.name(said.guest),
+            guest = step.name(),
             id, will_release, "guest accepted the release"
         );
 
         self.stay()
     }
 
-    fn on_reclaim_nak(mut self, ctx: &mut Context, said: Said<'_>, id: u64, reason: &str) -> Phase {
+    fn on_reclaim_nak(mut self, step: &mut Step<'_>, id: u64, reason: &str) -> Phase {
         if !self.answers_reclaim(id) {
-            return self.stray_reclaim(ctx, said, id);
+            return self.stray_reclaim(step, id);
         }
 
         if let Some(reclaim) = self.reclaim.as_mut() {
             reclaim.refused = true;
         }
 
-        info!(
-            guest = ctx.name(said.guest),
-            id, reason, "guest refused the release"
-        );
+        info!(guest = step.name(), id, reason, "guest refused the release");
 
         self.stay()
     }
 
-    fn on_status(mut self, ctx: &mut Context, said: Said<'_>, status: Status) -> Phase {
+    fn on_status(mut self, step: &mut Step<'_>, status: Status) -> Phase {
         let returned = self.stale;
 
         self.stale = false;
-        self.heard = said.now;
+        self.heard = step.now;
         self.status = Some(status);
 
-        ctx.observe_total_mem(said.guest, status.total_mem);
-        ctx.tell_geometry(said.guest, said.peer);
+        step.world.observe_total_mem(step.guest, status.total_mem);
+        step.world.tell_geometry(step.guest, step.peer, step.fx);
 
         if returned {
-            info!(guest = ctx.name(said.guest), "guest resumed sending status");
+            info!(guest = step.name(), "guest resumed sending status");
         }
 
         self.stay()
     }
 
-    fn on_bye(self, ctx: &mut Context, said: Said<'_>) -> Phase {
-        debug!(guest = ctx.name(said.guest), peer = %said.peer, "guest sent goodbye");
+    fn on_bye(self, step: &mut Step<'_>) -> Phase {
+        debug!(guest = step.name(), peer = %step.peer, "guest sent goodbye");
 
-        ctx.close(said.guest, said.peer);
+        step.close();
 
         self.stay()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Reclaim {
-    pub id: u64,
-
-    pub desired: u64,
-
-    pub deadline: Timestamp,
-
-    pub committed: Option<u64>,
-
-    pub refused: bool,
 }
 
 #[cfg(test)]
@@ -330,5 +328,14 @@ mod tests {
         assert_eq!(session.take_reclaim_id(), 1);
         assert_eq!(session.take_reclaim_id(), 2);
         assert_eq!(session.take_reclaim_id(), 3);
+    }
+
+    #[test]
+    fn a_grow_lands_on_a_whole_number_of_the_guests_blocks() {
+        let session = negotiated();
+
+        assert_eq!(session.blocks(2048, 2049, u64::MAX), 2048 + BLOCK);
+        assert_eq!(session.blocks(2048, 2048 + BLOCK, u64::MAX), 2048 + BLOCK);
+        assert_eq!(session.blocks(2048, 4096, 2048 + BLOCK), 2048 + BLOCK);
     }
 }

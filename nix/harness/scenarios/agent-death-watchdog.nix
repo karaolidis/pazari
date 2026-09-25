@@ -22,7 +22,6 @@
         services.pazari-agent.harness = {
           engine = {
             burst_reserve = "512MiB";
-            open_guard = "384MiB";
           };
 
           workload.phases = [
@@ -58,7 +57,7 @@
         guest = run.guest
 
         guest.agent.reaches(
-            "pazari_agent_band_open",
+            "pazari_agent_brake_released",
             lambda value: value == 1,
             120,
             "the brake opened under the throttled workload",

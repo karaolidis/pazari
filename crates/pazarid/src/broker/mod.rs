@@ -1,35 +1,38 @@
 pub mod action;
 pub mod arbiter;
-pub mod context;
+pub mod effects;
 pub mod event;
 pub mod guest;
-pub mod phase;
 pub mod policy;
 pub mod registry;
 pub mod session;
 
 mod handle;
+mod phase;
+mod world;
 
 #[cfg(test)]
 pub(crate) mod testing;
 
 use pazari_transport::PeerId;
+use pazari_types::Timestamp;
 
 pub use crate::broker::{
     action::Action,
     arbiter::{Arbiter, Ask, Decision, Fcfs, GuestView, HostView, Request},
-    context::Context,
+    effects::Effects,
     event::Event,
-    guest::{Entry, Guest, Guests, Reconcile},
-    phase::{AwaitingHello, Negotiated, Phase, Reclaim, Said, State},
+    guest::{Entry, Geometry, Guest, Guests, Reconcile},
+    phase::{Negotiated, Phase, Reclaim},
     policy::{Policy, Revocation},
     registry::{GuestId, GuestSpec, Registry, RegistryError},
     session::Session,
 };
+use crate::broker::{phase::Step, world::World};
 
 #[derive(Debug)]
 pub struct Broker {
-    ctx: Context,
+    world: World,
 }
 
 impl Broker {
@@ -45,88 +48,112 @@ impl Broker {
         arbiter: impl Arbiter + 'static,
     ) -> Self {
         Self {
-            ctx: Context::new(policy, registry, arbiter),
+            world: World::new(policy, registry, arbiter),
         }
     }
 
     #[must_use]
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
+        let mut fx = Effects::default();
+
+        self.dispatch(event, &mut fx);
+
+        fx.drain()
+    }
+
+    fn dispatch(&mut self, event: Event, fx: &mut Effects) {
         match event {
-            Event::Connected { peer, .. } => self.on_connected(peer),
-            Event::Message { now, peer, message } => self.on_message(now, &peer, message),
+            Event::Connected { peer, .. } => self.on_connected(peer, fx),
+            Event::Message { now, peer, message } => self.on_message(now, &peer, message, fx),
             Event::Disconnected { peer, .. } => self.on_disconnected(&peer),
             Event::Size {
                 now,
                 guest,
                 size,
                 hotplugged,
-            } => self.on_size(now, guest, size, hotplugged),
+            } => self.on_size(now, guest, size, hotplugged, fx),
             Event::HostAvailable {
                 bytes,
                 swap_free,
                 psi,
                 ..
-            } => {
-                self.ctx.host = HostView {
-                    available: Some(bytes),
-                    swap_free: Some(swap_free),
-                    psi,
-                };
-            }
+            } => self.world.observe_host(HostView {
+                available: Some(bytes),
+                swap_free: Some(swap_free),
+                psi,
+            }),
             Event::Reclaim {
                 now,
                 guest,
                 desired,
-            } => self.on_reclaim(now, guest, desired),
-            Event::Tick { now } => self.on_tick(now),
+            } => self.on_reclaim(now, guest, desired, fx),
+            Event::Tick { now } => self.on_tick(now, fx),
         }
+    }
 
-        self.ctx.drain()
+    fn transition(
+        &mut self,
+        now: Timestamp,
+        guest: GuestId,
+        peer: &PeerId,
+        fx: &mut Effects,
+        go: impl FnOnce(&mut Step<'_>) -> Phase,
+    ) -> Phase {
+        let mut step = Step {
+            world: &mut self.world,
+            fx,
+            now,
+            guest,
+            peer,
+        };
+
+        go(&mut step)
+    }
+
+    fn settle_phase(&mut self, guest: GuestId, phase: Phase) {
+        if let Some(session) = self.world.guests_mut().session_mut(guest) {
+            session.phase = phase;
+        }
     }
 
     #[must_use]
     pub const fn policy(&self) -> &Policy {
-        &self.ctx.policy
+        self.world.policy()
     }
 
     #[must_use]
     pub const fn guests(&self) -> &Guests {
-        &self.ctx.guests
+        self.world.guests()
     }
 
     #[must_use]
     pub fn guest(&self, guest: GuestId) -> Option<&Guest> {
-        self.ctx.guests.state(guest)
+        self.world.guests().state(guest)
     }
 
     #[must_use]
     pub const fn host(&self) -> HostView {
-        self.ctx.host
-    }
-
-    #[must_use]
-    pub const fn host_available(&self) -> Option<u64> {
-        self.ctx.host.available
+        self.world.host()
     }
 
     #[must_use]
     pub fn is_negotiated(&self, peer: &PeerId) -> bool {
-        self.ctx
-            .guests
+        self.world
+            .guests()
             .lookup(peer)
-            .and_then(|guest| self.ctx.guests.negotiated(guest))
+            .and_then(|guest| self.world.guests().negotiated(guest))
             .is_some()
     }
 
     #[cfg(test)]
     fn negotiated(&self, guest: GuestId) -> Option<&Negotiated> {
-        self.ctx.guests.negotiated(guest)
+        self.world.guests().negotiated(guest)
     }
 
     #[must_use]
     pub fn is_stale(&self, guest: GuestId) -> bool {
-        self.ctx
-            .guests
+        self.world
+            .guests()
             .negotiated(guest)
             .is_some_and(|session| session.stale)
     }
@@ -330,7 +357,7 @@ mod tests {
         );
 
         assert_eq!(
-            broker.guest(id(ONE)).and_then(|guest| guest.offset),
+            broker.guest(id(ONE)).and_then(Guest::offset),
             Some(192 * MIB)
         );
 
@@ -362,7 +389,7 @@ mod tests {
         );
 
         assert_eq!(
-            broker.guest(id(ONE)).and_then(|guest| guest.offset),
+            broker.guest(id(ONE)).and_then(Guest::offset),
             Some(RESERVED)
         );
     }
@@ -373,7 +400,7 @@ mod tests {
 
         sizes(&mut broker, at(5), ONE, BOOT);
 
-        assert_eq!(broker.guest(id(ONE)).and_then(|guest| guest.offset), None);
+        assert_eq!(broker.guest(id(ONE)).and_then(Guest::offset), None);
 
         assert_eq!(
             message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB)),
@@ -573,7 +600,7 @@ mod tests {
         );
         assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
         assert_eq!(
-            broker.guest(id(ONE)).and_then(|guest| guest.size),
+            broker.guest(id(ONE)).and_then(Guest::size),
             Some(3072 * MIB)
         );
     }
@@ -594,7 +621,7 @@ mod tests {
         assert_eq!(tick(&mut broker, at(40)), vec![]);
         assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
         assert_eq!(
-            broker.guest(id(ONE)).and_then(|guest| guest.size),
+            broker.guest(id(ONE)).and_then(Guest::size),
             Some(2560 * MIB)
         );
     }
@@ -1107,10 +1134,7 @@ mod tests {
 
         message(&mut broker, at(10), ONE, release(1, u64::MAX, u64::MAX));
 
-        assert_eq!(
-            broker.guest(id(TWO)).and_then(|guest| guest.size),
-            Some(BOOT)
-        );
+        assert_eq!(broker.guest(id(TWO)).and_then(Guest::size), Some(BOOT));
         assert_eq!(broker.guest(id(TWO)).and_then(Guest::requested), None);
     }
 

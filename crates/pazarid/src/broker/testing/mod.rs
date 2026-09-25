@@ -5,9 +5,7 @@ use std::{
     time::Duration,
 };
 
-use pazari_proto::{
-    DenyReason, GrantReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status, Urgency,
-};
+use pazari_proto::{DenyReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status};
 use pazari_transport::PeerId;
 use pazari_types::{Interval, Psi, Timestamp};
 
@@ -236,8 +234,6 @@ pub const fn ask(id: u64, current: u64, target: u64) -> GuestMessage {
         id,
         current,
         target,
-        reason: GrantReason::Throttle,
-        urgency: Urgency::High,
     }
 }
 

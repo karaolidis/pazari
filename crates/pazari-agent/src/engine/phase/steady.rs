@@ -1,38 +1,79 @@
 use pazari_proto::GuestMessage;
-use pazari_types::Timestamp;
+use pazari_types::Deadline;
 use tracing::debug;
 
 use crate::engine::{
-    context::Context,
-    limits::Band,
-    phase::{Phase, State, releasing::Releasing},
+    counters::Pressure,
+    limits::Brake,
+    phase::{
+        Phase, State, Step,
+        growing::Growing,
+        releasing::{Owed, Releasing},
+        spare,
+    },
+    scale::{Escalation, GrowScale},
+    streak::Streak,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Steady;
+pub struct Steady {
+    escalation: Escalation,
+    slack: Streak,
+    cooldown: Option<Deadline>,
+}
 
 impl Steady {
-    pub fn from_titration(ctx: &mut Context) -> Phase {
-        ctx.idle.reset();
-        ctx.apply_limits(Band::Steady);
-
-        Phase::Steady(Self)
+    pub const fn start() -> Self {
+        Self {
+            escalation: Escalation::NONE,
+            slack: Streak::BROKEN,
+            cooldown: None,
+        }
     }
 
-    pub fn settle(ctx: &mut Context, now: Timestamp) -> Phase {
-        let cooldown = ctx.config.shrink_cooldown.get();
+    pub fn settled(step: &mut Step<'_>, scale: GrowScale) -> Phase {
+        let window = Deadline::after(step.now, step.config().escalate_within.get());
+        let escalation = Escalation::settled(scale, window);
 
-        ctx.idle.reset();
-        ctx.idle.arm_cooldown(now, cooldown);
-        ctx.apply_limits(Band::Steady);
-
-        Phase::Steady(Self)
+        Self::enter(step, escalation, Some(Self::cooldown(step)))
     }
 
-    pub fn recover(ctx: &mut Context) -> Phase {
-        ctx.apply_limits(Band::Steady);
+    pub fn released(step: &mut Step<'_>, escalation: Escalation) -> Phase {
+        Self::enter(step, escalation, Some(Self::cooldown(step)))
+    }
 
-        Phase::Steady(Self)
+    pub fn recovered(step: &mut Step<'_>, escalation: Escalation) -> Phase {
+        Self::enter(step, escalation, None)
+    }
+
+    fn enter(step: &mut Step<'_>, escalation: Escalation, cooldown: Option<Deadline>) -> Phase {
+        step.brake(Brake::Engaged);
+
+        Phase::Steady(Self {
+            escalation,
+            slack: Streak::BROKEN,
+            cooldown,
+        })
+    }
+
+    fn cooldown(step: &Step<'_>) -> Deadline {
+        Deadline::after(step.now, step.config().shrink_cooldown.get())
+    }
+
+    fn cooling(self, step: &Step<'_>) -> bool {
+        self.cooldown.is_some_and(|until| !until.reached(step.now))
+    }
+
+    fn noted(self, step: &Step<'_>, pressure: Pressure) -> Self {
+        Self {
+            escalation: self.escalation,
+            slack: self.slack.then(spare(step, pressure)),
+            cooldown: if pressure.breached {
+                Some(Self::cooldown(step).furthest(self.cooldown))
+            } else {
+                self.cooldown
+            },
+        }
     }
 }
 
@@ -45,60 +86,79 @@ impl State for Steady {
         "no headroom to release without inducing pressure"
     }
 
-    fn on_reclaim_request(self, ctx: &mut Context, id: u64, desired: u64) -> Phase {
-        let will_release = ctx.release_budget(desired);
+    fn brake(self, step: &mut Step<'_>) -> Phase {
+        Growing::start(step, self.escalation.braked(step.now), None)
+    }
+
+    fn on_connected(self, _step: &mut Step<'_>) -> Phase {
+        Phase::Steady(Self {
+            escalation: Escalation::NONE,
+            ..self
+        })
+    }
+
+    fn resume(self, _step: &mut Step<'_>) -> Phase {
+        self.stay()
+    }
+
+    fn on_reclaim_request(self, step: &mut Step<'_>, id: u64, desired: u64) -> Phase {
+        let will_release = step.world.release_budget(desired).unwrap_or(0);
 
         debug!(
             id,
             desired,
             will_release,
-            usage = ctx.last.workload_usage,
-            total_mem = ctx.limits.total_mem(),
+            usage = step.guest().usage(),
+            total_mem = step.limits().total_mem(),
             "answering the host's reclaim request",
         );
 
         if will_release == 0 {
-            ctx.nak(id, self.busy());
+            step.nak(id, self.busy());
 
             return self.stay();
         }
 
-        ctx.send(GuestMessage::ReclaimAck { id, will_release });
+        step.send(GuestMessage::ReclaimAck { id, will_release });
 
-        Releasing::begin(ctx, will_release)
+        Releasing::begin(step, will_release, Some(Owed::new(id)), self.escalation)
     }
 
-    fn on_interval(self, ctx: &mut Context, now: Timestamp, throttled: bool) -> Phase {
-        if !ctx.quiet_streak(throttled) {
-            return self.stay();
+    fn on_interval(self, step: &mut Step<'_>, pressure: Pressure) -> Phase {
+        let next = self.noted(step, pressure);
+
+        if !next.slack.reached(step.config().release_intervals)
+            || !step.world.connected()
+            || next.cooling(step)
+        {
+            return next.stay();
         }
 
-        if !ctx.connected || ctx.idle.cooling(now) {
-            return self.stay();
-        }
-
-        let bytes = ctx.release_budget(ctx.config.shrink_step.get());
+        let bytes = step
+            .world
+            .release_budget(step.config().shrink_step.get())
+            .unwrap_or(0);
 
         if bytes == 0 {
             debug!(
-                usage = ctx.last.workload_usage,
-                total_mem = ctx.limits.total_mem(),
-                "workload idle, but no headroom to release",
+                available = ?step.guest().available(),
+                usage = step.guest().usage(),
+                total_mem = step.limits().total_mem(),
+                "slack has held, but no headroom to release",
             );
 
-            return self.stay();
+            return next.stay();
         }
 
         debug!(
             bytes,
-            usage = ctx.last.workload_usage,
-            total_mem = ctx.limits.total_mem(),
-            "workload idle long enough to shrink",
+            available = ?step.guest().available(),
+            usage = step.guest().usage(),
+            total_mem = step.limits().total_mem(),
+            "guest has held reclaimable memory long enough to shrink",
         );
 
-        ctx.idle.reset();
-
-        Releasing::begin(ctx, bytes)
+        Releasing::begin(step, bytes, None, next.escalation)
     }
 }
 
@@ -109,10 +169,10 @@ mod tests {
     use pazari_proto::{GuestMessage, HostMessage};
     use pazari_types::Swappiness;
 
-    use crate::engine::{Action, EngineConfig, Mode, testing::*};
+    use crate::engine::{Action, EngineConfig, Phase, testing::*};
 
     #[test]
-    fn a_shrink_needs_exactly_the_configured_idle_intervals() {
+    fn a_shrink_needs_exactly_the_configured_release_intervals() {
         let mut engine = started();
         grown(&mut engine);
 
@@ -131,17 +191,22 @@ mod tests {
                 swappiness: Some(Swappiness::NONE),
             }]
         );
-        assert_eq!(engine.mode(), Mode::Releasing);
+        assert!(matches!(engine.phase(), Phase::Releasing(_)));
     }
 
     #[test]
-    fn activity_resets_the_idle_counter() {
+    fn a_tick_without_slack_resets_the_streak() {
         let mut engine = started();
         grown(&mut engine);
 
         tick(&mut engine, at(140), snap(2560 * MIB, CALM, 1));
         tick(&mut engine, at(141), snap(2560 * MIB, CALM, 1));
-        tick(&mut engine, at(142), snap(2560 * MIB, BUSY, 1));
+
+        tick(
+            &mut engine,
+            at(142),
+            snap_available(2560 * MIB, CALM, 600 * MIB, 1),
+        );
 
         for second in 143..=144 {
             assert_eq!(
@@ -183,6 +248,44 @@ mod tests {
     }
 
     #[test]
+    fn a_workload_that_uses_its_grant_keeps_it() {
+        let mut engine = started();
+        grown(&mut engine);
+
+        for second in 140..=180 {
+            assert_eq!(
+                tick(&mut engine, at(second), snap(2560 * MIB, 2300 * MIB, 1)),
+                vec![],
+                "the guest released memory the workload was using at t+{second}"
+            );
+        }
+
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
+    }
+
+    #[test]
+    fn a_breach_holds_off_the_next_release() {
+        let mut engine = started();
+        grown(&mut engine);
+
+        tick(
+            &mut engine,
+            at(140),
+            snap_breached(2560 * MIB, 2000 * MIB, 1),
+        );
+
+        for second in 141..=169 {
+            assert_eq!(
+                tick(&mut engine, at(second), snap(2560 * MIB, 0, 1)),
+                vec![],
+                "the guest released in the wake of a breach at t+{second}"
+            );
+        }
+
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
+    }
+
+    #[test]
     fn a_release_never_goes_below_boot_memory() {
         let mut engine = started();
 
@@ -194,7 +297,7 @@ mod tests {
             );
         }
 
-        assert_eq!(engine.mode(), Mode::Steady);
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
     }
 
     #[test]
@@ -203,7 +306,7 @@ mod tests {
             shrink_step: bytes(1024 * MIB),
             ..config()
         };
-        let mut engine = titrated(config, CEILING);
+        let mut engine = started_with(config, CEILING);
         grown(&mut engine);
 
         for second in 140..=142 {
@@ -247,7 +350,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(engine.mode(), Mode::Releasing);
+        assert!(matches!(engine.phase(), Phase::Releasing(_)));
     }
 
     #[test]
@@ -270,6 +373,6 @@ mod tests {
             actions.as_slice(),
             [Action::Send(GuestMessage::ReclaimNak { id: 9, .. })]
         ));
-        assert_eq!(engine.mode(), Mode::Steady);
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
     }
 }

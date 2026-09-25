@@ -165,7 +165,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        GrantReason, GuestMessage, HostMessage, Urgency,
+        GuestMessage, HostMessage,
         message::fixtures::{guest_message, guest_messages, host_message, host_messages},
     };
 
@@ -176,8 +176,6 @@ mod tests {
             id: 1,
             current: 2_147_483_648,
             target: 4_294_967_296,
-            reason: GrantReason::Throttle,
-            urgency: Urgency::High,
         }
     }
 

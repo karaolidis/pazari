@@ -92,8 +92,6 @@ impl Fcfs {
 mod tests {
     use std::time::Duration;
 
-    use pazari_proto::{GrantReason, Urgency};
-
     use super::*;
     use crate::broker::{
         registry::GuestSpec,
@@ -104,11 +102,7 @@ mod tests {
     };
 
     fn grow(target: u64) -> Ask {
-        Ask::Grow {
-            target,
-            reason: GrantReason::Throttle,
-            urgency: Urgency::High,
-        }
+        Ask::Grow { target }
     }
 
     #[test]

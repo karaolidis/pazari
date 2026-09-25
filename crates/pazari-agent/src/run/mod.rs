@@ -205,13 +205,13 @@ mod tests {
 
     use pazari_proto::{Host, HostMessage, JsonLinesCodec, PROTOCOL_VERSION, Status};
     use pazari_transport::{AnyConnector, Listener, MessageStream, UnixConnector, UnixListener};
-    use pazari_types::{Delay, Interval, Psi};
+    use pazari_types::{Delay, Interval};
     use tempfile::TempDir;
     use tokio::{net::UnixStream, time::timeout};
 
     use super::*;
     use crate::{
-        engine::{Action, EngineConfig, ExhaustionMode, IdleThreshold, Snapshot},
+        engine::{Action, EngineConfig, ExhaustionMode, Snapshot},
         runtime::{cgroup::MEMORY_HIGH, testing::cgroup_dir},
         session::SessionConfig,
     };
@@ -239,18 +239,14 @@ mod tests {
         EngineConfig {
             service_reserve: SERVICE,
             burst_reserve: bytes(BURST),
-            open_guard: bytes(64 * MIB),
             grow_step: bytes(512 * MIB),
             deny_backoff: interval(5),
             settle_grace: interval(10),
-            idle_threshold: IdleThreshold::try_new(0.5).expect("a half is a deadband"),
-            idle_intervals: NonZeroU32::new(3).expect("a positive count"),
+            escalate_within: interval(10),
+            release_intervals: NonZeroU32::new(3).expect("a positive count"),
             shrink_step: bytes(256 * MIB),
             shrink_cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
             reclaim_swappiness: None,
-            titrate_step: bytes(64 * MIB),
-            titrate_interval: interval(10),
-            titrate_psi_threshold: Psi::try_new(5.0).expect("5% is a psi"),
             exhaustion: ExhaustionMode::Kill,
             tick_interval: interval(1),
         }
@@ -396,7 +392,7 @@ mod tests {
         assert_eq!(read(dir.path(), "memory.max"), (BOOT - SERVICE).to_string());
         assert_eq!(
             read(dir.path(), "memory.high"),
-            (BOOT - SERVICE).to_string()
+            (BOOT - SERVICE - BURST).to_string()
         );
         assert_eq!(read(dir.path(), "memory.oom.group"), "1");
 
@@ -490,8 +486,8 @@ mod tests {
 
         assert_eq!(
             read(dir.path(), "memory.high"),
-            (BOOT - SERVICE - 64 * MIB).to_string(),
-            "the brake did not release the band"
+            (BOOT - SERVICE - BURST).to_string(),
+            "the brake moved when the workload was throttled"
         );
 
         let mut asked = None;

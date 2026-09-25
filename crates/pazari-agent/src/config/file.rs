@@ -17,13 +17,13 @@ use pazari_proto::DEFAULT_VSOCK_PORT;
 use pazari_transport::{
     AnyConnector, UnixConnector, VsockConnector, adapter::vsock::VMADDR_CID_HOST,
 };
-use pazari_types::{Delay, Interval, Psi, Swappiness};
+use pazari_types::{Delay, Interval, Swappiness};
 use serde::Deserialize;
 use serde_inline_default::serde_inline_default;
 
 use crate::{
     config::Config,
-    engine::{EngineConfig, ExhaustionMode, IdleThreshold},
+    engine::{EngineConfig, ExhaustionMode},
     runtime::{Backend, RuntimeConfig},
     session::SessionConfig,
 };
@@ -82,16 +82,10 @@ pub struct EngineSection {
     #[doku(as = "String", example = "256MiB")]
     service_reserve: ByteSize,
 
-    /// The standing headroom the brake releases when the workload is throttled,
-    /// i.e. a burst the workload can take while waiting for more memory from
-    /// the host. Set me.
+    /// The headroom between `memory.high` and `memory.max`: how far the
+    /// workload can overrun the brake before it reaches its hard limit. Set me.
     #[doku(as = "String", example = "256MiB")]
     burst_reserve: ByteSize,
-
-    /// The sliver of the burst reserve the brake holds back while a grant is in
-    /// flight to stop an overshoot. Set me.
-    #[doku(as = "String", example = "64MiB")]
-    open_guard: ByteSize,
 
     /// How much more memory a grant asks for.
     #[serde_inline_default(ByteSize::mib(512))]
@@ -110,16 +104,16 @@ pub struct EngineSection {
     #[doku(as = "String", example = "10s")]
     settle_grace: Duration,
 
-    /// The share of its budget the workload must stay under to count as idle.
-    #[serde_inline_default(0.5)]
-    #[doku(example = "0.5")]
-    idle_threshold: f64,
+    /// How soon after a grow a brake still doubles the next request.
+    #[serde_inline_default(Duration::from_secs(10))]
+    #[serde(deserialize_with = "humantime_serde::deserialize")]
+    #[doku(as = "String", example = "10s")]
+    escalate_within: Duration,
 
-    /// How many consecutive idle intervals it takes before the agent offers
-    /// memory back.
+    /// Intervals of a spare `shrink_step` over the reserves before a release.
     #[serde_inline_default(3)]
     #[doku(example = "3")]
-    idle_intervals: u32,
+    release_intervals: u32,
 
     /// How much an offer to release gives back at a time.
     #[serde_inline_default(ByteSize::mib(256))]
@@ -138,24 +132,6 @@ pub struct EngineSection {
     #[doku(example = "0")]
     reclaim_swappiness: Option<u8>,
 
-    /// How much memory one titration step claims while the agent is still
-    /// finding the workload's working set.
-    #[serde_inline_default(ByteSize::mib(64))]
-    #[doku(as = "String", example = "64MiB")]
-    titrate_step: ByteSize,
-
-    /// How long each titration step is given before the next one.
-    #[serde_inline_default(Duration::from_secs(10))]
-    #[serde(deserialize_with = "humantime_serde::deserialize")]
-    #[doku(as = "String", example = "10s")]
-    titrate_interval: Duration,
-
-    /// The memory pressure, in percent of wall time, at which titration decides
-    /// it has found the edge of the working set.
-    #[serde_inline_default(5.0)]
-    #[doku(example = "5.0")]
-    titrate_psi_threshold: f64,
-
     /// What the agent does once the workload wants more than the ceiling
     /// allows.
     #[serde_inline_default(ExhaustionSection::Stall { timeout: STALL_TIMEOUT })]
@@ -169,16 +145,15 @@ impl EngineSection {
             service_reserve: self.service_reserve.as_u64(),
             burst_reserve: NonZeroU64::new(self.burst_reserve.as_u64())
                 .bytes("engine.burst_reserve")?,
-            open_guard: NonZeroU64::new(self.open_guard.as_u64()).bytes("engine.open_guard")?,
 
             grow_step: NonZeroU64::new(self.grow_step.as_u64()).bytes("engine.grow_step")?,
             deny_backoff: Interval::try_new(self.deny_backoff).at("engine.deny_backoff")?,
             settle_grace: Interval::try_new(self.settle_grace).at("engine.settle_grace")?,
+            escalate_within: Interval::try_new(self.escalate_within)
+                .at("engine.escalate_within")?,
 
-            idle_threshold: IdleThreshold::try_new(self.idle_threshold)
-                .at("engine.idle_threshold")?,
-            idle_intervals: NonZeroU32::new(self.idle_intervals)
-                .positive("engine.idle_intervals", "count of intervals")?,
+            release_intervals: NonZeroU32::new(self.release_intervals)
+                .positive("engine.release_intervals", "count of intervals")?,
 
             shrink_step: NonZeroU64::new(self.shrink_step.as_u64()).bytes("engine.shrink_step")?,
             shrink_cooldown: Delay::try_new(self.shrink_cooldown).at("engine.shrink_cooldown")?,
@@ -188,13 +163,6 @@ impl EngineSection {
                 .map(Swappiness::try_new)
                 .transpose()
                 .at("engine.reclaim_swappiness")?,
-
-            titrate_step: NonZeroU64::new(self.titrate_step.as_u64())
-                .bytes("engine.titrate_step")?,
-            titrate_interval: Interval::try_new(self.titrate_interval)
-                .at("engine.titrate_interval")?,
-            titrate_psi_threshold: Psi::try_new(self.titrate_psi_threshold)
-                .at("engine.titrate_psi_threshold")?,
 
             exhaustion: self.exhaustion.resolve()?,
 

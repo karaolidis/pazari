@@ -1,7 +1,7 @@
 use std::{collections::HashMap, num::NonZeroU64};
 
 use pazari_transport::PeerId;
-use pazari_types::Timestamp;
+use pazari_types::{Deadline, Timestamp};
 
 use crate::broker::{
     arbiter::GuestView,
@@ -10,17 +10,31 @@ use crate::broker::{
     session::Session,
 };
 
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Guest {
-    /// `None` until the guest's memory device has reported one.
-    pub size: Option<u64>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Geometry {
+    pub size: u64,
 
     /// How much of that size was plugged in, rather than there at boot.
-    pub hotplugged: Option<u64>,
+    pub hotplugged: u64,
 
     /// The device's size is boot memory plus what is plugged into it; the guest
     /// reads `MemTotal`, which is that less whatever its kernel keeps for itself.
     pub offset: Option<u64>,
+}
+
+impl Geometry {
+    const fn settled(size: u64, hotplugged: u64, offset: Option<u64>) -> Self {
+        Self {
+            size,
+            hotplugged,
+            offset,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Guest {
+    pub geometry: Option<Geometry>,
 
     pub reconcile: Option<Reconcile>,
 
@@ -31,6 +45,38 @@ pub struct Guest {
 
 impl Guest {
     #[must_use]
+    pub const fn size(&self) -> Option<u64> {
+        match self.geometry {
+            Some(geometry) => Some(geometry.size),
+            None => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn hotplugged(&self) -> Option<u64> {
+        match self.geometry {
+            Some(geometry) => Some(geometry.hotplugged),
+            None => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn offset(&self) -> Option<u64> {
+        match self.geometry {
+            Some(geometry) => geometry.offset,
+            None => None,
+        }
+    }
+
+    #[must_use]
+    pub fn asked(&self) -> bool {
+        self.session
+            .as_ref()
+            .and_then(Session::negotiated)
+            .is_none_or(|session| session.reclaim.is_some())
+    }
+
+    #[must_use]
     pub const fn requested(&self) -> Option<u64> {
         match self.reconcile {
             Some(reconcile) => Some(reconcile.target),
@@ -38,15 +84,24 @@ impl Guest {
         }
     }
 
+    pub const fn settle(&mut self, size: u64, hotplugged: u64) {
+        let offset = match self.geometry {
+            Some(geometry) => geometry.offset,
+            None => None,
+        };
+
+        self.geometry = Some(Geometry::settled(size, hotplugged, offset));
+    }
+
     pub const fn observe(&mut self, total_mem: u64) {
         if self.reconcile.is_some() {
             return;
         }
 
-        if let Some(size) = self.size
-            && size >= total_mem
+        if let Some(geometry) = &mut self.geometry
+            && geometry.size >= total_mem
         {
-            self.offset = Some(size - total_mem);
+            geometry.offset = Some(geometry.size - total_mem);
         }
     }
 
@@ -57,8 +112,8 @@ impl Guest {
         GuestView {
             id,
             spec,
-            hotplugged: self.hotplugged,
-            size: self.size.unwrap_or(0),
+            hotplugged: self.hotplugged(),
+            size: self.size().unwrap_or(0),
             requested: self.requested(),
             status: negotiated.and_then(|session| session.status),
             stale: negotiated.is_some_and(|session| session.stale),
@@ -76,7 +131,7 @@ pub struct Reconcile {
     /// The size the guest had when the actuation started.
     pub from: u64,
 
-    pub deadline: Timestamp,
+    pub deadline: Deadline,
 }
 
 impl Reconcile {
@@ -192,10 +247,6 @@ impl Guests {
         self.entries.is_empty()
     }
 
-    pub fn ids(&self) -> impl Iterator<Item = GuestId> {
-        (0..self.entries.len()).map(GuestId::from_index)
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = (GuestId, &Entry)> {
         self.entries
             .iter()
@@ -231,7 +282,7 @@ mod tests {
         Reconcile {
             target,
             from,
-            deadline: at(30),
+            deadline: Deadline::after(at(30), std::time::Duration::ZERO),
         }
     }
 

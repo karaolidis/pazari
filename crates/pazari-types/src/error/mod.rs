@@ -38,7 +38,7 @@ pub enum KernelFileError {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::{Fraction, KernelFileError, RangeError, Swappiness};
+    use crate::{KernelFileError, Psi, RangeError, Swappiness};
 
     #[test]
     fn a_rejection_names_what_was_rejected() {
@@ -55,16 +55,16 @@ mod tests {
 
     #[test]
     fn a_range_error_is_comparable() {
-        let first = Fraction::try_new(2.0).expect_err("2.0 is over one");
-        let second = Fraction::try_new(2.0).expect_err("2.0 is over one");
+        let first = Psi::try_new(101.0).expect_err("101% is over one hundred");
+        let second = Psi::try_new(101.0).expect_err("101% is over one hundred");
 
         assert_eq!(first, second);
         assert_eq!(
             first,
             RangeError {
-                what: "Fraction",
-                value: "2.0".to_owned(),
-                bounds: "(0, 1]",
+                what: "Psi",
+                value: "101.0".to_owned(),
+                bounds: "(0, 100]",
             }
         );
     }

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6d22972a2042260cb91ba4194e1e88ff045ddcd12a550631c20678002c9b3521 # shrinks to timeline = [(0, Wake { high_events: 1 }), (0, Connect { ceiling: 18446744073709551615 })]
+cc 37328609c46e3a854751bc9e61aa3ec81afe1f60f909d90b4d560389d694c3c0 # shrinks to timeline = [(0, Plug { total_mem: 2148532224 }), (0, Connect { ceiling: 18446744073709551615 }), (0, Wake { high_events: 1 }), (0, Plug { total_mem: 269484032 })]

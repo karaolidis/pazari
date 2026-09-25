@@ -1,759 +1,452 @@
-.Dd September 23, 2026
+.Dd September 25, 2026
 .Dt PAZARI-AGENT.TOML 5
 .Os pazari
 .Sh NAME
 .Nm pazari-agent.toml
-.Nd configuration file for the pazari guest memory agent
+.Nd configuration file for pazari-agent
 .Sh DESCRIPTION
 .Xr pazari-agent 1
-reads one TOML file, by default
-.Pa /etc/pazari/agent.toml .
+reads its configuration from a TOML file,
+.Pa /etc/pazari/agent.toml
+by default.
+.Ql pazari-agent example-config
+prints a complete file with every key at its default.
 .Pp
-.Nm pazari-agent Cm example-config
-prints an annotated file carrying every key at its default.
-A copy is installed with the package as
-.Pa share/doc/pazari/examples/agent.toml .
-.Ss Values
+How the agent uses these settings is described in
+.Xr pazari-agent 1 .
+.Ss Sizes and durations
 A
 .Ar size
-is a byte count, written either as a bare integer or as a number with a unit.
-The binary units
+is an integer number of bytes, or a number followed by a unit.
 .Cm KiB , MiB , GiB
 and
 .Cm TiB
-count 1024 and the decimal units
+are powers of 1024;
 .Cm kB , MB , GB
 and
 .Cm TB
-count 1000, so
-.Ql 64MiB
-and
-.Ql 64MB
-are different numbers.
-Units are case-insensitive and a space before them is allowed.
+are powers of 1000.
+Units are case-insensitive and may be preceded by a space.
 .Pp
 A
 .Ar duration
-is a string, never a bare number, written as a number and a unit, or several of
-each:
+is a string such as
 .Ql 500ms ,
 .Ql 5s ,
-.Ql 1min ,
-.Ql 2s 500ms .
-The units run from
+.Ql 1min
+or
+.Ql "2s 500ms" .
+Units range from
 .Cm ns
 to
 .Cm y .
-Unless a key says otherwise a duration must be greater than zero and at most
-.Cm 24h .
-.Sh THE BRAKE
-The settings in the
-.Sx engine
-table are three numbers and a set of timings.
-The three numbers place the cgroup limits the agent writes, against
-.Va P ,
-the memory the guest currently has:
-.Bd -literal -offset indent
-memory.max  = P - service_reserve
-memory.high = memory.max - burst_reserve      (at rest)
-memory.high = memory.max - open_guard         (waiting on a grant)
-memory.high = memory.max                      (out of room)
-.Ed
-.Pp
-At rest the workload is braked a whole
-.Cm burst_reserve
-below the point where the kernel would kill it, and the distance between the
-two is the room it has to grow into before the agent has to do anything.
-When the kernel throttles the workload at
-.Va memory.high ,
-the agent asks the host for more memory and opens the band to
-.Cm open_guard
-below
-.Va memory.max ,
-so the workload may burst while the request is in flight instead of stalling
-for the whole round trip.
-The guard is what stops that burst from arriving at
-.Va memory.max
-before the grant does.
-.Pp
-How to size the three is covered under
-.Sx SIZING ,
-with the measured numbers behind the defaults.
+Unless stated otherwise, a duration must be greater than zero and at most 24
+hours.
 .Sh SETTINGS
-.Ss General
+.Ss Top level
 .Bl -tag -width Ds
 .It Cm tick_interval No = Ar duration
-How often the agent reads the workload cgroup and
-.Pa /proc/meminfo .
-The default is
+How often the agent samples the workload cgroup and the guest's memory.
+Default
 .Cm 1s .
 .Pp
-This is the resolution of everything the agent decides: idleness is counted in
-ticks, titration steps once a tick, and a throttle that the cgroup's own event
-counters do not raise as a wake-up is not noticed until the next one.
-It is also the floor under how quickly the agent can react to a grant.
-Under a
-.Cm 500ms
-tick the round trip from asking the host for memory to seeing
-.Va MemTotal
-rise measures around
-.Cm 300ms ,
-and under a
-.Cm 100ms
-tick around
-.Cm 120ms ;
-see
-.Sx SIZING .
-A shorter tick costs two file reads and a
-.Xr read 2
-of
-.Pa /proc/meminfo
-each time.
+A throttle wakes the agent immediately, so a shorter tick does not make it ask
+for memory sooner.
+It does make the agent notice sooner that granted memory has arrived, and retry
+sooner after a refusal.
+Below
+.Cm runtime.hotplug_debounce ,
+the tick is the faster way the agent learns its memory has changed.
 .El
-.Ss engine
+.Ss [engine]
 .Bl -tag -width Ds
 .It Cm service_reserve No = Ar size
-Memory withheld for everything in the guest that is not the workload: the
-agent, the init system, the logging stack, whatever else the guest runs.
-Required; there is no default, and zero is accepted.
+Memory kept below
+.Va memory.max
+for everything in the guest other than the workload.
+Required; may be 0.
 .Pp
-It is subtracted from the guest's memory to give
-.Va memory.max ,
-so it is not a guarantee that those services get the memory, only that the
-workload's hard limit is set below it.
-Pair it with
+This only lowers the workload's limit.
+To also protect the guest's services from reclaim, set
 .Va MemoryMin
 on
-.Va system.slice
-if the guest's own services must be protected from reclaim as well.
-Setting it too low lets a braked workload squeeze the agent that is braking it;
-setting it far too high wastes every byte the host grants.
+.Pa system.slice .
 .It Cm burst_reserve No = Ar size
-The standing headroom between
+The gap between
 .Va memory.high
 and
-.Va memory.max
-while the workload is progressing.
-Required; must be greater than zero, and greater than
-.Cm open_guard .
-.Pp
-This is the workload's runway.
-A workload that grows faster than one grow round trip can be served needs a
-burst reserve larger than the memory it can acquire in that round trip, or it
-will spend its life throttled.
-.It Cm open_guard No = Ar size
-The sliver of
-.Cm burst_reserve
-the brake holds back while a grant is in flight.
-Required; must be greater than zero and strictly less than
-.Cm burst_reserve ,
-a relation the agent checks at startup rather than when the file is parsed.
-.Pp
-With no guard at all, a workload that wants memory faster than the host can
-supply it walks straight into
-.Va memory.max
-and is killed there, in under five seconds both times it was measured.
-With a guard in place the kernel throttles the workload as it climbs through
-the guard, and that climb is what the grant has to arrive within.
-.Pp
-Useful sizes do not scale with the reserve; see
-.Sx SIZING
-for where they begin and why.
+.Va memory.max .
+Required; must be greater than 0.
+See
+.Sx SIZING .
 .It Cm grow_step No = Ar size
-How much more memory one grant request asks for, over what the guest already
-has.
-The default is
+The minimum a grant request asks for.
+Default
 .Cm 512MiB .
 .Pp
-The agent asks for the larger of this and what the workload is already short
-by, then rounds the total up to the guest's memory block size
-.Pq Cm 128MiB No on x86-64 .
-A step smaller than the block size therefore does not make the steps smaller;
-it only makes them one block each.
-.It Cm deny_backoff No = Ar duration
-How long to wait before asking again after the host has refused.
-The default is
-.Cm 5s .
-.Pp
-The host may name its own
-.Va retry_after_ms
-in the refusal; this is what the agent uses when it does not.
-.It Cm settle_grace No = Ar duration
-How long a resize is left to settle before the agent stops waiting for it and
-carries on.
-The default is
+Requests are rounded up to the guest's memory block size, 128MiB on x86-64, so
+a smaller step behaves as one block.
+.It Cm escalate_within No = Ar duration
+If the workload is throttled again within this long of a grow completing, the
+next request's step doubles, up to 64 times
+.Cm grow_step .
+Default
 .Cm 10s .
-.Pp
-The agent leaves this state as soon as
-.Va MemTotal
-reaches the target, so the grace is a timeout and not a delay.
-It matters when a resize lands short: the guest's
-.Va MemTotal
-counts what the kernel made usable, which is less than what the device was
-asked for.
-.It Cm idle_threshold No = Ar fraction
-The share of its budget the workload must stay under to count as idle.
-Greater than zero and at most
-.Cm 0.9 ;
-the default is
-.Cm 0.5 .
-.It Cm idle_intervals No = Ar count
-How many consecutive idle ticks it takes before the agent offers memory back.
-Must be greater than zero; the default is
+.It Cm deny_backoff No = Ar duration
+How long to wait before retrying a refused request, when the host does not
+specify a delay.
+Default
+.Cm 5s .
+.It Cm settle_grace No = Ar duration
+How long to wait for granted memory to arrive before accepting the size the
+guest has.
+Default
+.Cm 10s .
+This only matters when a resize arrives short of its target.
+.It Cm release_intervals No = Ar count
+How many consecutive ticks the guest must have
+.Cm shrink_step
+to spare, beyond both reserves, before memory is released.
+Measured from
+.Va MemAvailable .
+Default
 .Cm 3 .
 .Pp
-Together these two set the deadband between growing and shrinking.
-.Cm idle_threshold
-says how empty the cgroup has to look;
-.Cm idle_intervals
-multiplied by
-.Cm tick_interval
-says for how long.
-Shorten the tick and that second half shortens with it, which is usually not
-what is wanted: a workload between two bursts looks idle for a moment.
+The wait is this multiplied by
+.Cm tick_interval ,
+so changing the tick changes it too.
+Too short a wait releases memory between bursts of a workload that will want it
+back.
 .It Cm shrink_step No = Ar size
-How much one offer to release hands back.
-Must be greater than zero; the default is
+How much one release returns.
+Default
 .Cm 256MiB .
-.Pp
-No offer, and no answer to a host's reclaim goes past the memory the guest
-booted with.
 .It Cm shrink_cooldown No = Ar duration
-How long after a release before another one is allowed.
-Zero is legal here; the default is
+Minimum time between releases.
+May be 0.
+Default
 .Cm 30s .
 .Pp
-Releasing costs the workload something.
-The agent reclaims the memory out of its cgroup before offering it, and the
-workload pays again for every page it has to fault back in.
-A short cooldown over a workload with a sawtooth working set gives the memory
-back just in time to ask for it again.
-.It Cm reclaim_swappiness No = Ar count
+Released memory is reclaimed from the workload first, and any of it the workload
+still uses must be faulted back in.
+A workload whose usage rises and falls needs a cooldown longer than its cycle.
+.It Cm reclaim_swappiness No = Ar integer
 The
-.Va swappiness=
-argument appended to the
+.Va swappiness
+passed to each
 .Va memory.reclaim
-writes that free memory before it is offered back.
-From
-.Cm 0
-to
-.Cm 200 .
-Leave the key out to reclaim at the guest's own
-.Va vm.swappiness .
+write, from 0 to 200.
+If unset, the guest's
+.Va vm.swappiness
+applies.
 .Pp
-.Cm 0
-keeps a release from pushing the workload's anonymous pages into swap, so what
-is handed back is memory the workload had genuinely finished with.
-It also means a guest with no free page cache has nothing to release.
-.It Cm titrate_step No = Ar size
-How far one titration step moves
-.Va memory.high
-while the agent is still finding the workload's working set.
-Must be greater than zero; the default is
-.Cm 64MiB .
-.It Cm titrate_interval No = Ar duration
-How long each titration step is given before the next one.
-The default is
-.Cm 10s .
-.It Cm titrate_psi_threshold No = Ar percent
-The workload's own memory pressure, in percent of wall time, above which
-titration stops lowering the brake.
-Greater than zero and at most
-.Cm 100 ;
-the default is
-.Cm 5.0 .
-.Pp
-Titration runs once, when the agent starts over a workload whose demand it has
-not yet seen.
-It begins with the brake off, at
-.Va memory.max ,
-and lowers
-.Va memory.high
-by
-.Cm titrate_step
-every
-.Cm titrate_interval
-for as long as the workload is quiet, which means neither throttled nor over
-the threshold.
-It hands over to the steady band once the brake has come down to where steady
-would put it.
-.Pp
-A busy workload holds titration where it is rather than pushing it back, so the
-brake comes down to meet the working set instead of cutting into it.
-A step far larger than the working set puts the brake in its steady place in
-one move and learns nothing on the way; a step far smaller takes a long time to
-get there.
+At 0, releases take only page cache, never anonymous memory.
+A guest with no reclaimable page cache then has nothing to release.
 .El
-.Ss engine.exhaustion
-What the agent does once the workload wants more than the ceiling allows.
-The table is optional and defaults to
+.Ss [engine.exhaustion]
+What the agent does when the guest reaches its ceiling.
+Optional; defaults to
 .Cm stall
 with a
 .Cm 60s
 timeout.
 .Bl -tag -width Ds
-.It Cm kind No = Cm \(dqstall\(dq
-Leave the band open at
-.Cm open_guard
-and let the workload degrade.
-The workload is throttled, not killed, and keeps whatever progress it can make.
+.It Cm kind No = Qq Cm stall
+Keep the workload throttled.
 .Bl -tag -width Ds
 .It Cm timeout No = Ar duration
-How long the workload may want more than the ceiling allows before the agent
-stops holding the band open.
-The default is
+How long to keep the workload throttled before releasing the brake and letting
+it reach
+.Va memory.max .
+Default
 .Cm 60s .
 .Pp
-When it passes, the band collapses onto
-.Va memory.max
-and the workload is killed by the kernel at the first allocation it cannot
-satisfy.
-A stall is therefore a delay, not a posture: it buys the time for an operator
-or an autoscaler to raise the ceiling, and if nothing does, the outcome is the
-same as
-.Cm kill .
-Set a long timeout where a stalled workload is more useful than a dead one, and
-a short one where a workload that cannot progress should get out of the way.
+Use a long timeout when a stalled workload is still useful, for example while
+an operator raises the ceiling.
 .El
-.It Cm kind No = Cm \(dqkill\(dq
-Let the workload reach
-.Va memory.max
-and be killed as a unit.
-The agent arms
-.Va memory.oom.group
-so the whole cgroup dies together rather than losing one process and carrying
-on half-alive.
-Takes no other key.
+.It Cm kind No = Qq Cm kill
+Release the brake immediately, and have the kernel kill the whole cgroup when
+it reaches
+.Va memory.max .
 .El
-.Ss runtime
+.Ss [runtime]
 .Bl -tag -width Ds
 .It Cm cgroup No = Ar path
-The managed workload cgroup, as an absolute path under the unified hierarchy,
-for example
+Absolute path of the workload cgroup, for example
 .Pa /sys/fs/cgroup/workload.slice .
 Required.
 .Pp
-Everything the agent negotiates for is what this cgroup accounts.
-Memory charged anywhere else in the guest is memory the agent cannot see, and
-so cannot ask for.
-Getting a containerised workload into it is not always a matter of naming the
-slice;
+The agent only sees memory charged to this cgroup.
+See
 .Xr pazari 7
-says where it goes wrong.
+for placing containers in it.
 .It Cm hotplug_debounce No = Ar duration
-How long the hot-plug listener waits for one resize's uevent burst to end
-before it re-reads
-.Pa /proc/meminfo .
-The default is
+After a memory hot-plug event, how long to wait for further events before
+re-reading the guest's memory.
+A resize raises one event per memory block.
+Default
 .Cm 250ms .
-.Pp
-One virtio-mem resize raises a uevent per memory block, so a debounce shorter
-than the burst makes the agent read
-.Pa /proc/meminfo
-once per block for no gain.
 .It Cm reclaim_chunk No = Ar size
-How much one
+The largest single
 .Va memory.reclaim
-write asks the kernel for.
-Must be greater than zero; the default is
+write.
+Larger chunks reclaim faster but stall the workload longer per write.
+Default
 .Cm 64MiB .
-.Pp
-A release is split into writes of at most this size, and the agent stops at the
-first one the kernel will not satisfy.
-Larger chunks reclaim faster and hold the workload up for longer at a time.
 .It Cm thp_always_fatal No = Ar boolean
 Whether
-.Pa /sys/kernel/mm/transparent_hugepage/enabled
-set to
-.Cm always
+.Va transparent_hugepage=always
 fails preflight rather than warning.
-The default is
+Default
 .Cm true .
 .Pp
-A workload on
-.Cm always
-faults its anonymous memory in 2MiB at a time, so a single fault can carry the
-workload 2MiB past
-.Va memory.high
-instead of one page past it, and a guard sized for 4KiB overshoot is no longer
-a guard.
+Under
+.Cm always ,
+a single fault can take 2MiB instead of 4KiB, so the workload crosses the burst
+reserve far faster than it was sized for.
 Boot the guest with
-.Va transparent_hugepage=madvise
-instead.
-Turn this off only where the guest cannot be rebooted and a degraded brake is
-better than none.
+.Va transparent_hugepage=madvise .
+Set this to
+.Cm false
+only if the guest cannot be rebooted.
 .El
-.Ss runtime.backend
-Which adapter writes
+.Ss [runtime.backend]
+How the agent sets
 .Va memory.high
 and
 .Va memory.max .
-The table is optional and defaults to
+Other cgroup files are always written directly.
+Optional; defaults to
 .Cm cgroupfs .
-Everything else the agent does to the cgroup, including
-.Va memory.oom.group
-and
-.Va memory.reclaim ,
-goes through
-.Cm runtime.cgroup
-either way.
 .Bl -tag -width Ds
-.It Cm kind No = Cm \(dqcgroupfs\(dq
-Write straight to the cgroup's own files.
-Takes no other key.
-.It Cm kind No = Cm \(dqsystemd\(dq
-Set the limits as runtime properties of a unit over the system bus, so that
-systemd keeps them across a daemon-reload rather than overwriting them with
-what the unit file says.
-.Bl -tag -width Ds
-.It Cm unit No = Ar name
-The unit carrying the limits as
+.It Cm kind No = Qq Cm cgroupfs
+Write the cgroup files directly.
+.It Cm kind No = Qq Cm systemd
+Set
 .Va MemoryHigh
 and
-.Va MemoryMax ,
-for example
+.Va MemoryMax
+as runtime properties of a unit over D-Bus, so that a
+.Ql systemctl daemon-reload
+does not reset them.
+.Bl -tag -width Ds
+.It Cm unit No = Ar name
+The unit, for example
 .Ql workload.slice .
 Required.
 .El
 .El
-.Ss metrics
-Leave the table out and the agent binds no listener and keeps no counters.
+.Ss [metrics]
+Optional.
+Without it, the agent serves no metrics.
 .Bl -tag -width Ds
 .It Cm listen No = Ar address
-The address the Prometheus endpoint answers scrapes on, for example
+Address to serve OpenMetrics on, for example
 .Ql 127.0.0.1:9651 .
-Required when the table is present.
-.Pp
+Required.
 Any
-.Cm GET ,
-on any path, is answered with the OpenMetrics text exposition; any other method
-is answered with
-.Cm 405 .
-See
-.Sx METRICS .
+.Cm GET
+request is answered with the metrics; other methods get 405.
 .El
-.Ss transport
+.Ss [transport]
 How the agent reaches
 .Xr pazarid 1 .
 Required.
 .Bl -tag -width Ds
-.It Cm kind No = Cm \(dqvsock\(dq
-.Dv AF_VSOCK .
+.It Cm kind No = Qq Cm vsock
 .Bl -tag -width Ds
-.It Cm cid No = Ar id
-The host's context id.
-The default is
-.Cm 2 ,
-which is
-.Dv VMADDR_CID_HOST .
-.It Cm port No = Ar port
-The port the daemon listens on.
-The default is
+.It Cm cid No = Ar integer
+The host's context ID.
+Default
+.Cm 2 .
+.It Cm port No = Ar integer
+Default
 .Cm 4650 .
 .El
-.It Cm kind No = Cm \(dqunix\(dq
-An
-.Dv AF_UNIX
-socket, for a guest that is not a VM.
+.It Cm kind No = Qq Cm unix
+For guests that are not virtual machines.
 .Bl -tag -width Ds
 .It Cm path No = Ar path
-The socket the daemon listens on.
+The daemon's socket.
 Required.
 .El
 .El
 .Pp
-Both variants also take:
+Both kinds accept:
 .Bl -tag -width Ds
 .It Cm handshake_timeout No = Ar duration
-How long to wait for the host's
-.Cm welcome
-before giving up on the connection.
-The default is
+How long to wait for the daemon to answer a new connection.
+Default
 .Cm 10s .
-.Pp
-A daemon that has only just started may take a moment to answer.
 .It Cm reconnect_min No = Ar duration
-The first reconnect delay.
-The default is
+First reconnect delay.
+Default
 .Cm 500ms .
 .It Cm reconnect_max No = Ar duration
-The cap the reconnect delay doubles towards.
-Must not be less than
-.Cm reconnect_min ;
-the default is
+Maximum reconnect delay; the delay doubles up to this.
+Must be at least
+.Cm reconnect_min .
+Default
 .Cm 30s .
 .Pp
-Reconnecting is the only recovery mechanism the protocol has, and it is always
-sufficient: neither side keeps state across a connection.
-A long cap leaves a guest braked at its last known limits for that long after
-the host comes back.
+The agent keeps its current limits while disconnected, so this is also how long
+a guest may keep stale limits after the host returns.
 .El
 .Sh SIZING
-The numbers below come from the pazari test harness, whose
-.Cm measure-brake-crawl
-and
-.Cm measure-hotplug-rtt
-scenarios take them in a guest with no swap, against a workload that faults
-anonymous memory as fast as the kernel will let it.
-They are the numbers the defaults were chosen from.
-They are not constants: take them again on hardware that matters.
-.Ss What the guard buys
-A guest with 1152MiB of budget and a 512MiB burst reserve was put under a
-workload that faults memory as fast as the kernel will let it, and then refused
-any more memory.
-What happened next was decided by the band the refusal left open.
-The run was made twice, and both are given, because one of the arms is not
-stable:
-.Pp
-.Bl -tag -width "open_guard = 256MiB" -offset indent -compact
-.It no guard
-.Va memory.max
-in 4.7s and 4.9s.
-.It Cm open_guard No = Cm 16MiB
-.Va memory.max
-in 35s and in 11s.
-.It Cm open_guard No = Cm 64MiB
-still alive at 360s, 18.2MiB and 17.2MiB into the guard.
-.It Cm open_guard No = Cm 256MiB
-still alive at 360s, 14.1MiB and 14.8MiB into the guard.
-.El
-.Pp
-The guard does not buy time in proportion to its size, because the kernel's
-throttle does not throttle in proportion to the overshoot.
-The penalty it imposes at
-.Va memory.high
-grows with the square of how far past it the workload is, and saturates at two
-seconds per allocation, so a workload that is far enough past
-.Va memory.high
-stops making progress altogether.
-Both of the larger guards had flattened out between 14 and 18MiB of overshoot,
-in both runs, with the whole guard still ahead of them.
-.Pp
-The useful sizes therefore begin at a threshold, which on this host was not far
-above 16MiB.
-Below it, a guard holds only for as long as the workload takes to cross it, and
-that time varies: the 16MiB guard measured 35s in one run and 11s in the next.
-Above it, a guard holds for as long as the workload is willing to sit there,
-and the 64MiB and 256MiB guards measured the same in both runs.
-The
-.Cm 64MiB
-default is the smaller of those two, with room left for a workload whose pages
-are cheaper to fault than these.
-.Pp
-Two things lower that threshold.
-A guest on
-.Va transparent_hugepage=always
-faults 2MiB at a time, so it crosses 512 times as much guard per fault; and a
-guest with swap can page out under the throttle and keep making progress where
-this one could not.
-Measure again after changing either.
-.Ss What a grow costs
-A grow round trip is the time from the agent asking the host for memory to the
-guest's
-.Va MemTotal
-rising.
-Over 11 consecutive grows, against a host with memory to spare, it measured a
-median of
-.Cm 302ms
-and a 95th percentile of
-.Cm 402ms
-with the agent ticking at
-.Cm 500ms ,
-and a median of
-.Cm 118ms
-against a 95th percentile of
-.Cm 180ms
-at a
-.Cm 100ms
-tick.
-.Pp
-Nearly all of that is the resize.
-The leg from the agent's request to the host's answer came back inside the same
-56ms scrape in most cycles, which is as fine as the measurement gets; the leg
-from the answer to
-.Va MemTotal
-rising measured
-.Cm 290ms
-and
-.Cm 118ms
-in the two runs.
-.Pp
-Size
-.Cm burst_reserve
-against the round trip measured on the host it will run on, not against this
-one.
-A workload that faults memory in at a gigabyte a second will take 300MiB out of
-its reserve while a round trip of this length runs.
-.Ss What the brake can see
-The agent reads
-.Va memory.current .
-It never reads
-.Va Committed_AS ,
-and neither should anything sizing the reserves.
-.Pp
-The same guest was run twice against the same plan, once with a one-gigabyte
-arena mapped normally and once with it mapped
-.Dv MAP_NORESERVE .
-The committed arena charged
-.Va Committed_AS
-1020MiB at
-.Xr mmap 2
-time and held it there while the workload touched nothing and then touched
-768MiB of it; the
-.Dv MAP_NORESERVE
-arena charged nothing at any point.
-.Va memory.current
-in the two guests agreed to within a megabyte throughout.
-.Pp
-Commit is charged to the mapping and usage to the touching, and only usage is
-what a guest is holding.
-Commit does decide whether a mapping can be made at all: the same test could
-not map an eight-gigabyte arena without
-.Dv MAP_NORESERVE ,
-in a guest with about 1.6GiB of
-.Va MemTotal
-and no swap.
-.Ss Choosing the three
-Take them in that order, largest first.
-.Pp
-.Cm service_reserve
-is the guest's own footprint with the workload stopped, plus room for it to
-grow: read
+.Ss service_reserve
+With the workload stopped, read
 .Va memory.current
 of
-.Va system.slice
-on a running guest and add a margin.
+.Pa system.slice
+and anything else outside the workload cgroup, and add a margin.
+Too little lets a throttled workload squeeze the agent itself; too much wastes
+granted memory.
+.Ss burst_reserve
+The reserve must meet two conditions.
 .Pp
-.Cm burst_reserve
-is how much memory the workload can acquire in one grow round trip.
-Multiply the round trip by the rate at which the workload faults memory in when
-it is not throttled, and round up.
-A reserve below that leaves the workload throttled between every grant; far
-above it wastes memory that is granted and never used.
+First, it must hold what the workload allocates during one grow round trip:
+the round trip on your host multiplied by the workload's unthrottled allocation
+rate.
+At 1GiB/s and 300ms, that is 300MiB.
+It must also hold the workload's largest single allocation, since the kernel
+throttles after an allocation, not during it.
 .Pp
-.Cm open_guard
-is how much of that reserve is kept back for the round trip itself.
-Size it against the knee rather than as a fraction of anything: it has to be
-past the point where the kernel's throttle saturates, which is the only thing
-that makes a guard hold indefinitely rather than for a measured number of
-seconds.
-Find that point by lowering the guard until a refused workload starts reaching
-.Va memory.max ,
-and then leave several times the margin.
-It still has to be small enough that the workload gets the rest of the reserve
-to burst into, which is the other half of why it is the smallest of the three.
-.Ss systemd-oomd
-A braked workload sits at
+Second, it must be wider than the point at which the kernel's throttle stops the
+workload altogether.
+The throttle delay grows with the overshoot past
 .Va memory.high
-and stalls there on purpose, which is indistinguishable from a workload in
-trouble to anything watching pressure.
-Keep
-.Xr systemd-oomd 8
-off the cgroup the agent manages:
-.Bd -literal -offset indent
-ManagedOOMMemoryPressure=auto
-ManagedOOMSwap=auto
-ManagedOOMPreference=omit
-.Ed
-.Pp
-.Va ManagedOOMPreference=omit
-is what excludes the cgroup.
-The other two only decline to opt in, and are there in case a parent slice
-opted in for it.
-.Sh STARTUP CHECKS
-The agent runs the checks of
-.Nm pazari-agent Cm preflight
-before it starts, and refuses to run if any of them fails.
-A warning does not stop it.
-.Pp
-Two further checks are made once the guest's memory geometry has been read, and
-each is fatal:
-.Va MemTotal
-must cover
-.Cm service_reserve
-plus
+and saturates at about two seconds per allocation.
+A reserve wider than that point holds a refused workload indefinitely; a
+narrower one only slows it on its way to
+.Va memory.max .
+To find the point, lower
 .Cm burst_reserve
-plus one memory block for the workload; and
-.Cm open_guard
-must be strictly smaller than
-.Cm burst_reserve .
+until a workload that is refused memory starts reaching
+.Va memory.max ,
+visible as
+.Va pazari_agent_max_events
+increasing, and use several times that value.
 .Pp
-They are checks on the geometry rather than on the file, so a configuration
-that parses can still be one the agent refuses to start on.
+Measure again after changing the transparent hugepage mode, adding or removing
+swap, or changing how the workload allocates.
+.Ss Reference measurements
+Taken with
+.Xr pazari-stress 1
+in a guest without swap, faulting anonymous memory one page at a time as fast
+as the kernel allowed.
+Measure on your own hardware.
+.Pp
+Grow round trip, from request to
+.Va MemTotal
+rising, over 11 grows:
+.Bl -column "tick_interval" "median" "95th percentile" -offset indent
+.It Sy tick_interval Ta Sy median Ta Sy 95th percentile
+.It 500ms Ta 302ms Ta 402ms
+.It 100ms Ta 118ms Ta 180ms
+.El
+.Pp
+Time for a refused workload to reach
+.Va memory.max ,
+over two runs of 360 seconds:
+.Bl -column "burst_reserve" "never; stopped 14\-18MiB into the reserve" -offset indent
+.It Sy burst_reserve Ta Sy result
+.It none Ta under 5s
+.It 16MiB Ta 11s and 35s
+.It 64MiB Ta never; stopped 17\-18MiB into the reserve
+.It 256MiB Ta never; stopped 14\-15MiB into the reserve
+.El
+.Ss Usage, not commit
+Size reserves from
+.Va memory.current ,
+not
+.Va Committed_AS .
+Mapped but untouched memory counts towards commit but not usage, and the agent
+sees only usage.
 .Sh METRICS
-With a
-.Sx metrics
-table present, the agent publishes, under the prefix
-.Va pazari_agent :
-.Pp
-Gauges:
-.Va memory_high_bytes
-and
-.Va memory_max_bytes ,
-the limits as last written;
-.Va total_mem_bytes ,
-the guest's
-.Va MemTotal ;
-.Va ceiling_bytes ,
-the ceiling the host named, or zero before it has;
-.Va band_open ,
-1 while the brake is off;
-.Va workload_usage_bytes
-and
-.Va swap_used_bytes ;
-.Va high_events
-and
-.Va max_events ,
-the cgroup's own
-.Va memory.events
-counters;
-.Va psi_some10 ,
-the workload's memory pressure;
-.Va connected ;
-and
-.Va mode ,
-which carries a
-.Va mode
-label and is 1 on exactly one of
-.Cm titrating , steady , awaiting_grant , releasing
-and
-.Cm exhausted .
-.Pp
-Counters:
-.Va throttle_wakes_total ,
-.Va grant_requests_total ,
-.Va grants_total ,
-.Va denies_total
-with a
-.Va reason
-label,
-.Va offers_total ,
-.Va reclaims_total ,
-.Va reclaim_asked_bytes_total ,
-.Va exhaustions_total ,
-.Va connections_total
-and
-.Va disconnections_total .
-.Pp
-The agent refreshes its gauges on every event it handles, not on a timer, so a
-scrape sees the state as of the last thing that happened.
+With
+.Cm [metrics]
+configured, the agent publishes the following, each prefixed
+.Ql pazari_agent_ .
+.Ss Gauges
+.Bl -tag -width "workload_usage_bytes" -compact
+.It Va mode
+1 for the current mode, 0 for the others, labelled
+.Va mode .
+.It Va memory_high_bytes
+.Va memory.high
+as last written.
+.It Va memory_max_bytes
+.Va memory.max
+as last written.
+.It Va brake_released
+1 while
+.Va memory.high
+equals
+.Va memory.max .
+.It Va total_mem_bytes
+The guest's
+.Va MemTotal .
+.It Va ceiling_bytes
+The ceiling set by the host, or 0 if not yet known.
+.It Va workload_usage_bytes
+.Va memory.current
+of the workload cgroup.
+.It Va swap_used_bytes
+Swap used by the workload cgroup.
+.It Va high_events
+The cgroup's
+.Va high
+event count.
+.It Va max_events
+The cgroup's
+.Va max
+event count.
+Should stay at 0.
+.It Va psi_some10
+The workload's memory pressure.
+.It Va connected
+1 while connected to the host.
+.El
+.Ss Counters
+.Bl -tag -width "reclaim_asked_bytes_total" -compact
+.It Va throttle_wakes_total
+Times the agent was woken by a throttle.
+.It Va grant_requests_total
+Grant requests sent.
+.It Va grants_total
+Grants received.
+.It Va denies_total
+Refusals received, labelled
+.Va reason .
+.It Va offers_total
+Offers to release sent.
+.It Va reclaims_total
+Reclaim requests received from the host.
+.It Va reclaim_asked_bytes_total
+Bytes those requests asked for.
+.It Va exhaustions_total
+Times the agent became exhausted.
+.It Va connections_total
+Connections established.
+.It Va disconnections_total
+Connections lost.
+.El
 .Sh FILES
 .Bl -tag -width Ds
 .It Pa /etc/pazari/agent.toml
-The default configuration file.
+Default configuration file.
 .It Pa share/doc/pazari/examples/agent.toml
-An annotated file carrying every key at its default.
+Annotated example, installed with the package.
 .El
 .Sh EXAMPLES
-A guest that boots with 2GiB, keeps half a gigabyte for its own services, and
-gives its workload a quarter-gigabyte of runway:
+A guest that boots with 2GiB, keeps 512MiB for its own services, uses a 256MiB
+burst reserve, and stalls for up to five minutes when exhausted:
 .Bd -literal -offset indent
 tick_interval = "500ms"
 
 [engine]
 service_reserve = "512MiB"
 burst_reserve = "256MiB"
-open_guard = "64MiB"
 
 [engine.exhaustion]
 kind = "stall"
@@ -774,9 +467,8 @@ kind = "vsock"
 .Ed
 .Sh SEE ALSO
 .Xr pazari-agent 1 ,
+.Xr pazari-stress 1 ,
 .Xr pazarid 1 ,
 .Xr pazarid.toml 5 ,
-.Xr pazari 7
-.Pp
 .Xr systemd.resource-control 5 ,
-.Xr systemd-oomd 8
+.Xr pazari 7

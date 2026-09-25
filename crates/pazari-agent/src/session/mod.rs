@@ -280,7 +280,7 @@ async fn pump(
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use pazari_proto::{DenyReason, GrantReason, Urgency};
+    use pazari_proto::DenyReason;
     use pazari_transport::{Listener, UnixConnector, UnixListener};
     use tempfile::TempDir;
     use tokio::{io::AsyncReadExt as _, net::UnixStream};
@@ -519,8 +519,6 @@ mod tests {
                 id: 1,
                 current: BOOT,
                 target: BOOT + 512 * MIB,
-                reason: GrantReason::Throttle,
-                urgency: Urgency::High,
             },
             GuestMessage::ReclaimAck {
                 id: 4,

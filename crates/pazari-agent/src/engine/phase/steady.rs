@@ -9,16 +9,13 @@ use crate::engine::{
         Phase, State, Step,
         growing::Growing,
         releasing::{Owed, Releasing},
-        spare,
     },
     scale::{Escalation, GrowScale},
-    streak::Streak,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Steady {
     escalation: Escalation,
-    slack: Streak,
     cooldown: Option<Deadline>,
 }
 
@@ -26,7 +23,6 @@ impl Steady {
     pub const fn start() -> Self {
         Self {
             escalation: Escalation::NONE,
-            slack: Streak::BROKEN,
             cooldown: None,
         }
     }
@@ -48,10 +44,10 @@ impl Steady {
 
     fn enter(step: &mut Step<'_>, escalation: Escalation, cooldown: Option<Deadline>) -> Phase {
         step.brake(Brake::Engaged);
+        step.world.forget_spare();
 
         Phase::Steady(Self {
             escalation,
-            slack: Streak::BROKEN,
             cooldown,
         })
     }
@@ -67,7 +63,6 @@ impl Steady {
     fn noted(self, step: &Step<'_>, pressure: Pressure) -> Self {
         Self {
             escalation: self.escalation,
-            slack: self.slack.then(spare(step, pressure)),
             cooldown: if pressure.breached {
                 Some(Self::cooldown(step).furthest(self.cooldown))
             } else {
@@ -127,7 +122,7 @@ impl State for Steady {
     fn on_interval(self, step: &mut Step<'_>, pressure: Pressure) -> Phase {
         let next = self.noted(step, pressure);
 
-        if !next.slack.reached(step.config().release_intervals)
+        if !step.world.spare().reached(step.config().release_intervals)
             || !step.world.connected()
             || next.cooling(step)
         {

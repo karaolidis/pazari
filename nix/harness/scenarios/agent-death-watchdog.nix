@@ -56,12 +56,6 @@
     def check(run):
         guest = run.guest
 
-        guest.agent.reaches(
-            "pazari_agent_brake_released",
-            lambda value: value == 1,
-            120,
-            "the brake opened under the throttled workload",
-        )
         guest.agent.rose(
             "pazari_agent_denies_total",
             labels={"reason": "ceiling"},
@@ -71,9 +65,18 @@
         guest.agent.reaches(
             "pazari_agent_mode",
             lambda value: value == 1,
-            90,
+            120,
             "the engine is stalled at the ceiling",
             {"mode": "exhausted"},
+        )
+        stalled = run.seen
+
+        guest.agent.reaches(
+            "pazari_agent_brake_released",
+            lambda value: value == 0,
+            30,
+            "the stalling agent kept the brake on rather than releasing it",
+            since=stalled,
         )
 
         collapsed(run, guest, GROW, "the braked workload is crawling", share=CRAWLING)

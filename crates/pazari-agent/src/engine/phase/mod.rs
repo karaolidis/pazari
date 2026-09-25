@@ -58,15 +58,6 @@ impl Step<'_> {
     }
 }
 
-pub fn spare(step: &Step<'_>, pressure: Pressure) -> bool {
-    !pressure.throttled
-        && !pressure.breached
-        && step
-            .world
-            .slack()
-            .is_some_and(|slack| slack >= step.config().shrink_step.get())
-}
-
 #[enum_dispatch]
 pub trait State: Copy {
     fn stay(self) -> Phase;

@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use pazari_proto::{GuestMessage, HostMessage};
+use pazari_proto::{DenyReason, GuestMessage, HostMessage};
 use pazari_types::{Delay, Interval, Swappiness, Timestamp};
 
 use crate::engine::{
@@ -127,6 +127,14 @@ pub const fn request(id: u64, current: u64, target: u64) -> Action {
         current,
         target,
     })
+}
+
+pub const fn deny(id: u64) -> HostMessage {
+    HostMessage::Deny {
+        id,
+        reason: DenyReason::Ceiling,
+        retry_after_ms: None,
+    }
 }
 
 pub fn connect(engine: &mut Engine, now: Timestamp, ceiling: u64, status: Duration) -> Vec<Action> {

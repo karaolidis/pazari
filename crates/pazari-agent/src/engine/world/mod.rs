@@ -7,10 +7,12 @@ use tracing::debug;
 use crate::engine::{
     action::Action,
     config::EngineConfig,
+    counters::Pressure,
     effects::Effects,
     event::{BootInfo, Snapshot},
     limits::{Brake, Limits},
     scale::GrowScale,
+    streak::Streak,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -119,6 +121,7 @@ pub struct World {
     limits: Limits,
     guest: Guest,
     link: Link,
+    spare: Streak,
 }
 
 impl World {
@@ -127,6 +130,7 @@ impl World {
             limits: Limits::new(&config, boot.total_mem),
             guest: Guest::new(boot),
             link: Link::closed(),
+            spare: Streak::BROKEN,
             config,
         }
     }
@@ -213,6 +217,26 @@ impl World {
 
     pub fn status_due(&mut self, now: Timestamp) -> bool {
         self.link.status_due(now)
+    }
+
+    pub const fn spare(&self) -> Streak {
+        self.spare
+    }
+
+    pub fn note_spare(&mut self, pressure: Pressure) {
+        self.spare = self.spare.then(self.sparing(pressure));
+    }
+
+    pub const fn forget_spare(&mut self) {
+        self.spare = Streak::BROKEN;
+    }
+
+    fn sparing(&self, pressure: Pressure) -> bool {
+        !pressure.throttled
+            && !pressure.breached
+            && self
+                .slack()
+                .is_some_and(|slack| slack >= self.config.shrink_step.get())
     }
 
     pub fn slack(&self) -> Option<u64> {

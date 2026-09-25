@@ -5,9 +5,8 @@ use crate::engine::{
     config::ExhaustionMode,
     counters::Pressure,
     limits::Brake,
-    phase::{Phase, State, Step, growing::Growing, spare, steady::Steady},
+    phase::{Phase, State, Step, growing::Growing, steady::Steady},
     scale::{Escalation, GrowScale},
-    streak::Streak,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,7 +14,6 @@ pub struct Exhausted {
     scale: GrowScale,
     since: Timestamp,
     retry_at: Option<Deadline>,
-    recovery: Streak,
 }
 
 impl Exhausted {
@@ -69,7 +67,6 @@ impl Exhausted {
             scale,
             since,
             retry_at,
-            recovery: Streak::BROKEN,
         })
     }
 
@@ -144,11 +141,9 @@ impl State for Exhausted {
         self.stay()
     }
 
-    fn on_interval(self, step: &mut Step<'_>, pressure: Pressure) -> Phase {
-        let recovery = self.recovery.then(spare(step, pressure));
-
-        if !recovery.reached(step.config().release_intervals) {
-            return Phase::Exhausted(Self { recovery, ..self });
+    fn on_interval(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
+        if !step.world.spare().reached(step.config().release_intervals) {
+            return self.stay();
         }
 
         Steady::recovered(step, Escalation::NONE)
@@ -420,6 +415,44 @@ mod tests {
         );
         assert!(matches!(engine.phase(), Phase::Growing(_)));
         assert!(engine.high() < engine.max());
+    }
+
+    #[test]
+    fn a_calm_guest_recovers_even_while_the_host_keeps_refusing() {
+        let config = EngineConfig {
+            deny_backoff: interval(2),
+            exhaustion: ExhaustionMode::Stall {
+                timeout: interval(600),
+            },
+            ..config()
+        };
+        let mut engine = started_with(config, BOOT + 128 * MIB);
+
+        wake(&mut engine, at(100), 1);
+
+        let id = engine
+            .pending_request()
+            .expect("the throttle asked for memory");
+        host(&mut engine, at(100), deny(id));
+
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
+
+        for second in 101..=140 {
+            tick(&mut engine, at(second), snap(BOOT, CALM, 1));
+
+            if let Some(id) = engine.pending_request() {
+                host(&mut engine, at(second), deny(id));
+            }
+
+            if matches!(engine.phase(), Phase::Steady(_)) {
+                return;
+            }
+        }
+
+        panic!(
+            "an idle guest never came back to steady: {:?}",
+            engine.phase(),
+        );
     }
 
     #[test]

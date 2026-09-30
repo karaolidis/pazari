@@ -1,0 +1,137 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nikolaos Karaolidis <nick@karaolidis.com>
+Date: Tue, 29 Sep 2026 22:11:46 +0100
+Subject: [PATCH] mm: filemap: record page cache folios allocated from
+ ZONE_MOVABLE
+
+Inode reclaim needs to know whether an inode's page cache may be in
+ZONE_MOVABLE, and that cannot be read back cheaply under i_lock.
+
+Set AS_MOVABLE_CACHE under the i_pages lock when a ZONE_MOVABLE folio
+enters a mapping, in __filemap_add_folio(), replace_page_cache_folio(),
+collapse_file() and __folio_migrate_mapping(). hugetlb and swap-backed
+folios are skipped, as the inode shrinker never strips them. The flag
+is cleared when the mapping empties, not when its cache migrates out of
+ZONE_MOVABLE.
+
+The tracking compiles away on CONFIG_HIGHMEM, which strips every
+inode's cache already. No functional change on its own.
+---
+ include/linux/pagemap.h | 23 +++++++++++++++++++++++
+ mm/filemap.c            |  7 +++++++
+ mm/khugepaged.c         |  1 +
+ mm/migrate.c            |  7 +++++--
+ 4 files changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/include/linux/pagemap.h b/include/linux/pagemap.h
+index 2c3718d592d6..c0362590179a 100644
+--- a/include/linux/pagemap.h
++++ b/include/linux/pagemap.h
+@@ -210,6 +210,7 @@ enum mapping_flags {
+ 	AS_WRITEBACK_MAY_DEADLOCK_ON_RECLAIM = 9,
+ 	AS_KERNEL_FILE = 10,	/* mapping for a fake kernel file that shouldn't
+ 				   account usage to user cgroups */
++	AS_MOVABLE_CACHE = 11,	/* had cache in ZONE_MOVABLE since last empty */
+ 	/* Bits 16-25 are used for FOLIO_ORDER */
+ 	AS_FOLIO_ORDER_BITS = 5,
+ 	AS_FOLIO_ORDER_MIN = 16,
+@@ -345,6 +346,28 @@ static inline bool mapping_writeback_may_deadlock_on_reclaim(const struct addres
+ 	return test_bit(AS_WRITEBACK_MAY_DEADLOCK_ON_RECLAIM, &mapping->flags);
+ }
+ 
++/* For inode_cache_shrinkable(). Called under the i_pages lock. */
++static inline void mapping_record_movable_folio(struct address_space *mapping,
++						const struct folio *folio)
++{
++	if (IS_ENABLED(CONFIG_HIGHMEM) || folio_zonenum(folio) != ZONE_MOVABLE)
++		return;
++	if (!test_bit(AS_MOVABLE_CACHE, &mapping->flags))
++		set_bit(AS_MOVABLE_CACHE, &mapping->flags);
++}
++
++static inline void mapping_clear_movable_cache(struct address_space *mapping)
++{
++	if (!IS_ENABLED(CONFIG_HIGHMEM) &&
++	    test_bit(AS_MOVABLE_CACHE, &mapping->flags))
++		clear_bit(AS_MOVABLE_CACHE, &mapping->flags);
++}
++
++static inline bool mapping_movable_cache(const struct address_space *mapping)
++{
++	return test_bit(AS_MOVABLE_CACHE, &mapping->flags);
++}
++
+ static inline gfp_t mapping_gfp_mask(const struct address_space *mapping)
+ {
+ 	return mapping->gfp_mask;
+diff --git a/mm/filemap.c b/mm/filemap.c
+index d721986d5f46..2e5e583efee8 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -145,6 +145,8 @@ static void page_cache_delete(struct address_space *mapping,
+ 	folio->mapping = NULL;
+ 	/* Leave folio->index set: truncation lookup relies upon it */
+ 	mapping->nrpages -= nr;
++	if (!mapping->nrpages)
++		mapping_clear_movable_cache(mapping);
+ }
+ 
+ static void filemap_unaccount_folio(struct address_space *mapping,
+@@ -315,6 +317,8 @@ static void page_cache_delete_batch(struct address_space *mapping,
+ 		total_pages += folio_nr_pages(folio);
+ 	}
+ 	mapping->nrpages -= total_pages;
++	if (!mapping->nrpages)
++		mapping_clear_movable_cache(mapping);
+ }
+ 
+ void delete_from_page_cache_batch(struct address_space *mapping,
+@@ -838,6 +842,8 @@ void replace_page_cache_folio(struct folio *old, struct folio *new)
+ 		lruvec_stat_sub_folio(old, NR_SHMEM);
+ 	if (folio_test_swapbacked(new))
+ 		lruvec_stat_add_folio(new, NR_SHMEM);
++	else
++		mapping_record_movable_folio(mapping, new);
+ 	xas_unlock_irq(&xas);
+ 	if (free_folio)
+ 		free_folio(old);
+@@ -924,6 +930,7 @@ noinline int __filemap_add_folio(struct address_space *mapping,
+ 			if (folio_test_pmd_mappable(folio))
+ 				lruvec_stat_mod_folio(folio,
+ 						NR_FILE_THPS, nr);
++			mapping_record_movable_folio(mapping, folio);
+ 		}
+ 
+ unlock:
+diff --git a/mm/khugepaged.c b/mm/khugepaged.c
+index 2d0aee0312f2..bb4127add81f 100644
+--- a/mm/khugepaged.c
++++ b/mm/khugepaged.c
+@@ -2590,6 +2590,7 @@ static enum scan_result collapse_file(struct mm_struct *mm, unsigned long addr,
+ 		lruvec_stat_mod_folio(new_folio, NR_SHMEM_THPS, HPAGE_PMD_NR);
+ 	} else {
+ 		lruvec_stat_mod_folio(new_folio, NR_FILE_THPS, HPAGE_PMD_NR);
++		mapping_record_movable_folio(mapping, new_folio);
+ 	}
+ 	lruvec_stat_mod_folio(new_folio, NR_FILE_PAGES, HPAGE_PMD_NR);
+ 
+diff --git a/mm/migrate.c b/mm/migrate.c
+index 35381ce36a8f..44c85a5ffbbc 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -645,10 +645,13 @@ static int __folio_migrate_mapping(struct address_space *mapping,
+ 		folio_set_dirty(newfolio);
+ 	}
+ 
+-	if (folio_test_swapcache(folio))
++	if (folio_test_swapcache(folio)) {
+ 		__swap_cache_replace_folio(ci, folio, newfolio);
+-	else
++	} else {
+ 		xas_store(&xas, newfolio);
++		if (!folio_test_swapbacked(folio))
++			mapping_record_movable_folio(mapping, newfolio);
++	}
+ 
+ 	/*
+ 	 * Drop cache reference from old folio by unfreezing

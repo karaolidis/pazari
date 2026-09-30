@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nikolaos Karaolidis <nick@karaolidis.com>
+Date: Tue, 29 Sep 2026 22:10:33 +0100
+Subject: [PATCH] fs: don't lose inodes that another LRU walker is isolating
+
+inode_lru_isolate() drops the page cache of an unused inode with
+I_LRU_ISOLATING set and all locks released, then returns LRU_RETRY so
+that the restarted walk frees the inode. A second walker can reach the
+inode in that window, see I_LRU_ISOLATING and take it off the LRU as if
+it were in use. Nothing puts it back, so the inode stays in memory, out
+of reach of the shrinker and drop_caches, until it is looked up again
+or the filesystem is unmounted.
+
+Before commit 2a0629834cd8 ("vfs: Don't evict inode under the inode lru
+traversing context") the pin was an i_count reference, and the final
+iput() requeued the inode.
+
+Skip inodes that are being isolated and leave them to the walker that
+pinned them. This affects inodes stripped on CONFIG_HIGHMEM and, on
+other kernels, inodes with a single shadow entry left.
+
+Fixes: 2a0629834cd8 ("vfs: Don't evict inode under the inode lru traversing context")
+Cc: stable@vger.kernel.org
+---
+ fs/inode.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/fs/inode.c b/fs/inode.c
+index 95e981b4e19c..8946e88af62d 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -946,6 +946,12 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
+ 	if (!spin_trylock(&inode->i_lock))
+ 		return LRU_SKIP;
+ 
++	/* Another walker is dropping its page cache, leave it to that one */
++	if (inode_state_read(inode) & I_LRU_ISOLATING) {
++		spin_unlock(&inode->i_lock);
++		return LRU_SKIP;
++	}
++
+ 	/*
+ 	 * Inodes can get referenced, redirtied, or repopulated while
+ 	 * they're already on the LRU, and this can make them

@@ -308,11 +308,12 @@ impl<'a> Preflight<'a> {
         };
 
         match value.as_str() {
-            "online" | "online_kernel" | "online_movable" => {
-                check.pass(format!("the policy is {value}"))
-            }
+            "online_movable" => check.pass(format!("the policy is {value}")),
+            "online" | "online_kernel" => check.warn(format!(
+                "the policy is {value}: blocks onlined to a kernel zone take unmovable allocations, and one such page keeps its block from being unplugged; boot with memhp_default_state=online_movable"
+            )),
             "offline" => check.fail(format!(
-                "{} is offline: a hot-plugged block is added and left offline, so a grant never reaches MemTotal; write online to it, or boot with memhp_default_state=online",
+                "{} is offline: a hot-plugged block is added and left offline, so a grant never reaches MemTotal; write online_movable to it, or boot with memhp_default_state=online_movable",
                 path.display()
             )),
             _ => check.fail(format!(
@@ -666,20 +667,28 @@ mod tests {
     }
 
     #[test]
-    fn every_onlining_policy_that_onlines_passes() {
+    fn onlining_to_a_kernel_zone_warns() {
         let guest = Guest::new();
 
-        for policy in ["online", "online_kernel", "online_movable"] {
+        assert_eq!(
+            severity(&Preflight::new(&guest.config).run(None), "auto-onlining"),
+            Severity::Pass
+        );
+
+        for policy in ["online", "online_kernel"] {
             Guest::write(
                 &guest.config.paths.auto_online_blocks,
                 &format!("{policy}\n"),
             );
 
+            let report = Preflight::new(&guest.config).run(None);
+
             assert_eq!(
-                severity(&Preflight::new(&guest.config).run(None), "auto-onlining"),
-                Severity::Pass,
-                "rejected {policy}"
+                severity(&report, "auto-onlining"),
+                Severity::Warn,
+                "{policy}"
             );
+            assert!(detail(&report, "auto-onlining").contains("online_movable"));
         }
     }
 

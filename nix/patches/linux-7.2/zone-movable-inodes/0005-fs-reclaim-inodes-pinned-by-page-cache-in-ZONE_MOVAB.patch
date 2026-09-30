@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nikolaos Karaolidis <nick@karaolidis.com>
+Date: Tue, 29 Sep 2026 22:12:33 +0100
+Subject: [PATCH] fs: reclaim inodes pinned by page cache in ZONE_MOVABLE
+
+Since commit 51b8c1fe250d ("vfs: keep inodes with page cache off the
+inode shrinker LRU"), an unused inode stays off the inode LRU until
+reclaim has emptied its mapping. CONFIG_HIGHMEM is exempt: lowmem can
+fill with inodes before highmem sees pressure from their cache.
+
+ZONE_MOVABLE has the same problem. Inodes, dentries and buffer heads
+come from the kernel zones, their page cache mostly from ZONE_MOVABLE,
+which reclaim for kernel allocations does not scan. This is typical of
+VMs that online hot-plugged memory movable so that it can be unplugged;
+movablecore=, kernelcore= and movable_node do the same.
+
+A guest with 1 GiB of boot memory, grown by up to 4 GiB of virtio-mem
+onlined movable, that creates, walks and deletes 2 million single-page
+files on ext4 gets 10 to 20 OOM kills for kernel allocations and
+usually panics. movablecore=4G and kernelcore=1G fail the same way.
+With this patch all of them complete without OOM kills.
+
+Put unused, clean inodes with AS_MOVABLE_CACHE and at most 32 pages of
+cache on the inode LRU. Reclaim that skips populated zones
+(shrink_control::zone_limited) drops their cache and frees them, as on
+highmem; other reclaim rotates them without using up I_REFERENCED.
+Inodes whose cache first migrates into ZONE_MOVABLE are queued too.
+
+That commit objected to stripping, which drops used cache and its
+shadow entries and ignores cgroup protection, and to rotating
+populated inodes, tried in commit a76cf1a474d7 ("mm: don't reclaim
+inodes with many attached pages") and reverted for regressions. Here
+only reclaim that cannot reach the cache strips it, only inodes it
+would strip are rotated, and the 32-page bound leaves large files alone.
+
+Without page cache in ZONE_MOVABLE nothing changes, and on
+CONFIG_HIGHMEM the new code compiles away. Otherwise, zone-limited
+reclaim drops up to 32 pages of cold cache per inode, without shadow
+entries and regardless of memory.min/low; the queued inodes raise the
+inode share of the superblock shrinker's batches; and dropped pages
+count as reclaim progress, which can delay a genuine kernel-zone OOM.
+
+With 2 GiB of boot memory and 4 GiB movable, kbuild -j8 next to a 6 GiB
+write-and-read loop, and a cold-cache variant, showed the same inode
+steals and refaults and 6-12% more slabs_scanned; run times stayed
+within the host's noise. With 1 GiB of boot memory and 600k new small
+files, cold 16-page files were dropped while 40-page files and a 1 GiB
+file stayed cached; without the bound all of them were dropped.
+
+Dirty inodes are not covered: the dirty limits include ZONE_MOVABLE.
+---
+ fs/inode.c   | 58 +++++++++++++++++++++++++++++++++++++++++++---------
+ mm/migrate.c | 14 +++++++++++++
+ 2 files changed, 62 insertions(+), 10 deletions(-)
+
+diff --git a/fs/inode.c b/fs/inode.c
+index 2a455af72aa4..85996f39ff8c 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -548,6 +548,26 @@ void wait_on_new_inode(struct inode *inode)
+ }
+ EXPORT_SYMBOL(wait_on_new_inode);
+ 
++/*
++ * Most page cache dropped to free an inode whose cache is in ZONE_MOVABLE.
++ * Larger files pin few inodes per page of cache.
++ */
++#define INODE_MOVABLE_STRIP_PAGES	32
++
++/*
++ * As with highmem, reclaim for kernel allocations does not scan ZONE_MOVABLE,
++ * so inodes can fill the kernel zones before their cache there sees pressure.
++ * Queue them if that cache is small.
++ */
++static bool inode_cache_shrinkable(struct inode *inode)
++{
++	struct address_space *mapping = &inode->i_data;
++
++	return mapping_shrinkable(mapping) ||
++	       (mapping_movable_cache(mapping) &&
++		mapping->nrpages <= INODE_MOVABLE_STRIP_PAGES);
++}
++
+ static void __inode_lru_list_add(struct inode *inode, bool rotate)
+ {
+ 	lockdep_assert_held(&inode->i_lock);
+@@ -558,7 +578,7 @@ static void __inode_lru_list_add(struct inode *inode, bool rotate)
+ 		return;
+ 	if (!(inode->i_sb->s_flags & SB_ACTIVE))
+ 		return;
+-	if (!mapping_shrinkable(&inode->i_data))
++	if (!inode_cache_shrinkable(inode))
+ 		return;
+ 
+ 	if (list_lru_add_obj(&inode->i_sb->s_inode_lru, &inode->i_lru))
+@@ -921,6 +941,11 @@ void evict_inodes(struct super_block *sb)
+ }
+ EXPORT_SYMBOL_GPL(evict_inodes);
+ 
++struct inode_isolate_arg {
++	struct list_head freeable;
++	bool zone_limited;
++};
++
+ /*
+  * Isolate the inode from the LRU in preparation for freeing it.
+  *
+@@ -935,7 +960,7 @@ EXPORT_SYMBOL_GPL(evict_inodes);
+ static enum lru_status inode_lru_isolate(struct list_head *item,
+ 		struct list_lru_one *lru, void *arg)
+ {
+-	struct list_head *freeable = arg;
++	struct inode_isolate_arg *isa = arg;
+ 	struct inode	*inode = container_of(item, struct inode, i_lru);
+ 
+ 	/*
+@@ -959,13 +984,22 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
+ 	 */
+ 	if (icount_read(inode) ||
+ 	    (inode_state_read(inode) & ~I_REFERENCED) ||
+-	    !mapping_shrinkable(&inode->i_data)) {
++	    !inode_cache_shrinkable(inode)) {
+ 		list_lru_isolate(lru, &inode->i_lru);
+ 		spin_unlock(&inode->i_lock);
+ 		this_cpu_dec(nr_unused);
+ 		return LRU_REMOVED;
+ 	}
+ 
++	/*
++	 * Leave cache that this reclaim can scan to the page LRU, without
++	 * using up the second chance below.
++	 */
++	if (!isa->zone_limited && !mapping_shrinkable(&inode->i_data)) {
++		spin_unlock(&inode->i_lock);
++		return LRU_ROTATE;
++	}
++
+ 	/* Recently referenced inodes get one more pass */
+ 	if (inode_state_read(inode) & I_REFERENCED) {
+ 		inode_state_clear(inode, I_REFERENCED);
+@@ -974,9 +1008,10 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
+ 	}
+ 
+ 	/*
+-	 * On highmem systems, mapping_shrinkable() permits dropping
+-	 * page cache in order to free up struct inodes: lowmem might
+-	 * be under pressure before the cache inside the highmem zone.
++	 * On highmem systems, and for small caches in ZONE_MOVABLE,
++	 * inode_cache_shrinkable() permits dropping page cache in order to
++	 * free up struct inodes: lowmem might be under pressure before the
++	 * cache inside the upper zone.
+ 	 */
+ 	if (!mapping_empty(&inode->i_data)) {
+ 		unsigned long reap;
+@@ -1002,7 +1037,7 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
+ 
+ 	WARN_ON(inode_state_read(inode) & I_NEW);
+ 	inode_state_set(inode, I_FREEING);
+-	list_lru_isolate_move(lru, &inode->i_lru, freeable);
++	list_lru_isolate_move(lru, &inode->i_lru, &isa->freeable);
+ 	spin_unlock(&inode->i_lock);
+ 
+ 	this_cpu_dec(nr_unused);
+@@ -1017,12 +1052,15 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
+  */
+ long prune_icache_sb(struct super_block *sb, struct shrink_control *sc)
+ {
+-	LIST_HEAD(freeable);
++	struct inode_isolate_arg isa = {
++		.freeable = LIST_HEAD_INIT(isa.freeable),
++		.zone_limited = sc->zone_limited,
++	};
+ 	long freed;
+ 
+ 	freed = list_lru_shrink_walk(&sb->s_inode_lru, sc,
+-				     inode_lru_isolate, &freeable);
+-	dispose_list(&freeable);
++				     inode_lru_isolate, &isa);
++	dispose_list(&isa.freeable);
+ 	return freed;
+ }
+ 
+diff --git a/mm/migrate.c b/mm/migrate.c
+index 44c85a5ffbbc..2c0c7de75d2c 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -1101,6 +1101,7 @@ static int move_to_new_folio(struct folio *dst, struct folio *src,
+ 				enum migrate_mode mode)
+ {
+ 	struct address_space *mapping = folio_mapping(src);
++	bool movable_cache = mapping && mapping_movable_cache(mapping);
+ 	int rc = -EAGAIN;
+ 
+ 	VM_BUG_ON_FOLIO(!folio_test_locked(src), src);
+@@ -1133,6 +1134,19 @@ static int move_to_new_folio(struct folio *dst, struct folio *src,
+ 
+ 		if (likely(!folio_is_zone_device(dst)))
+ 			flush_dcache_folio(dst);
++
++		/*
++		 * An unused inode may now belong on the LRU. The locked dst
++		 * folio keeps the inode alive.
++		 */
++		if (!movable_cache && mapping &&
++		    mapping_movable_cache(mapping)) {
++			struct inode *inode = mapping->host;
++
++			spin_lock(&inode->i_lock);
++			inode_lru_list_add(inode);
++			spin_unlock(&inode->i_lock);
++		}
+ 	}
+ 	return rc;
+ }

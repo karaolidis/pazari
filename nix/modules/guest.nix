@@ -12,6 +12,10 @@ let
   configFile = format.generate "agent.toml" cfg.settings;
 
   agent = lib.getExe' cfg.package "pazari-agent";
+
+  kernelVersion = lib.versions.majorMinor config.boot.kernelPackages.kernel.version;
+
+  patches = ../patches + "/linux-${kernelVersion}";
 in
 {
   options.services.pazari-agent = {
@@ -71,6 +75,24 @@ in
       '';
     };
 
+    kernel = {
+      movable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Whether hot-plugged memory is onlined to `ZONE_MOVABLE`.
+        '';
+      };
+
+      patches = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Whether to patch the guest kernel so that hot-plugged memory hosts its own memmap, and inodes cached in `ZONE_MOVABLE` can be reclaimed.
+        '';
+      };
+    };
+
     settings = lib.mkOption {
       type = format.type;
       default = { };
@@ -94,12 +116,35 @@ in
         assertion = cfg.openFirewall -> cfg.metricsPort != null;
         message = "services.pazari-agent.openFirewall has no port to open without services.pazari-agent.metricsPort.";
       }
+      {
+        assertion = cfg.kernel.patches -> builtins.pathExists patches;
+        message = "services.pazari-agent.kernel.patches has no patches for Linux ${kernelVersion}.";
+      }
     ];
 
-    boot.kernelParams = [
-      "transparent_hugepage=madvise"
-      "psi=1"
-    ];
+    boot = {
+      kernelParams = [
+        "transparent_hugepage=madvise"
+        "psi=1"
+      ]
+      ++ lib.optional cfg.kernel.movable "memhp_default_state=online_movable"
+      ++ lib.optionals cfg.kernel.patches [
+        "memory_hotplug.memmap_on_memory=1"
+        "virtio_mem.memmap_on_memory=1"
+      ];
+
+      kernelPatches = lib.mkIf (cfg.kernel.patches && builtins.pathExists patches) (
+        map (patch: {
+          name = lib.removeSuffix ".patch" (baseNameOf patch);
+          inherit patch;
+        }) (lib.filesystem.listFilesRecursive patches)
+      );
+
+      kernel.sysctl = lib.mkIf cfg.kernel.movable {
+        "vm.dirty_bytes" = lib.mkDefault (256 * 1024 * 1024);
+        "vm.dirty_background_bytes" = lib.mkDefault (64 * 1024 * 1024);
+      };
+    };
 
     services.pazari-agent.settings = {
       runtime = {

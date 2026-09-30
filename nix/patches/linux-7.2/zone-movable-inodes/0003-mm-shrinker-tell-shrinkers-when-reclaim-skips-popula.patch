@@ -1,0 +1,211 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nikolaos Karaolidis <nick@karaolidis.com>
+Date: Tue, 29 Sep 2026 22:11:15 +0100
+Subject: [PATCH] mm: shrinker: tell shrinkers when reclaim skips populated
+ zones
+
+Reclaim for a GFP_KERNEL allocation does not scan the page cache in
+ZONE_MOVABLE, so kernel objects kept alive by that cache, like inodes,
+cannot become freeable through it. Shrinkers cannot tell from the
+gfp_mask: kswapd passes GFP_KERNEL whichever zones it balances, and
+memcg limit reclaim passes GFP_KERNEL although it scans every zone.
+
+Add shrink_control::zone_limited, set when a zone above
+sc->reclaim_idx has managed pages on any node. All nodes count because
+page cache can live on another node than its inodes, e.g. hot-plugged
+memory on a node of its own. It is computed where reclaim_idx is final:
+in shrink_zones(), balance_pgdat() and __node_reclaim(). drop_caches
+passes false.
+
+No functional change; the inode shrinker uses it later in this series.
+---
+ include/linux/shrinker.h |  3 +++
+ mm/internal.h            |  2 +-
+ mm/shrinker.c            | 14 ++++++++++----
+ mm/vmscan.c              | 30 +++++++++++++++++++++++++++---
+ 4 files changed, 41 insertions(+), 8 deletions(-)
+
+diff --git a/include/linux/shrinker.h b/include/linux/shrinker.h
+index 1a00be90d93a..2179e6b18005 100644
+--- a/include/linux/shrinker.h
++++ b/include/linux/shrinker.h
+@@ -53,6 +53,9 @@ struct shrink_control {
+ 
+ 	/* current memcg being shrunk (for memcg aware shrinkers) */
+ 	struct mem_cgroup *memcg;
++
++	/* reclaim skips populated zones, e.g. ZONE_MOVABLE for GFP_KERNEL */
++	bool zone_limited;
+ };
+ 
+ #define SHRINK_STOP (~0UL)
+diff --git a/mm/internal.h b/mm/internal.h
+index 5acba3470659..46bfae2aa6d8 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -1767,7 +1767,7 @@ void __meminit __init_page_from_nid(unsigned long pfn, int nid);
+ 
+ /* shrinker related functions */
+ unsigned long shrink_slab(gfp_t gfp_mask, int nid, struct mem_cgroup *memcg,
+-			  int priority);
++			  int priority, bool zone_limited);
+ 
+ int shmem_add_to_page_cache(struct folio *folio,
+ 			    struct address_space *mapping,
+diff --git a/mm/shrinker.c b/mm/shrinker.c
+index a70aab124a0e..2d51a1442c94 100644
+--- a/mm/shrinker.c
++++ b/mm/shrinker.c
+@@ -474,7 +474,8 @@ static unsigned long do_shrink_slab(struct shrink_control *shrinkctl,
+ 
+ #ifdef CONFIG_MEMCG
+ static unsigned long shrink_slab_memcg(gfp_t gfp_mask, int nid,
+-			struct mem_cgroup *memcg, int priority)
++			struct mem_cgroup *memcg, int priority,
++			bool zone_limited)
+ {
+ 	struct shrinker_info *info;
+ 	unsigned long ret, freed = 0;
+@@ -536,6 +537,7 @@ static unsigned long shrink_slab_memcg(gfp_t gfp_mask, int nid,
+ 				.gfp_mask = gfp_mask,
+ 				.nid = nid,
+ 				.memcg = memcg,
++				.zone_limited = zone_limited,
+ 			};
+ 			struct shrinker *shrinker;
+ 			int shrinker_id = calc_shrinker_id(index, offset);
+@@ -595,7 +597,8 @@ static unsigned long shrink_slab_memcg(gfp_t gfp_mask, int nid,
+ }
+ #else /* !CONFIG_MEMCG */
+ static unsigned long shrink_slab_memcg(gfp_t gfp_mask, int nid,
+-			struct mem_cgroup *memcg, int priority)
++			struct mem_cgroup *memcg, int priority,
++			bool zone_limited)
+ {
+ 	return 0;
+ }
+@@ -607,6 +610,7 @@ static unsigned long shrink_slab_memcg(gfp_t gfp_mask, int nid,
+  * @nid: node whose slab caches to target
+  * @memcg: memory cgroup whose slab caches to target
+  * @priority: the reclaim priority
++ * @zone_limited: the reclaim does not scan every populated zone
+  *
+  * Call the shrink functions to age shrinkable caches.
+  *
+@@ -622,7 +626,7 @@ static unsigned long shrink_slab_memcg(gfp_t gfp_mask, int nid,
+  * Returns the number of reclaimed slab objects.
+  */
+ unsigned long shrink_slab(gfp_t gfp_mask, int nid, struct mem_cgroup *memcg,
+-			  int priority)
++			  int priority, bool zone_limited)
+ {
+ 	unsigned long ret, freed = 0;
+ 	struct shrinker *shrinker;
+@@ -635,7 +639,8 @@ unsigned long shrink_slab(gfp_t gfp_mask, int nid, struct mem_cgroup *memcg,
+ 	 * oom.
+ 	 */
+ 	if (!mem_cgroup_disabled() && !mem_cgroup_is_root(memcg))
+-		return shrink_slab_memcg(gfp_mask, nid, memcg, priority);
++		return shrink_slab_memcg(gfp_mask, nid, memcg, priority,
++					 zone_limited);
+ 
+ 	/*
+ 	 * lockless algorithm of global shrink.
+@@ -664,6 +669,7 @@ unsigned long shrink_slab(gfp_t gfp_mask, int nid, struct mem_cgroup *memcg,
+ 			.gfp_mask = gfp_mask,
+ 			.nid = nid,
+ 			.memcg = memcg,
++			.zone_limited = zone_limited,
+ 		};
+ 
+ 		if (!shrinker_try_get(shrinker))
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 8781dbcdb99a..74433ce66799 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -149,6 +149,9 @@ struct scan_control {
+ 	/* Always discard instead of demoting to lower tier memory */
+ 	unsigned int no_demotion:1;
+ 
++	/* See reclaim_zone_limited() */
++	unsigned int zone_limited:1;
++
+ 	/* Allocation order */
+ 	s8 order;
+ 
+@@ -398,6 +401,23 @@ unsigned long lruvec_lru_size(struct lruvec *lruvec, enum lru_list lru, int zone
+ 	return size;
+ }
+ 
++/*
++ * Does the reclaim skip a zone that has memory on any node? Check them all:
++ * page cache can be on another node than the objects it keeps alive.
++ */
++static bool reclaim_zone_limited(const struct scan_control *sc)
++{
++	int nid, z;
++
++	for (z = sc->reclaim_idx + 1; z <= ZONE_MOVABLE; z++) {
++		for_each_node_state(nid, N_MEMORY) {
++			if (managed_zone(&NODE_DATA(nid)->node_zones[z]))
++				return true;
++		}
++	}
++	return false;
++}
++
+ static unsigned long drop_slab_node(int nid)
+ {
+ 	unsigned long freed = 0;
+@@ -405,7 +425,7 @@ static unsigned long drop_slab_node(int nid)
+ 
+ 	memcg = mem_cgroup_iter(NULL, NULL, NULL);
+ 	do {
+-		freed += shrink_slab(GFP_KERNEL, nid, memcg, 0);
++		freed += shrink_slab(GFP_KERNEL, nid, memcg, 0, false);
+ 	} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)) != NULL);
+ 
+ 	return freed;
+@@ -5014,7 +5034,8 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
+ 
+ 	need_rotate = try_to_shrink_lruvec(lruvec, sc);
+ 
+-	shrink_slab(sc->gfp_mask, pgdat->node_id, memcg, sc->priority);
++	shrink_slab(sc->gfp_mask, pgdat->node_id, memcg, sc->priority,
++		    sc->zone_limited);
+ 
+ 	if (!sc->proactive)
+ 		vmpressure(sc->gfp_mask, sc->order, memcg, false,
+@@ -6118,7 +6139,7 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
+ 		shrink_lruvec(lruvec, sc);
+ 
+ 		shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
+-			    sc->priority);
++			    sc->priority, sc->zone_limited);
+ 
+ 		/* Record the group's reclaim efficiency */
+ 		if (!sc->proactive)
+@@ -6339,6 +6360,7 @@ static void shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
+ 		sc->gfp_mask |= __GFP_HIGHMEM;
+ 		sc->reclaim_idx = gfp_zone(sc->gfp_mask);
+ 	}
++	sc->zone_limited = reclaim_zone_limited(sc);
+ 
+ 	for_each_zone_zonelist_nodemask(zone, z, zonelist,
+ 					sc->reclaim_idx, sc->nodemask) {
+@@ -7120,6 +7142,7 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
+ 				break;
+ 			}
+ 		}
++		sc.zone_limited = reclaim_zone_limited(&sc);
+ 
+ 		/*
+ 		 * If the pgdat is imbalanced then ignore boosting and preserve
+@@ -7749,6 +7772,7 @@ static unsigned long __node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask,
+ 	 */
+ 	noreclaim_flag = memalloc_noreclaim_save();
+ 	set_task_reclaim_state(p, &sc->reclaim_state);
++	sc->zone_limited = reclaim_zone_limited(sc);
+ 
+ 	if (node_pagecache_reclaimable(pgdat) > pgdat->min_unmapped_pages ||
+ 	    node_page_state_pages(pgdat, NR_SLAB_RECLAIMABLE_B) > pgdat->min_slab_pages) {

@@ -72,6 +72,25 @@ let
 
   borrowedUnit = borrowed.systemd.services.pazari-agent.serviceConfig;
 
+  patched =
+    kernelPackages:
+    evaluate nixosModules.guest {
+      boot = { inherit kernelPackages; };
+
+      services.pazari-agent = {
+        enable = true;
+        kernel.patches = true;
+      };
+    };
+
+  patchedLatest = patched pkgs.linuxPackages_latest;
+
+  failed =
+    machine:
+    map (assertion: assertion.message) (
+      lib.filter (assertion: !assertion.assertion) machine.assertions
+    );
+
   host = evaluate nixosModules.host {
     services.pazarid = {
       enable = true;
@@ -143,7 +162,16 @@ in
       ok = lib.all (parameter: lib.elem parameter guest.boot.kernelParams) [
         "transparent_hugepage=madvise"
         "psi=1"
+        "memhp_default_state=online_movable"
       ];
+    }
+    {
+      name = "the patches are found for the kernel in use";
+      ok = failed patchedLatest == [ ] && patchedLatest.boot.kernelPatches != [ ];
+    }
+    {
+      name = "a kernel without patches is refused";
+      ok = failed (patched pkgs.linuxPackages_6_18) != [ ];
     }
     {
       name = "every death path reopens the brake";

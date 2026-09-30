@@ -103,7 +103,7 @@ impl Guest {
         );
         Self::write(&paths.meminfo, MEMINFO);
         Self::write(&paths.block_size, BLOCK_SIZE);
-        Self::write(&paths.auto_online_blocks, "online\n");
+        Self::write(&paths.auto_online_blocks, "online_movable\n");
         Self::write(
             &paths.virtio_devices.join("virtio0").join("device"),
             "0x0018\n",

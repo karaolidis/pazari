@@ -278,12 +278,14 @@ The memory controller is enabled for the workload cgroup.
 .It Cm auto-onlining
 The kernel onlines hot-plugged memory automatically.
 Without this, plugged memory never becomes usable.
+Warns unless it is onlined movable, since otherwise it cannot reliably be
+unplugged.
 Write
-.Cm online
+.Cm online_movable
 to
 .Pa /sys/devices/system/memory/auto_online_blocks ,
 or boot with
-.Va memhp_default_state=online .
+.Va memhp_default_state=online_movable .
 .It Cm transparent hugepages
 Transparent hugepages are not set to
 .Cm always .

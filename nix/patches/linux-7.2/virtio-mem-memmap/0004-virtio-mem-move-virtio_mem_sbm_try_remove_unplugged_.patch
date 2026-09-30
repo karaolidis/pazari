@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nikolaos Karaolidis <nick@karaolidis.com>
+Date: Sat, 26 Sep 2026 17:39:49 +0100
+Subject: [PATCH 4/6] virtio-mem: move virtio_mem_sbm_try_remove_unplugged_mb()
+
+Move it below virtio_mem_sbm_unplug_mb(): the next patch makes it call
+virtio_mem_sbm_unplug_sb().
+
+No functional change.
+---
+ drivers/virtio/virtio_mem.c | 56 ++++++++++++++++++-------------------
+ 1 file changed, 28 insertions(+), 28 deletions(-)
+
+diff --git a/drivers/virtio/virtio_mem.c b/drivers/virtio/virtio_mem.c
+index 28f239a53996..cbd33e4bb5f4 100644
+--- a/drivers/virtio/virtio_mem.c
++++ b/drivers/virtio/virtio_mem.c
+@@ -791,34 +791,6 @@ static int virtio_mem_sbm_offline_and_remove_mb(struct virtio_mem *vm,
+ 	return virtio_mem_offline_and_remove_memory(vm, addr, size);
+ }
+ 
+-/*
+- * Try (offlining and) removing memory from Linux in case all subblocks are
+- * unplugged. Can be called on online and offline memory blocks.
+- *
+- * May modify the state of memory blocks in virtio-mem.
+- */
+-static int virtio_mem_sbm_try_remove_unplugged_mb(struct virtio_mem *vm,
+-						  unsigned long mb_id)
+-{
+-	int rc;
+-
+-	/*
+-	 * Once all subblocks of a memory block were unplugged, offline and
+-	 * remove it.
+-	 */
+-	if (!virtio_mem_sbm_test_sb_unplugged(vm, mb_id, 0, vm->sbm.sbs_per_mb))
+-		return 0;
+-
+-	/* offline_and_remove_memory() works for online and offline memory. */
+-	mutex_unlock(&vm->hotplug_mutex);
+-	rc = virtio_mem_sbm_offline_and_remove_mb(vm, mb_id);
+-	mutex_lock(&vm->hotplug_mutex);
+-	if (!rc)
+-		virtio_mem_sbm_set_mb_state(vm, mb_id,
+-					    VIRTIO_MEM_SBM_MB_UNUSED);
+-	return rc;
+-}
+-
+ /*
+  * See virtio_mem_offline_and_remove_memory(): Try to offline and remove a
+  * all Linux memory blocks covered by the big block.
+@@ -1648,6 +1620,34 @@ static int virtio_mem_sbm_unplug_mb(struct virtio_mem *vm, unsigned long mb_id)
+ 	return virtio_mem_sbm_unplug_any_sb_raw(vm, mb_id, &nb_sb);
+ }
+ 
++/*
++ * Try (offlining and) removing memory from Linux in case all subblocks are
++ * unplugged. Can be called on online and offline memory blocks.
++ *
++ * May modify the state of memory blocks in virtio-mem.
++ */
++static int virtio_mem_sbm_try_remove_unplugged_mb(struct virtio_mem *vm,
++						  unsigned long mb_id)
++{
++	int rc;
++
++	/*
++	 * Once all subblocks of a memory block were unplugged, offline and
++	 * remove it.
++	 */
++	if (!virtio_mem_sbm_test_sb_unplugged(vm, mb_id, 0, vm->sbm.sbs_per_mb))
++		return 0;
++
++	/* offline_and_remove_memory() works for online and offline memory. */
++	mutex_unlock(&vm->hotplug_mutex);
++	rc = virtio_mem_sbm_offline_and_remove_mb(vm, mb_id);
++	mutex_lock(&vm->hotplug_mutex);
++	if (!rc)
++		virtio_mem_sbm_set_mb_state(vm, mb_id,
++					    VIRTIO_MEM_SBM_MB_UNUSED);
++	return rc;
++}
++
+ /*
+  * Prepare tracking data for the next memory block.
+  */

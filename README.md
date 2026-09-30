@@ -93,8 +93,11 @@ to the daemon's group.
 }
 ```
 
-See `pazari(7)` for guest kernel requirements and for running containerised
-workloads.
+See `pazari(7)` for guest kernel requirements, sizing boot memory, and running
+containerised workloads. The guest module onlines plugged memory to
+`ZONE_MOVABLE` and caps the dirty limits. Setting
+`services.pazari-agent.kernel.patches` applies the kernel patches it describes,
+if `nix/patches` has them for the guest's kernel.
 
 ## Documentation
 

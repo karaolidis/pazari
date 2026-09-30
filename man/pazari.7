@@ -103,8 +103,19 @@ on the host.
 .Ss Guest kernel
 Boot the guest with:
 .Bd -literal -offset indent
-transparent_hugepage=madvise psi=1
+transparent_hugepage=madvise psi=1 memhp_default_state=online_movable
 .Ed
+.Pp
+The last parameter keeps kernel allocations out of plugged memory, which could
+otherwise never be fully unplugged.
+All kernel memory must then fit in boot memory, and it grows with plugged
+memory and with the number of cached files.
+Size boot memory for the most the guest can grow by, and cap
+.Va vm.dirty_bytes .
+.Pp
+The kernel patches under
+.Pa nix/patches
+in the source tree remove most of that cost.
 .Pp
 Do not give the guest a virtio-balloon device.
 Run

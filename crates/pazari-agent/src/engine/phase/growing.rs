@@ -6,9 +6,9 @@ use tracing::debug;
 
 use crate::engine::{
     counters::Pressure,
+    grow::Grow,
     limits::Brake,
     phase::{Phase, State, Step, exhausted::Exhausted, steady::Steady},
-    scale::GrowScale,
     world::RequestId,
 };
 
@@ -22,27 +22,28 @@ enum Stage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Growing {
-    scale: GrowScale,
     exhausted_since: Option<Timestamp>,
     stage: Stage,
 }
 
 impl Growing {
-    pub fn start(
-        step: &mut Step<'_>,
-        scale: GrowScale,
-        exhausted_since: Option<Timestamp>,
-    ) -> Phase {
+    pub fn braked(step: &mut Step<'_>) -> Phase {
+        step.world.grow.braked(step.now);
+
+        Self::start(step, None)
+    }
+
+    pub fn start(step: &mut Step<'_>, exhausted_since: Option<Timestamp>) -> Phase {
         step.brake(Brake::Engaged);
 
         if !step.world.connected() {
             debug!("cannot request memory: no host session");
 
-            return Self::at(scale, exhausted_since, Stage::Blocked);
+            return Self::at(exhausted_since, Stage::Blocked);
         }
 
-        let Some(target) = step.world.grow_target(scale) else {
-            return Exhausted::enter(step, scale, exhausted_since);
+        let Some(target) = step.world.grow_target() else {
+            return Exhausted::enter(step, exhausted_since);
         };
 
         let id = step.world.take_id();
@@ -52,7 +53,7 @@ impl Growing {
             id = id.get(),
             current,
             target,
-            steps = scale.factor(),
+            grow = ?step.world.grow,
             usage = step.guest().usage(),
             ceiling = ?step.limits().ceiling(),
             "requesting more memory from the host",
@@ -64,12 +65,11 @@ impl Growing {
             target,
         });
 
-        Self::at(scale, exhausted_since, Stage::Requesting { id, target })
+        Self::at(exhausted_since, Stage::Requesting { id, target })
     }
 
-    const fn at(scale: GrowScale, exhausted_since: Option<Timestamp>, stage: Stage) -> Phase {
+    const fn at(exhausted_since: Option<Timestamp>, stage: Stage) -> Phase {
         Phase::Growing(Self {
-            scale,
             exhausted_since,
             stage,
         })
@@ -89,7 +89,7 @@ impl Growing {
     const fn blocked(self) -> Phase {
         match self.stage {
             Stage::Requesting { .. } | Stage::Backoff { .. } => {
-                Self::at(self.scale, self.exhausted_since, Stage::Blocked)
+                Self::at(self.exhausted_since, Stage::Blocked)
             }
             _ => Phase::Growing(self),
         }
@@ -112,18 +112,16 @@ impl State for Growing {
     fn resume(self, step: &mut Step<'_>) -> Phase {
         match self.stage {
             Stage::Settling { .. } => self.stay(),
-            _ => Self::start(step, self.scale, self.exhausted_since),
+            _ => Self::start(step, self.exhausted_since),
         }
     }
 
     fn advance(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
         match self.stage {
             Stage::Backoff { retry_at } if retry_at.reached(step.now) => {
-                Self::start(step, self.scale, self.exhausted_since)
+                Self::start(step, self.exhausted_since)
             }
-            Stage::Settling { expires, .. } if expires.reached(step.now) => {
-                Steady::settled(step, self.scale)
-            }
+            Stage::Settling { expires, .. } if expires.reached(step.now) => Steady::settled(step),
             _ => self.stay(),
         }
     }
@@ -131,7 +129,7 @@ impl State for Growing {
     fn on_total_changed(self, step: &mut Step<'_>, changed: bool) -> Phase {
         match self.stage {
             Stage::Settling { target, .. } if step.limits().total_mem() >= target => {
-                Steady::settled(step, self.scale)
+                Steady::settled(step)
             }
             _ => {
                 if changed {
@@ -149,11 +147,7 @@ impl State for Growing {
         }
 
         let expires = Deadline::after(step.now, step.config().settle_grace.get());
-        let settling = Self::at(
-            self.scale,
-            self.exhausted_since,
-            Stage::Settling { target, expires },
-        );
+        let settling = Self::at(self.exhausted_since, Stage::Settling { target, expires });
 
         settling.on_total_changed(step, false)
     }
@@ -169,8 +163,8 @@ impl State for Growing {
             return self.stay();
         }
 
-        if reason == DenyReason::Ceiling || step.world.grow_target(self.scale).is_none() {
-            return Exhausted::enter(step, self.scale, self.exhausted_since);
+        if reason == DenyReason::Ceiling || step.world.grow_target().is_none() {
+            return Exhausted::enter(step, self.exhausted_since);
         }
 
         let backoff = retry_after.unwrap_or_else(|| step.config().deny_backoff.get());
@@ -183,7 +177,6 @@ impl State for Growing {
         );
 
         Self::at(
-            self.scale,
             self.exhausted_since,
             Stage::Backoff {
                 retry_at: Deadline::after(step.now, backoff),
@@ -192,11 +185,7 @@ impl State for Growing {
     }
 
     fn on_connected(self, _step: &mut Step<'_>) -> Phase {
-        Self {
-            scale: GrowScale::ONE,
-            ..self
-        }
-        .blocked()
+        self.blocked()
     }
 
     fn on_disconnected(self, _step: &mut Step<'_>) -> Phase {

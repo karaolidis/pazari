@@ -17,7 +17,6 @@ impl GuestId {
     }
 }
 
-/// One guest as the operator declared it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestSpec {
     pub name: String,

@@ -30,15 +30,11 @@ const SIZE: &str = "size";
 const REQUESTED_SIZE: &str = "requested-size";
 const VIRTIO_MEM: &str = "virtio-mem";
 
-/// How the adapter uses the QMP socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Held,
 
-    PerOperation {
-        /// How often [`Actuator::changed`] resamples the size.
-        poll: Interval,
-    },
+    PerOperation { poll: Interval },
 }
 
 /// One guest's virtio-mem device over QMP.

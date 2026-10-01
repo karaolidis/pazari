@@ -10,9 +10,9 @@ use crate::engine::{
     counters::Pressure,
     effects::Effects,
     event::{BootInfo, Snapshot},
+    grow::{Grow, GrowStrategy},
     limits::{Brake, Limits},
-    scale::GrowScale,
-    streak::Streak,
+    release::{Release, ReleaseStrategy},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -121,16 +121,18 @@ pub struct World {
     limits: Limits,
     guest: Guest,
     link: Link,
-    spare: Streak,
+    pub grow: GrowStrategy,
+    pub release: ReleaseStrategy,
 }
 
 impl World {
-    pub const fn new(config: EngineConfig, boot: BootInfo) -> Self {
+    pub fn new(config: EngineConfig, boot: BootInfo) -> Self {
         Self {
             limits: Limits::new(&config, boot.total_mem),
             guest: Guest::new(boot),
             link: Link::closed(),
-            spare: Streak::BROKEN,
+            grow: GrowStrategy::from(config.grow),
+            release: ReleaseStrategy::from(config.release),
             config,
         }
     }
@@ -193,6 +195,7 @@ impl World {
 
     pub fn connect(&mut self, status_interval: Duration, hotplugged: u64) {
         self.link.open(status_interval);
+        self.grow.reset();
         self.set_hotplugged(hotplugged);
     }
 
@@ -219,24 +222,8 @@ impl World {
         self.link.status_due(now)
     }
 
-    pub const fn spare(&self) -> Streak {
-        self.spare
-    }
-
     pub fn note_spare(&mut self, pressure: Pressure) {
-        self.spare = self.spare.then(self.sparing(pressure));
-    }
-
-    pub const fn forget_spare(&mut self) {
-        self.spare = Streak::BROKEN;
-    }
-
-    fn sparing(&self, pressure: Pressure) -> bool {
-        !pressure.throttled
-            && !pressure.breached
-            && self
-                .slack()
-                .is_some_and(|slack| slack >= self.config.shrink_step.get())
+        self.release.observe(self.slack(), pressure);
     }
 
     pub fn slack(&self) -> Option<u64> {
@@ -247,7 +234,7 @@ impl World {
         )
     }
 
-    pub fn grow_target(&self, scale: GrowScale) -> Option<u64> {
+    pub fn grow_target(&self) -> Option<u64> {
         let total_mem = self.limits.total_mem();
 
         let need = self
@@ -257,7 +244,7 @@ impl World {
             .saturating_add(self.limits.burst_reserve());
 
         let deficit = need.saturating_sub(total_mem);
-        let step = deficit.max(scale.of(self.config.grow_step));
+        let step = deficit.max(self.grow.step().get());
 
         let mut target = self.guest.round_up(total_mem.saturating_add(step));
 
@@ -299,7 +286,7 @@ mod tests {
 
     use super::*;
     use crate::engine::testing::{
-        BLOCK, BOOT, BURST, CALM, MIB, SERVICE, boot, config, snap, snap_available,
+        BLOCK, BOOT, BURST, CALM, MIB, SERVICE, at, boot, config, snap, snap_available,
     };
 
     fn world() -> World {
@@ -321,18 +308,30 @@ mod tests {
         let mut world = world();
         world.observe(snap(BOOT, CALM, 0));
 
-        assert_eq!(world.grow_target(GrowScale::ONE), Some(2560 * MIB));
+        assert_eq!(world.grow_target(), Some(2560 * MIB));
     }
 
     #[test]
-    fn a_grow_target_multiplies_the_step_by_the_scale() {
+    fn a_grow_target_reaches_as_far_as_the_strategy_steps() {
         let mut world = world();
         world.observe(snap(BOOT, CALM, 0));
 
-        assert_eq!(
-            world.grow_target(GrowScale::ONE.doubled()),
-            Some(3072 * MIB)
-        );
+        world.grow.settled(at(100));
+        world.grow.braked(at(101));
+
+        assert_eq!(world.grow_target(), Some(3072 * MIB));
+    }
+
+    #[test]
+    fn a_reconnect_forgets_how_far_earlier_grows_reached() {
+        let mut world = world();
+        world.observe(snap(BOOT, CALM, 0));
+
+        world.grow.settled(at(100));
+        world.grow.braked(at(101));
+        world.connect(Duration::ZERO, 0);
+
+        assert_eq!(world.grow_target(), Some(2560 * MIB));
     }
 
     #[test]
@@ -342,7 +341,7 @@ mod tests {
 
         // 2200 + 256 + 256 wanted, 2048 total_mem: a 664 MiB deficit, rounded up
         // to the next 128 MiB block.
-        assert_eq!(world.grow_target(GrowScale::ONE), Some(2816 * MIB));
+        assert_eq!(world.grow_target(), Some(2816 * MIB));
     }
 
     #[test]
@@ -351,7 +350,7 @@ mod tests {
         world.observe(snap(BOOT, CALM, 0));
         world.raise_ceiling(2200 * MIB);
 
-        assert_eq!(world.grow_target(GrowScale::ONE), Some(2176 * MIB));
+        assert_eq!(world.grow_target(), Some(2176 * MIB));
     }
 
     #[test]
@@ -360,7 +359,7 @@ mod tests {
         world.observe(snap(BOOT, CALM, 0));
         world.raise_ceiling(BOOT);
 
-        assert_eq!(world.grow_target(GrowScale::ONE), None);
+        assert_eq!(world.grow_target(), None);
     }
 
     #[test]

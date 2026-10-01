@@ -45,10 +45,16 @@
 
             services.pazari-agent.harness = {
               engine = {
-                grow_step = "128MiB";
+                grow = {
+                  kind = "exponential";
+                  step = "128MiB";
+                };
                 settle_grace = "3s";
                 deny_backoff = "1s";
-                shrink_cooldown = "2s";
+                release = {
+                  kind = "titrate";
+                  cooldown = "2s";
+                };
               };
 
               workload.phases = [

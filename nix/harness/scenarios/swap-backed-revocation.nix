@@ -21,7 +21,10 @@
     module = { ... }: {
       services.pazari-agent.harness = {
         # The idle guest must not volunteer the memory before the host asks.
-        engine.shrink_cooldown = "600s";
+        engine.release = {
+          kind = "titrate";
+          cooldown = "600s";
+        };
 
         workload.phases = [
           "grow=1200MiB,rate=256MiB/s"

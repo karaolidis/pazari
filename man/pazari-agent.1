@@ -87,17 +87,11 @@ The agent is reclaiming memory from the workload cgroup to return to the host.
 The guest has reached its ceiling.
 .El
 .Ss Growing
-A grant request asks for the larger of
-.Cm grow_step
-and the workload's current shortfall.
+A grant request asks for the larger of the step the
+.Cm engine.grow
+strategy names and the workload's current shortfall.
 The target is rounded up to the guest's memory block size and capped at the
 ceiling the host has set.
-.Pp
-If the workload is throttled again within
-.Cm escalate_within
-of the previous grow completing, the step doubles, up to 64 times
-.Cm grow_step .
-A throttle after a longer interval resets it to one step.
 .Pp
 After a grant, the agent waits for
 .Va MemTotal
@@ -114,18 +108,9 @@ if it names none.
 Such retries continue for as long as the guest is below its ceiling, and the
 workload stays throttled while they do.
 .Ss Releasing
-When
-.Va MemAvailable
-exceeds both reserves by at least
-.Cm shrink_step
-for
-.Cm release_intervals
-consecutive ticks, the agent reclaims
-.Cm shrink_step
-from the workload cgroup and offers it to the host.
-It waits
-.Cm shrink_cooldown
-before starting another release.
+The
+.Cm engine.release
+strategy decides when to release and how much.
 The agent never releases memory the guest booted with.
 .Ss Host reclaim requests
 The host may ask the guest to return memory.
@@ -183,11 +168,9 @@ the host raises the ceiling;
 .Va MemTotal
 rises for any reason;
 .It
-the guest has
-.Cm shrink_step
-to spare for
-.Cm release_intervals
-ticks;
+the
+.Cm engine.release
+strategy finds the guest has had memory to spare for long enough;
 .It
 the connection to the host is re-established; or
 .It
@@ -242,7 +225,6 @@ and exit.
 Intended for
 .Va ExecStopPost ,
 which runs after every exit of the agent, including when it is killed.
-Safe to run at any time.
 .It Cm preflight
 Run the startup checks, print the results, and exit.
 See
@@ -304,8 +286,6 @@ The guest has swap and the workload cgroup may use it.
 Only ever a warning, and skipped when
 .Cm engine.reclaim_swappiness
 is 0.
-Without swap, anonymous memory cannot be reclaimed, and the brake is the only
-protection against the OOM killer.
 .El
 .Pp
 At startup, but not under

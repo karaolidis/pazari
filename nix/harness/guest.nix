@@ -46,20 +46,26 @@ let
     service_reserve = "640MiB";
     burst_reserve = "256MiB";
 
-    grow_step = "512MiB";
     deny_backoff = "2s";
     settle_grace = "5s";
-
-    release_intervals = 3;
-
-    shrink_step = "256MiB";
-    shrink_cooldown = "5s";
 
     reclaim_swappiness = 0;
 
     exhaustion = {
       kind = "stall";
       timeout = "300s";
+    };
+
+    grow = {
+      kind = "exponential";
+      step = "512MiB";
+    };
+
+    release = {
+      kind = "titrate";
+      step = "256MiB";
+      intervals = 3;
+      cooldown = "5s";
     };
   };
 in

@@ -23,12 +23,21 @@ use serde_inline_default::serde_inline_default;
 
 use crate::{
     config::Config,
-    engine::{EngineConfig, ExhaustionMode},
+    engine::{
+        EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, TitrateConfig,
+    },
     runtime::{Backend, RuntimeConfig},
     session::SessionConfig,
 };
 
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+const GROW_STEP: ByteSize = ByteSize::mib(512);
+const ESCALATE_WITHIN: Duration = Duration::from_secs(10);
+
+const RELEASE_STEP: ByteSize = ByteSize::mib(256);
+const RELEASE_INTERVALS: u32 = 3;
+const RELEASE_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// pazari-agent configuration.
 #[serde_inline_default]
@@ -87,11 +96,6 @@ pub struct EngineSection {
     #[doku(as = "String", example = "256MiB")]
     burst_reserve: ByteSize,
 
-    /// How much more memory a grant asks for.
-    #[serde_inline_default(ByteSize::mib(512))]
-    #[doku(as = "String", example = "512MiB")]
-    grow_step: ByteSize,
-
     /// How long to wait before re-asking a host that denied a request.
     #[serde_inline_default(Duration::from_secs(5))]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
@@ -104,28 +108,6 @@ pub struct EngineSection {
     #[doku(as = "String", example = "10s")]
     settle_grace: Duration,
 
-    /// How soon after a grow a brake still doubles the next request.
-    #[serde_inline_default(Duration::from_secs(10))]
-    #[serde(deserialize_with = "humantime_serde::deserialize")]
-    #[doku(as = "String", example = "10s")]
-    escalate_within: Duration,
-
-    /// Intervals of a spare `shrink_step` over the reserves before a release.
-    #[serde_inline_default(3)]
-    #[doku(example = "3")]
-    release_intervals: u32,
-
-    /// How much an offer to release gives back at a time.
-    #[serde_inline_default(ByteSize::mib(256))]
-    #[doku(as = "String", example = "256MiB")]
-    shrink_step: ByteSize,
-
-    /// How long after a release before another one is allowed.
-    #[serde_inline_default(Duration::from_secs(30))]
-    #[serde(deserialize_with = "humantime_serde::deserialize")]
-    #[doku(as = "String", example = "30s")]
-    shrink_cooldown: Duration,
-
     /// The `swappiness=` argument for `memory.reclaim`. Leave the key out to
     /// reclaim at the guest's own `vm.swappiness`.
     #[serde_inline_default(None)]
@@ -137,6 +119,23 @@ pub struct EngineSection {
     #[serde_inline_default(ExhaustionSection::Stall { timeout: STALL_TIMEOUT })]
     #[doku(example = "kind = \"stall\"")]
     exhaustion: ExhaustionSection,
+
+    /// How much more memory each request asks the host for.
+    #[serde_inline_default(GrowSection::Exponential {
+        step: GROW_STEP,
+        escalate_within: ESCALATE_WITHIN,
+    })]
+    #[doku(example = "kind = \"exponential\"")]
+    grow: GrowSection,
+
+    /// When the guest gives memory back to the host, and how much.
+    #[serde_inline_default(ReleaseSection::Titrate {
+        step: RELEASE_STEP,
+        intervals: RELEASE_INTERVALS,
+        cooldown: RELEASE_COOLDOWN,
+    })]
+    #[doku(example = "kind = \"titrate\"")]
+    release: ReleaseSection,
 }
 
 impl EngineSection {
@@ -146,17 +145,10 @@ impl EngineSection {
             burst_reserve: NonZeroU64::new(self.burst_reserve.as_u64())
                 .bytes("engine.burst_reserve")?,
 
-            grow_step: NonZeroU64::new(self.grow_step.as_u64()).bytes("engine.grow_step")?,
+            grow: self.grow.resolve()?,
             deny_backoff: Interval::try_new(self.deny_backoff).at("engine.deny_backoff")?,
             settle_grace: Interval::try_new(self.settle_grace).at("engine.settle_grace")?,
-            escalate_within: Interval::try_new(self.escalate_within)
-                .at("engine.escalate_within")?,
-
-            release_intervals: NonZeroU32::new(self.release_intervals)
-                .positive("engine.release_intervals", "count of intervals")?,
-
-            shrink_step: NonZeroU64::new(self.shrink_step.as_u64()).bytes("engine.shrink_step")?,
-            shrink_cooldown: Delay::try_new(self.shrink_cooldown).at("engine.shrink_cooldown")?,
+            release: self.release.resolve()?,
 
             reclaim_swappiness: self
                 .reclaim_swappiness
@@ -197,6 +189,85 @@ impl ExhaustionSection {
                 timeout: Interval::try_new(timeout).at("engine.exhaustion.timeout")?,
             }),
             Self::Kill {} => Ok(ExhaustionMode::Kill),
+        }
+    }
+}
+
+/// How much more memory each request asks the host for.
+#[serde_inline_default]
+#[derive(Debug, Deserialize, Document)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GrowSection {
+    /// One step at first, doubled for each brake that follows soon after the
+    /// last grow.
+    Exponential {
+        /// The first request, and the unit later ones are multiples of.
+        #[serde_inline_default(GROW_STEP)]
+        #[doku(as = "String", example = "512MiB")]
+        step: ByteSize,
+
+        /// How soon after a grow a brake still doubles the next request.
+        #[serde_inline_default(ESCALATE_WITHIN)]
+        #[serde(deserialize_with = "humantime_serde::deserialize")]
+        #[doku(as = "String", example = "10s")]
+        escalate_within: Duration,
+    },
+}
+
+impl GrowSection {
+    fn resolve(self) -> Result<GrowConfig, ConfigError> {
+        match self {
+            Self::Exponential {
+                step,
+                escalate_within,
+            } => Ok(GrowConfig::Exponential(ExponentialConfig {
+                step: NonZeroU64::new(step.as_u64()).bytes("engine.grow.step")?,
+                escalate_within: Interval::try_new(escalate_within)
+                    .at("engine.grow.escalate_within")?,
+            })),
+        }
+    }
+}
+
+/// When the guest gives memory back to the host, and how much.
+#[serde_inline_default]
+#[derive(Debug, Deserialize, Document)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReleaseSection {
+    /// One fixed step at a time, once the guest has held it spare for a run of
+    /// calm intervals and the last resize has cooled off.
+    Titrate {
+        /// How much one release gives back.
+        #[serde_inline_default(RELEASE_STEP)]
+        #[doku(as = "String", example = "256MiB")]
+        step: ByteSize,
+
+        /// Intervals of a spare `step` over the reserves before a release.
+        #[serde_inline_default(RELEASE_INTERVALS)]
+        #[doku(example = "3")]
+        intervals: u32,
+
+        /// How long after a resize before a release is allowed.
+        #[serde_inline_default(RELEASE_COOLDOWN)]
+        #[serde(deserialize_with = "humantime_serde::deserialize")]
+        #[doku(as = "String", example = "30s")]
+        cooldown: Duration,
+    },
+}
+
+impl ReleaseSection {
+    fn resolve(self) -> Result<ReleaseConfig, ConfigError> {
+        match self {
+            Self::Titrate {
+                step,
+                intervals,
+                cooldown,
+            } => Ok(ReleaseConfig::Titrate(TitrateConfig {
+                step: NonZeroU64::new(step.as_u64()).bytes("engine.release.step")?,
+                intervals: NonZeroU32::new(intervals)
+                    .positive("engine.release.intervals", "count of intervals")?,
+                cooldown: Delay::try_new(cooldown).at("engine.release.cooldown")?,
+            })),
         }
     }
 }

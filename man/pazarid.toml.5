@@ -24,7 +24,6 @@ How often the daemon re-reads host memory, checks on pending resizes and quiet
 guests, and updates its metrics.
 Default
 .Cm 1s .
-Grant requests are answered as they arrive, not on the tick.
 .El
 .Ss [policy]
 .Bl -tag -width Ds
@@ -35,41 +34,21 @@ Required; may be 0.
 .It Cm grant_swap No = Ar boolean
 Whether free swap counts as available memory.
 Default
-.Cm false ,
-so that every grant is backed by RAM.
-.Pp
-With
-.Cm true ,
-guests may be granted memory the host has to page for.
-Pair it with
-.Cm [policy.revocation]
-so the host can ask for it back.
-Avoid it with zram swap:
-.Va SwapFree
-reports uncompressed capacity, and the pages memory-hungry workloads produce
-often do not compress.
+.Cm false .
 .It Cm grant_min_interval No = Ar duration
 Minimum time between grants to one guest.
-Earlier requests are refused with
-.Cm rate_limited .
 Also the retry delay given with
 .Cm host_pressure
 refusals.
-Does not apply to releases.
 Default
 .Cm 5s .
 .It Cm reconcile_deadline No = Ar duration
 How long a resize may take before the daemon stops waiting for it.
-A grow that has not finished is accepted at the size the device reached; a
-shrink that has not finished is logged.
-Set this above the time the largest possible resize takes on this host.
 Default
 .Cm 30s .
 .It Cm shrink_revert No = Ar boolean
 Whether a shrink that did not finish is reverted to the size the guest actually
 holds.
-Without this, the device keeps requesting a size the guest never reached, and
-the daemon undercounts what the guest holds.
 Default
 .Cm true .
 .It Cm welcome_status_interval No = Ar duration
@@ -78,14 +57,10 @@ Default
 .Cm 1s .
 .It Cm stale_after No = Ar count
 How many status intervals a guest may miss before it is marked stale.
-A stale guest keeps its connection and its memory; the mark only shows in
-.Va pazarid_guest_stale .
 Default
 .Cm 3 .
 .It Cm reclaim_deadline No = Ar duration
 How long a guest has to answer a reclaim request.
-The guest is not asked again until it answers or the deadline passes, and a
-guest that refuses is not asked again until the deadline would have passed.
 Default
 .Cm 30s .
 .El
@@ -112,9 +87,6 @@ the daemon asks the guest holding the most memory above its boot size for
 .Cm step ,
 or for that excess if it is smaller.
 One guest is asked per tick.
-Agents only agree when they have memory to spare and nothing else in progress;
-see
-.Xr pazari-agent 1 .
 .Ss [metrics]
 Optional.
 Without it, the daemon serves no metrics.
@@ -123,9 +95,6 @@ Without it, the daemon serves no metrics.
 Address to serve OpenMetrics on, for example
 .Ql 127.0.0.1:9650 .
 Required.
-Any
-.Cm GET
-request is answered with the metrics; other methods get 405.
 .El
 .Ss [guests.<name>]
 One table per guest.
@@ -138,10 +107,6 @@ At least one guest is required.
 .It Cm ceiling No = Ar size
 The most memory the guest may have, counting boot memory and plugged memory.
 Required.
-.Pp
-To lower a ceiling, edit it and restart the daemon.
-The guest is told the new ceiling and asked to return the difference, but keeps
-it if it refuses.
 .El
 .Ss [guests.<name>.transport]
 How the guest connects.
@@ -193,11 +158,6 @@ Must be at least
 Default
 .Cm 30s .
 .El
-.Pp
-A resize the hypervisor refuses is counted in
-.Va pazarid_device_refused_actuations_total
-and does not trigger a reconnect.
-The daemon does not negotiate with a guest until its device has answered.
 .Ss [guests.<name>.qmp.mode]
 Optional; defaults to
 .Cm held .
@@ -210,7 +170,6 @@ Resizes are polled for.
 .Bl -tag -width Ds
 .It Cm poll No = Ar duration
 Polling interval during a resize.
-Adds up to this much to every grow.
 Default
 .Cm 1s .
 .El
@@ -288,7 +247,6 @@ Per guest: reconnections to the memory device.
 Per guest: failures to read the device's size on connecting.
 .It Va device_refused_actuations_total
 Per guest: resizes the hypervisor refused.
-Usually means a device block size larger than the guest's memory block size.
 .El
 .Sh FILES
 .Bl -tag -width Ds

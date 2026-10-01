@@ -42,7 +42,10 @@ mod tests {
     use pazari_types::{Delay, Interval, Swappiness};
 
     use super::*;
-    use crate::{engine::ExhaustionMode, runtime::Backend};
+    use crate::{
+        engine::{ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, TitrateConfig},
+        runtime::Backend,
+    };
 
     const MIB: u64 = 1 << 20;
 
@@ -56,17 +59,23 @@ mod tests {
         [engine]
         service_reserve = "0B"
         burst_reserve = "192MiB"
-        grow_step = "1GiB"
         deny_backoff = "2s 500ms"
         settle_grace = "15s"
-        escalate_within = "20s"
-        release_intervals = 5
-        shrink_step = "128MiB"
-        shrink_cooldown = "0s"
         reclaim_swappiness = 0
 
         [engine.exhaustion]
         kind = "kill"
+
+        [engine.grow]
+        kind = "exponential"
+        step = "1GiB"
+        escalate_within = "20s"
+
+        [engine.release]
+        kind = "titrate"
+        step = "128MiB"
+        intervals = 5
+        cooldown = "0s"
 
         [runtime]
         cgroup = "/sys/fs/cgroup/system.slice/workload.service"
@@ -191,13 +200,17 @@ mod tests {
             EngineConfig {
                 service_reserve: 0,
                 burst_reserve: bytes(192 * MIB),
-                grow_step: bytes(1024 * MIB),
+                grow: GrowConfig::Exponential(ExponentialConfig {
+                    step: bytes(1024 * MIB),
+                    escalate_within: interval(Duration::from_secs(20)),
+                }),
                 deny_backoff: interval(Duration::from_millis(2_500)),
                 settle_grace: interval(Duration::from_secs(15)),
-                escalate_within: interval(Duration::from_secs(20)),
-                release_intervals: count(5),
-                shrink_step: bytes(128 * MIB),
-                shrink_cooldown: Delay::ZERO,
+                release: ReleaseConfig::Titrate(TitrateConfig {
+                    step: bytes(128 * MIB),
+                    intervals: count(5),
+                    cooldown: Delay::ZERO,
+                }),
                 reclaim_swappiness: Some(Swappiness::NONE),
                 exhaustion: ExhaustionMode::Kill,
                 tick_interval: interval(Duration::from_millis(500)),
@@ -244,13 +257,17 @@ mod tests {
             EngineConfig {
                 service_reserve: 256 * MIB,
                 burst_reserve: bytes(256 * MIB),
-                grow_step: bytes(512 * MIB),
+                grow: GrowConfig::Exponential(ExponentialConfig {
+                    step: bytes(512 * MIB),
+                    escalate_within: interval(Duration::from_secs(10)),
+                }),
                 deny_backoff: interval(Duration::from_secs(5)),
                 settle_grace: interval(Duration::from_secs(10)),
-                escalate_within: interval(Duration::from_secs(10)),
-                release_intervals: count(3),
-                shrink_step: bytes(256 * MIB),
-                shrink_cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
+                release: ReleaseConfig::Titrate(TitrateConfig {
+                    step: bytes(256 * MIB),
+                    intervals: count(3),
+                    cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
+                }),
                 reclaim_swappiness: None,
                 exhaustion: ExhaustionMode::Stall {
                     timeout: interval(Duration::from_secs(60)),
@@ -412,6 +429,85 @@ mod tests {
         ));
 
         assert!(error.contains("timeout"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_strategy_table_that_names_only_its_kind_takes_its_defaults() {
+        let config = parse(&MINIMAL.replace(
+            "[runtime]",
+            "[engine.grow]\nkind = \"exponential\"\n\n\
+             [engine.release]\nkind = \"titrate\"\n\n[runtime]",
+        ));
+
+        assert_eq!(config.engine, parse(MINIMAL).engine);
+    }
+
+    #[test]
+    fn a_strategy_table_keeps_the_defaults_it_does_not_override() {
+        let config = parse(&MINIMAL.replace(
+            "[runtime]",
+            "[engine.release]\nkind = \"titrate\"\nstep = \"64MiB\"\n\n[runtime]",
+        ));
+
+        assert_eq!(
+            config.engine.release,
+            ReleaseConfig::Titrate(TitrateConfig {
+                step: bytes(64 * MIB),
+                intervals: count(3),
+                cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
+            })
+        );
+    }
+
+    #[test]
+    fn a_strategy_table_without_a_kind_is_refused() {
+        let error =
+            rejects(&MINIMAL.replace("[runtime]", "[engine.grow]\nstep = \"1GiB\"\n\n[runtime]"));
+
+        assert!(error.contains("kind"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn an_unknown_strategy_names_the_ones_there_are() {
+        let error = rejects(&MINIMAL.replace(
+            "[runtime]",
+            "[engine.release]\nkind = \"all_at_once\"\n\n[runtime]",
+        ));
+
+        assert!(error.contains("titrate"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_key_from_another_strategy_is_refused() {
+        let error = rejects(&MINIMAL.replace(
+            "[runtime]",
+            "[engine.grow]\nkind = \"exponential\"\nintervals = 3\n\n[runtime]",
+        ));
+
+        assert!(error.contains("intervals"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_flat_key_from_before_the_strategy_tables_is_refused() {
+        let error = rejects(&MINIMAL.replace(
+            r#"burst_reserve = "256MiB""#,
+            "burst_reserve = \"256MiB\"\nshrink_step = \"256MiB\"",
+        ));
+
+        assert!(error.contains("shrink_step"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_zero_strategy_step_names_the_table_that_carries_it() {
+        let error = rejects(&MINIMAL.replace(
+            "[runtime]",
+            "[engine.release]\nkind = \"titrate\"\nstep = \"0B\"\n\n[runtime]",
+        ));
+
+        assert_eq!(
+            error,
+            "engine.release.step rejects 0: expected a positive byte count"
+        );
     }
 
     #[test]

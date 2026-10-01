@@ -8,7 +8,6 @@ use crate::engine::{
     action::Action,
     counters::Pressure,
     phase::{Phase, State, Step, growing::Growing, steady::Steady},
-    scale::Escalation,
     world::RequestId,
 };
 
@@ -48,17 +47,11 @@ enum Stage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Releasing {
-    escalation: Escalation,
     stage: Stage,
 }
 
 impl Releasing {
-    pub fn begin(
-        step: &mut Step<'_>,
-        bytes: u64,
-        owed: Option<Owed>,
-        escalation: Escalation,
-    ) -> Phase {
+    pub fn begin(step: &mut Step<'_>, bytes: u64, owed: Option<Owed>) -> Phase {
         let swappiness = step.config().reclaim_swappiness;
 
         debug!(bytes, ?swappiness, "reclaiming from the workload cgroup");
@@ -66,7 +59,6 @@ impl Releasing {
         step.emit(Action::StartReclaim { bytes, swappiness });
 
         Phase::Releasing(Self {
-            escalation,
             stage: Stage::Reclaiming { bytes, owed },
         })
     }
@@ -98,12 +90,11 @@ impl Releasing {
     fn finish(self, step: &mut Step<'_>, outcome: Outcome) -> Phase {
         self.answer(step, outcome);
 
-        Steady::released(step, self.escalation)
+        Steady::released(step)
     }
 
-    const fn settling(self, target: u64, expires: Deadline) -> Self {
+    const fn settling(target: u64, expires: Deadline) -> Self {
         Self {
-            escalation: self.escalation,
             stage: Stage::Settling { target, expires },
         }
     }
@@ -125,7 +116,7 @@ impl State for Releasing {
 
         self.answer(step, Outcome::Braked);
 
-        Growing::start(step, self.escalation.braked(step.now), None)
+        Growing::braked(step)
     }
 
     fn resume(self, _step: &mut Step<'_>) -> Phase {
@@ -163,7 +154,7 @@ impl State for Releasing {
 
         let expires = Deadline::after(step.now, step.config().settle_grace.get());
 
-        self.settling(target, expires).on_total_changed(step, false)
+        Self::settling(target, expires).on_total_changed(step, false)
     }
 
     fn on_deny(
@@ -219,7 +210,6 @@ impl State for Releasing {
         });
 
         Phase::Releasing(Self {
-            escalation: self.escalation,
             stage: Stage::Offering {
                 id,
                 target: current.saturating_sub(releasable),
@@ -228,7 +218,7 @@ impl State for Releasing {
     }
 
     fn on_connected(self, step: &mut Step<'_>) -> Phase {
-        Steady::released(step, Escalation::NONE)
+        Steady::released(step)
     }
 
     fn on_disconnected(self, step: &mut Step<'_>) -> Phase {

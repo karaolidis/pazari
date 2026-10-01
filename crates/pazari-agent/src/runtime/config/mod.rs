@@ -75,7 +75,6 @@ fn rooted(root: &Path, absolute: &str) -> PathBuf {
     root.join(absolute.trim_start_matches('/'))
 }
 
-/// Which adapter writes `memory.high` and `memory.max`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
     Cgroupfs,

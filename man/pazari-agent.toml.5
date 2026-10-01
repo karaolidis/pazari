@@ -49,14 +49,6 @@ hours.
 How often the agent samples the workload cgroup and the guest's memory.
 Default
 .Cm 1s .
-.Pp
-A throttle wakes the agent immediately, so a shorter tick does not make it ask
-for memory sooner.
-It does make the agent notice sooner that granted memory has arrived, and retry
-sooner after a refusal.
-Below
-.Cm runtime.hotplug_debounce ,
-the tick is the faster way the agent learns its memory has changed.
 .El
 .Ss [engine]
 .Bl -tag -width Ds
@@ -65,12 +57,6 @@ Memory kept below
 .Va memory.max
 for everything in the guest other than the workload.
 Required; may be 0.
-.Pp
-This only lowers the workload's limit.
-To also protect the guest's services from reclaim, set
-.Va MemoryMin
-on
-.Pa system.slice .
 .It Cm burst_reserve No = Ar size
 The gap between
 .Va memory.high
@@ -79,19 +65,6 @@ and
 Required; must be greater than 0.
 See
 .Sx SIZING .
-.It Cm grow_step No = Ar size
-The minimum a grant request asks for.
-Default
-.Cm 512MiB .
-.Pp
-Requests are rounded up to the guest's memory block size, 128MiB on x86-64, so
-a smaller step behaves as one block.
-.It Cm escalate_within No = Ar duration
-If the workload is throttled again within this long of a grow completing, the
-next request's step doubles, up to 64 times
-.Cm grow_step .
-Default
-.Cm 10s .
 .It Cm deny_backoff No = Ar duration
 How long to wait before retrying a refused request, when the host does not
 specify a delay.
@@ -102,34 +75,6 @@ How long to wait for granted memory to arrive before accepting the size the
 guest has.
 Default
 .Cm 10s .
-This only matters when a resize arrives short of its target.
-.It Cm release_intervals No = Ar count
-How many consecutive ticks the guest must have
-.Cm shrink_step
-to spare, beyond both reserves, before memory is released.
-Measured from
-.Va MemAvailable .
-Default
-.Cm 3 .
-.Pp
-The wait is this multiplied by
-.Cm tick_interval ,
-so changing the tick changes it too.
-Too short a wait releases memory between bursts of a workload that will want it
-back.
-.It Cm shrink_step No = Ar size
-How much one release returns.
-Default
-.Cm 256MiB .
-.It Cm shrink_cooldown No = Ar duration
-Minimum time between releases.
-May be 0.
-Default
-.Cm 30s .
-.Pp
-Released memory is reclaimed from the workload first, and any of it the workload
-still uses must be faulted back in.
-A workload whose usage rises and falls needs a cooldown longer than its cycle.
 .It Cm reclaim_swappiness No = Ar integer
 The
 .Va swappiness
@@ -139,9 +84,6 @@ write, from 0 to 200.
 If unset, the guest's
 .Va vm.swappiness
 applies.
-.Pp
-At 0, releases take only page cache, never anonymous memory.
-A guest with no reclaimable page cache then has nothing to release.
 .El
 .Ss [engine.exhaustion]
 What the agent does when the guest reaches its ceiling.
@@ -160,14 +102,54 @@ it reach
 .Va memory.max .
 Default
 .Cm 60s .
-.Pp
-Use a long timeout when a stalled workload is still useful, for example while
-an operator raises the ceiling.
 .El
 .It Cm kind No = Qq Cm kill
 Release the brake immediately, and have the kernel kill the whole cgroup when
 it reaches
 .Va memory.max .
+.El
+.Ss [engine.grow]
+How much more memory each grant request asks for.
+Optional; defaults to
+.Cm exponential .
+.Bl -tag -width Ds
+.It Cm kind No = Qq Cm exponential
+Double the step for each throttle that follows soon after a grow.
+.Bl -tag -width Ds
+.It Cm step No = Ar size
+The first request, and the unit later ones double.
+Default
+.Cm 512MiB .
+.It Cm escalate_within No = Ar duration
+How soon after a grow a throttle still doubles the step.
+Default
+.Cm 10s .
+.El
+.El
+.Ss [engine.release]
+When the guest returns memory to the host, and how much.
+Optional; defaults to
+.Cm titrate .
+.Bl -tag -width Ds
+.It Cm kind No = Qq Cm titrate
+Release a fixed step at a time.
+.Bl -tag -width Ds
+.It Cm step No = Ar size
+How much one release returns.
+Default
+.Cm 256MiB .
+.It Cm intervals No = Ar count
+Consecutive ticks the guest must have
+.Cm step
+to spare before a release.
+Default
+.Cm 3 .
+.It Cm cooldown No = Ar duration
+Minimum time after a resize before a release.
+May be 0.
+Default
+.Cm 30s .
+.El
 .El
 .Ss [runtime]
 .Bl -tag -width Ds
@@ -175,22 +157,15 @@ it reaches
 Absolute path of the workload cgroup, for example
 .Pa /sys/fs/cgroup/workload.slice .
 Required.
-.Pp
-The agent only sees memory charged to this cgroup.
-See
-.Xr pazari 7
-for placing containers in it.
 .It Cm hotplug_debounce No = Ar duration
 After a memory hot-plug event, how long to wait for further events before
 re-reading the guest's memory.
-A resize raises one event per memory block.
 Default
 .Cm 250ms .
 .It Cm reclaim_chunk No = Ar size
 The largest single
 .Va memory.reclaim
 write.
-Larger chunks reclaim faster but stall the workload longer per write.
 Default
 .Cm 64MiB .
 .It Cm thp_always_fatal No = Ar boolean
@@ -199,16 +174,6 @@ Whether
 fails preflight rather than warning.
 Default
 .Cm true .
-.Pp
-Under
-.Cm always ,
-a single fault can take 2MiB instead of 4KiB, so the workload crosses the burst
-reserve far faster than it was sized for.
-Boot the guest with
-.Va transparent_hugepage=madvise .
-Set this to
-.Cm false
-only if the guest cannot be rebooted.
 .El
 .Ss [runtime.backend]
 How the agent sets
@@ -226,9 +191,7 @@ Set
 .Va MemoryHigh
 and
 .Va MemoryMax
-as runtime properties of a unit over D-Bus, so that a
-.Ql systemctl daemon-reload
-does not reset them.
+as runtime properties of a unit over D-Bus.
 .Bl -tag -width Ds
 .It Cm unit No = Ar name
 The unit, for example
@@ -244,9 +207,6 @@ Without it, the agent serves no metrics.
 Address to serve OpenMetrics on, for example
 .Ql 127.0.0.1:9651 .
 Required.
-Any
-.Cm GET
-request is answered with the metrics; other methods get 405.
 .El
 .Ss [transport]
 How the agent reaches
@@ -288,9 +248,6 @@ Must be at least
 .Cm reconnect_min .
 Default
 .Cm 30s .
-.Pp
-The agent keeps its current limits while disconnected, so this is also how long
-a guest may keep stale limits after the host returns.
 .El
 .Sh SIZING
 .Ss service_reserve
@@ -401,7 +358,6 @@ event count.
 The cgroup's
 .Va max
 event count.
-Should stay at 0.
 .It Va psi_some10
 The workload's memory pressure.
 .It Va connected

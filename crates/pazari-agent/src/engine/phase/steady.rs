@@ -1,74 +1,49 @@
 use pazari_proto::GuestMessage;
-use pazari_types::Deadline;
 use tracing::debug;
 
 use crate::engine::{
     counters::Pressure,
+    grow::Grow,
     limits::Brake,
     phase::{
         Phase, State, Step,
         growing::Growing,
         releasing::{Owed, Releasing},
     },
-    scale::{Escalation, GrowScale},
+    release::Release,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Steady {
-    escalation: Escalation,
-    cooldown: Option<Deadline>,
-}
+pub struct Steady;
 
 impl Steady {
     pub const fn start() -> Self {
-        Self {
-            escalation: Escalation::NONE,
-            cooldown: None,
-        }
+        Self
     }
 
-    pub fn settled(step: &mut Step<'_>, scale: GrowScale) -> Phase {
-        let window = Deadline::after(step.now, step.config().escalate_within.get());
-        let escalation = Escalation::settled(scale, window);
+    pub fn settled(step: &mut Step<'_>) -> Phase {
+        step.world.grow.settled(step.now);
 
-        Self::enter(step, escalation, Some(Self::cooldown(step)))
+        Self::released(step)
     }
 
-    pub fn released(step: &mut Step<'_>, escalation: Escalation) -> Phase {
-        Self::enter(step, escalation, Some(Self::cooldown(step)))
+    pub fn released(step: &mut Step<'_>) -> Phase {
+        step.world.release.rested(step.now);
+
+        Self::enter(step)
     }
 
-    pub fn recovered(step: &mut Step<'_>, escalation: Escalation) -> Phase {
-        Self::enter(step, escalation, None)
+    pub fn recovered(step: &mut Step<'_>) -> Phase {
+        step.world.grow.reset();
+        step.world.release.recovered();
+
+        Self::enter(step)
     }
 
-    fn enter(step: &mut Step<'_>, escalation: Escalation, cooldown: Option<Deadline>) -> Phase {
+    fn enter(step: &mut Step<'_>) -> Phase {
         step.brake(Brake::Engaged);
-        step.world.forget_spare();
 
-        Phase::Steady(Self {
-            escalation,
-            cooldown,
-        })
-    }
-
-    fn cooldown(step: &Step<'_>) -> Deadline {
-        Deadline::after(step.now, step.config().shrink_cooldown.get())
-    }
-
-    fn cooling(self, step: &Step<'_>) -> bool {
-        self.cooldown.is_some_and(|until| !until.reached(step.now))
-    }
-
-    fn noted(self, step: &Step<'_>, pressure: Pressure) -> Self {
-        Self {
-            escalation: self.escalation,
-            cooldown: if pressure.breached {
-                Some(Self::cooldown(step).furthest(self.cooldown))
-            } else {
-                self.cooldown
-            },
-        }
+        Phase::Steady(Self)
     }
 }
 
@@ -82,14 +57,7 @@ impl State for Steady {
     }
 
     fn brake(self, step: &mut Step<'_>) -> Phase {
-        Growing::start(step, self.escalation.braked(step.now), None)
-    }
-
-    fn on_connected(self, _step: &mut Step<'_>) -> Phase {
-        Phase::Steady(Self {
-            escalation: Escalation::NONE,
-            ..self
-        })
+        Growing::braked(step)
     }
 
     fn resume(self, _step: &mut Step<'_>) -> Phase {
@@ -116,23 +84,19 @@ impl State for Steady {
 
         step.send(GuestMessage::ReclaimAck { id, will_release });
 
-        Releasing::begin(step, will_release, Some(Owed::new(id)), self.escalation)
+        Releasing::begin(step, will_release, Some(Owed::new(id)))
     }
 
     fn on_interval(self, step: &mut Step<'_>, pressure: Pressure) -> Phase {
-        let next = self.noted(step, pressure);
+        let Some(desired) = step.world.release.due(step.now, pressure) else {
+            return self.stay();
+        };
 
-        if !step.world.spare().reached(step.config().release_intervals)
-            || !step.world.connected()
-            || next.cooling(step)
-        {
-            return next.stay();
+        if !step.world.connected() {
+            return self.stay();
         }
 
-        let bytes = step
-            .world
-            .release_budget(step.config().shrink_step.get())
-            .unwrap_or(0);
+        let bytes = step.world.release_budget(desired.get()).unwrap_or(0);
 
         if bytes == 0 {
             debug!(
@@ -142,7 +106,7 @@ impl State for Steady {
                 "slack has held, but no headroom to release",
             );
 
-            return next.stay();
+            return self.stay();
         }
 
         debug!(
@@ -153,7 +117,7 @@ impl State for Steady {
             "guest has held reclaimable memory long enough to shrink",
         );
 
-        Releasing::begin(step, bytes, None, next.escalation)
+        Releasing::begin(step, bytes, None)
     }
 }
 
@@ -164,7 +128,7 @@ mod tests {
     use pazari_proto::{GuestMessage, HostMessage};
     use pazari_types::Swappiness;
 
-    use crate::engine::{Action, EngineConfig, Phase, testing::*};
+    use crate::engine::{Action, EngineConfig, Phase, ReleaseConfig, TitrateConfig, testing::*};
 
     #[test]
     fn a_shrink_needs_exactly_the_configured_release_intervals() {
@@ -298,7 +262,10 @@ mod tests {
     #[test]
     fn a_release_is_clamped_to_the_boot_memory_floor() {
         let config = EngineConfig {
-            shrink_step: bytes(1024 * MIB),
+            release: ReleaseConfig::Titrate(TitrateConfig {
+                step: bytes(1024 * MIB),
+                ..titrate()
+            }),
             ..config()
         };
         let mut engine = started_with(config, CEILING);

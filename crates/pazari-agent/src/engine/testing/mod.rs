@@ -7,7 +7,8 @@ use pazari_proto::{DenyReason, GuestMessage, HostMessage};
 use pazari_types::{Delay, Interval, Swappiness, Timestamp};
 
 use crate::engine::{
-    Action, BootInfo, Engine, EngineConfig, Event, ExhaustionMode, Phase, Snapshot,
+    Action, BootInfo, Engine, EngineConfig, Event, ExhaustionMode, ExponentialConfig, GrowConfig,
+    Phase, ReleaseConfig, Snapshot, TitrateConfig,
 };
 
 pub const MIB: u64 = 1 << 20;
@@ -43,17 +44,25 @@ pub fn delay(secs: u64) -> Delay {
     Delay::try_new(Duration::from_secs(secs)).expect("a delay under a day")
 }
 
+pub fn titrate() -> TitrateConfig {
+    TitrateConfig {
+        step: bytes(256 * MIB),
+        intervals: count(3),
+        cooldown: delay(30),
+    }
+}
+
 pub fn config() -> EngineConfig {
     EngineConfig {
         service_reserve: SERVICE,
         burst_reserve: bytes(BURST),
-        grow_step: bytes(512 * MIB),
+        grow: GrowConfig::Exponential(ExponentialConfig {
+            step: bytes(512 * MIB),
+            escalate_within: interval(10),
+        }),
         deny_backoff: interval(5),
         settle_grace: interval(10),
-        escalate_within: interval(10),
-        release_intervals: count(3),
-        shrink_step: bytes(256 * MIB),
-        shrink_cooldown: delay(30),
+        release: ReleaseConfig::Titrate(titrate()),
         reclaim_swappiness: Some(Swappiness::NONE),
         exhaustion: ExhaustionMode::Stall {
             timeout: interval(12),

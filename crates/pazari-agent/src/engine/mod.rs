@@ -7,9 +7,10 @@ mod counters;
 mod handle;
 
 mod effects;
+mod grow;
 mod limits;
 mod phase;
-mod scale;
+mod release;
 mod streak;
 mod world;
 
@@ -21,7 +22,9 @@ use tracing::debug;
 
 pub use crate::engine::{
     action::Action,
-    config::{EngineConfig, ExhaustionMode},
+    config::{
+        EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, TitrateConfig,
+    },
     error::EngineError,
     event::{BootInfo, Event, Snapshot},
     phase::Phase,

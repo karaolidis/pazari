@@ -6,22 +6,17 @@ use crate::engine::{
     counters::Pressure,
     limits::Brake,
     phase::{Phase, State, Step, growing::Growing, steady::Steady},
-    scale::{Escalation, GrowScale},
+    release::Release,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Exhausted {
-    scale: GrowScale,
     since: Timestamp,
     retry_at: Option<Deadline>,
 }
 
 impl Exhausted {
-    pub fn enter(
-        step: &mut Step<'_>,
-        scale: GrowScale,
-        exhausted_since: Option<Timestamp>,
-    ) -> Phase {
+    pub fn enter(step: &mut Step<'_>, exhausted_since: Option<Timestamp>) -> Phase {
         let since = exhausted_since.unwrap_or(step.now);
 
         if exhausted_since.is_none() {
@@ -48,26 +43,17 @@ impl Exhausted {
             None
         };
 
-        Self::at(step, scale, since, retry_at)
+        Self::at(step, since, retry_at)
     }
 
-    fn at(
-        step: &mut Step<'_>,
-        scale: GrowScale,
-        since: Timestamp,
-        retry_at: Option<Deadline>,
-    ) -> Phase {
+    fn at(step: &mut Step<'_>, since: Timestamp, retry_at: Option<Deadline>) -> Phase {
         step.brake(if retry_at.is_some() {
             Brake::Engaged
         } else {
             Brake::Released
         });
 
-        Phase::Exhausted(Self {
-            scale,
-            since,
-            retry_at,
-        })
+        Phase::Exhausted(Self { since, retry_at })
     }
 
     fn stalling(step: &Step<'_>, since: Timestamp) -> bool {
@@ -80,8 +66,8 @@ impl Exhausted {
     }
 
     fn retry(self, step: &mut Step<'_>) -> Phase {
-        if step.world.connected() && step.world.grow_target(self.scale).is_some() {
-            return Growing::start(step, self.scale, Some(self.since));
+        if step.world.connected() && step.world.grow_target().is_some() {
+            return Growing::start(step, Some(self.since));
         }
 
         Phase::Exhausted(Self {
@@ -104,15 +90,8 @@ impl State for Exhausted {
         self.stay()
     }
 
-    fn on_connected(self, _step: &mut Step<'_>) -> Phase {
-        Phase::Exhausted(Self {
-            scale: GrowScale::ONE,
-            ..self
-        })
-    }
-
     fn resume(self, step: &mut Step<'_>) -> Phase {
-        Growing::start(step, self.scale, Some(self.since))
+        Growing::start(step, Some(self.since))
     }
 
     fn advance(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
@@ -124,7 +103,7 @@ impl State for Exhausted {
                 "workload stalled for its whole timeout; releasing the brake",
             );
 
-            return Self::at(step, self.scale, self.since, None);
+            return Self::at(step, self.since, None);
         }
 
         match self.retry_at {
@@ -135,22 +114,22 @@ impl State for Exhausted {
 
     fn on_total_changed(self, step: &mut Step<'_>, changed: bool) -> Phase {
         if changed {
-            return Steady::settled(step, self.scale);
+            return Steady::settled(step);
         }
 
         self.stay()
     }
 
     fn on_interval(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
-        if !step.world.spare().reached(step.config().release_intervals) {
+        if !step.world.release.spared() {
             return self.stay();
         }
 
-        Steady::recovered(step, Escalation::NONE)
+        Steady::recovered(step)
     }
 
     fn on_ceiling_raised(self, step: &mut Step<'_>) -> Option<Phase> {
-        Some(Growing::start(step, self.scale, None))
+        Some(Growing::start(step, None))
     }
 }
 

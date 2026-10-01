@@ -61,7 +61,6 @@ Map the arena with
 so it is not charged to
 .Va Committed_AS
 when mapped.
-Needed for an arena larger than memory plus swap under strict overcommit.
 .It Fl -no-thp
 Exclude the arena from transparent huge pages with
 .Dv MADV_NOHUGEPAGE .
@@ -85,8 +84,7 @@ limits throughput and is required for
 .Cm churn .
 Without it, a phase runs as fast as it can.
 .Cm chunk
-is how much memory is moved between rate checks; smaller chunks pace more
-evenly.
+is how much memory is moved between rate checks.
 It defaults to 1MiB for
 .Cm grow
 and
@@ -181,9 +179,6 @@ and
 and
 .Va rate_bps
 since the previous report.
-A falling
-.Va rate_bps
-shows the throttle taking effect.
 A phase shorter than
 .Fl -interval
 reports no progress.

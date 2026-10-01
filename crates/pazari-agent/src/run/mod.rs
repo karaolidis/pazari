@@ -211,7 +211,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        engine::{Action, EngineConfig, ExhaustionMode, Snapshot},
+        engine::{
+            Action, EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig,
+            Snapshot, TitrateConfig,
+        },
         runtime::{cgroup::MEMORY_HIGH, testing::cgroup_dir},
         session::SessionConfig,
     };
@@ -239,13 +242,17 @@ mod tests {
         EngineConfig {
             service_reserve: SERVICE,
             burst_reserve: bytes(BURST),
-            grow_step: bytes(512 * MIB),
+            grow: GrowConfig::Exponential(ExponentialConfig {
+                step: bytes(512 * MIB),
+                escalate_within: interval(10),
+            }),
             deny_backoff: interval(5),
             settle_grace: interval(10),
-            escalate_within: interval(10),
-            release_intervals: NonZeroU32::new(3).expect("a positive count"),
-            shrink_step: bytes(256 * MIB),
-            shrink_cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
+            release: ReleaseConfig::Titrate(TitrateConfig {
+                step: bytes(256 * MIB),
+                intervals: NonZeroU32::new(3).expect("a positive count"),
+                cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
+            }),
             reclaim_swappiness: None,
             exhaustion: ExhaustionMode::Kill,
             tick_interval: interval(1),

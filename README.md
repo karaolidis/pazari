@@ -129,3 +129,5 @@ nix flake check
 nix build .#checks.x86_64-linux.test-grow-burst -L
 nix build .#measure-brake-hold -L
 ```
+
+See `nix/harness/README.md` for writing scenarios and reading their results.

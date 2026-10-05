@@ -1,7 +1,6 @@
 # pazari test harness
 
-This document describes the VM test harness. The reference implementation is
-`nix/harness`.
+The VM test harness behind `nix flake check` and the `measure-` builds.
 
 ```
 nix build .#checks.x86_64-linux.test-reconnect -L
@@ -45,7 +44,7 @@ A scenario whose name begins with `measure-` is a measurement rather than a
 test. It is kept out of `nix flake check`, and built by name instead:
 
 ```
-nix build .#measure-brake-crawl -L
+nix build .#measure-brake-hold -L
 ```
 
 ## Check tooling

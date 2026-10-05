@@ -1,4 +1,4 @@
-{ ... }: {
+{ pkgs, ... }: {
   projectRootFile = "flake.nix";
 
   programs = {
@@ -13,6 +13,17 @@
     ruff = {
       format = true;
       check = true;
+    };
+
+    mandoc = {
+      enable = true;
+      level = "style";
+      manpath = [ "man" ];
+      manuals = with pkgs; [
+        man-pages
+        systemd
+        qemu_kvm
+      ];
     };
   };
 

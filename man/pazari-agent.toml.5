@@ -1,6 +1,6 @@
 .Dd September 25, 2026
 .Dt PAZARI-AGENT.TOML 5
-.Os pazari
+.Os
 .Sh NAME
 .Nm pazari-agent.toml
 .Nd configuration file for pazari-agent
@@ -50,7 +50,7 @@ How often the agent samples the workload cgroup and the guest's memory.
 Default
 .Cm 1s .
 .El
-.Ss [engine]
+.Ss [engine]\&
 .Bl -tag -width Ds
 .It Cm service_reserve No = Ar size
 Memory kept below
@@ -85,7 +85,7 @@ If unset, the guest's
 .Va vm.swappiness
 applies.
 .El
-.Ss [engine.exhaustion]
+.Ss [engine.exhaustion]\&
 What the agent does when the guest reaches its ceiling.
 Optional; defaults to
 .Cm stall
@@ -108,7 +108,7 @@ Release the brake immediately, and have the kernel kill the whole cgroup when
 it reaches
 .Va memory.max .
 .El
-.Ss [engine.grow]
+.Ss [engine.grow]\&
 How much more memory each grant request asks for.
 Optional; defaults to
 .Cm exponential .
@@ -126,7 +126,7 @@ Default
 .Cm 10s .
 .El
 .El
-.Ss [engine.release]
+.Ss [engine.release]\&
 When the guest returns memory to the host, and how much.
 Optional; defaults to
 .Cm titrate .
@@ -151,7 +151,7 @@ Default
 .Cm 30s .
 .El
 .El
-.Ss [runtime]
+.Ss [runtime]\&
 .Bl -tag -width Ds
 .It Cm cgroup No = Ar path
 Absolute path of the workload cgroup, for example
@@ -175,7 +175,7 @@ fails preflight rather than warning.
 Default
 .Cm true .
 .El
-.Ss [runtime.backend]
+.Ss [runtime.backend]\&
 How the agent sets
 .Va memory.high
 and
@@ -199,7 +199,7 @@ The unit, for example
 Required.
 .El
 .El
-.Ss [metrics]
+.Ss [metrics]\&
 Optional.
 Without it, the agent serves no metrics.
 .Bl -tag -width Ds
@@ -208,7 +208,7 @@ Address to serve OpenMetrics on, for example
 .Ql 127.0.0.1:9651 .
 Required.
 .El
-.Ss [transport]
+.Ss [transport]\&
 How the agent reaches
 .Xr pazarid 1 .
 Required.

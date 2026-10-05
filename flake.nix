@@ -82,6 +82,7 @@
             cargo-outdated
             cargo-edit
             cargo-expand
+            mandoc
             (python3.withPackages (
               pkgs: with pkgs; [
                 matplotlib

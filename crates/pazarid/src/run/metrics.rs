@@ -1,6 +1,6 @@
 use pazari_metrics::{
-    Counter, Family, Fraction, Gauge, GuestLabel, KindLabel, ReasonLabel, Registry, Saturating,
-    Unit,
+    Counter, Family, Gauge, GuestLabel, KindLabel, ReasonLabel, Registry, Sampled, SampledFraction,
+    Saturating, Unit,
 };
 use pazari_proto::HostMessage;
 
@@ -140,15 +140,17 @@ impl Observer {
 
         let host = broker.host();
 
-        series
-            .host
-            .available
-            .set_saturating(host.available.unwrap_or(0));
-        series
-            .host
-            .swap_free
-            .set_saturating(host.swap_free.unwrap_or(0));
-        series.host.psi.set(host.psi.unwrap_or(0.0));
+        if let Some(available) = host.available {
+            series.host.available.set_saturating(available);
+        }
+
+        if let Some(swap_free) = host.swap_free {
+            series.host.swap_free.set_saturating(swap_free);
+        }
+
+        if let Some(psi) = host.psi {
+            series.host.psi.set(psi);
+        }
     }
 }
 
@@ -282,28 +284,28 @@ impl Guests {
 
 #[derive(Debug, Default)]
 struct Host {
-    available: Gauge,
-    swap_free: Gauge,
-    psi: Fraction,
+    available: Sampled,
+    swap_free: Sampled,
+    psi: SampledFraction,
 }
 
 impl Host {
     fn register(&self, registry: &mut Registry) {
         registry.register_with_unit(
             "host_available",
-            "The host's MemAvailable as the daemon last read it, 0 until it has",
+            "The host's MemAvailable as the daemon last read it",
             Unit::Bytes,
             self.available.clone(),
         );
         registry.register_with_unit(
             "host_swap_free",
-            "The host's SwapFree as the daemon last read it, 0 until it has",
+            "The host's SwapFree as the daemon last read it",
             Unit::Bytes,
             self.swap_free.clone(),
         );
         registry.register(
             "host_psi",
-            "The host's memory some avg10, in percent of wall time, 0 until the daemon has read it",
+            "The host's memory some avg10, in percent of wall time",
             self.psi.clone(),
         );
     }
@@ -465,6 +467,26 @@ mod tests {
             "a size was published unread:\n{text}"
         );
         carries(&registry, "pazarid_guest_connected{guest=\"one\"} 0");
+    }
+
+    #[test]
+    fn a_host_the_daemon_has_not_read_publishes_no_reading() {
+        let (observer, registry) = Observer::new();
+
+        observer.refresh(&Broker::new(policy(), guests()));
+
+        let text = scrape(&registry);
+
+        for series in [
+            "pazarid_host_available_bytes",
+            "pazarid_host_swap_free_bytes",
+            "pazarid_host_psi",
+        ] {
+            assert!(
+                !text.contains(series),
+                "{series} was published unread:\n{text}"
+            );
+        }
     }
 
     #[test]

@@ -1,14 +1,11 @@
 use pazari_metrics::{
-    Counter, Family, Fraction, Gauge, ModeLabel, ReasonLabel, Registry, Saturating, Unit,
+    Counter, Family, Fraction, Gauge, ModeLabel, ReasonLabel, Registry, Sampled, Saturating, Unit,
 };
 use pazari_proto::{GuestMessage, HostMessage};
 
 use crate::engine::{Action, Engine, Event, PhaseKind, Snapshot, Tally};
 
 const PREFIX: &str = "pazari_agent";
-
-/// The labels of a series that carries none, and is absent until it has a value.
-type Unlabelled = [(&'static str, &'static str); 0];
 
 #[derive(Debug, Default)]
 pub struct Observer(Option<Series>);
@@ -106,11 +103,7 @@ impl Observer {
         series.limits.total_mem.set_saturating(engine.total_mem());
 
         if let Some(ceiling) = engine.ceiling() {
-            series
-                .limits
-                .ceiling
-                .get_or_create(&[])
-                .set_saturating(ceiling);
+            series.limits.ceiling.set_saturating(ceiling);
         }
 
         series
@@ -246,7 +239,7 @@ struct Limits {
     high: Gauge,
     max: Gauge,
     total_mem: Gauge,
-    ceiling: Family<Unlabelled, Gauge>,
+    ceiling: Sampled,
     brake_released: Gauge,
 }
 
@@ -386,10 +379,7 @@ mod tests {
         );
         carries(&registry, &format!("pazari_agent_memory_max_bytes {MAX0}"));
         carries(&registry, &format!("pazari_agent_total_mem_bytes {BOOT}"));
-        carries(
-            &registry,
-            &format!("pazari_agent_ceiling_bytes{{}} {CEILING}"),
-        );
+        carries(&registry, &format!("pazari_agent_ceiling_bytes {CEILING}"));
         carries(&registry, "pazari_agent_brake_released 0");
         carries(&registry, "pazari_agent_connected 1");
 
@@ -406,7 +396,7 @@ mod tests {
 
         observer.refresh(&engine);
 
-        lacks(&registry, "pazari_agent_ceiling_bytes{");
+        lacks(&registry, "pazari_agent_ceiling_bytes");
         carries(&registry, "pazari_agent_mode{mode=\"steady\"} 1");
         carries(&registry, "pazari_agent_connected 0");
     }

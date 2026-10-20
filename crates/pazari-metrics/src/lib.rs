@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod label;
+pub mod sampled;
 pub mod server;
 
 use std::{fmt, sync::atomic::AtomicU64};
@@ -16,10 +17,14 @@ pub use prometheus_client::{
 pub use crate::{
     error::MetricsError,
     label::{GuestLabel, KindLabel, ModeLabel, ReasonLabel},
+    sampled::Sampled,
     server::Exposition,
 };
 
 pub type Fraction = Gauge<f64, AtomicU64>;
+
+/// A [`Fraction`] with no sample until it is first set.
+pub type SampledFraction = Sampled<f64, AtomicU64>;
 
 pub trait Saturating {
     fn set_saturating(&self, value: u64);
@@ -27,8 +32,13 @@ pub trait Saturating {
 
 impl Saturating for Gauge {
     fn set_saturating(&self, value: u64) {
-        self.set(i64::try_from(value).unwrap_or(i64::MAX));
+        self.set(saturated(value));
     }
+}
+
+/// The value as a gauge holds it, capped at the top of its range.
+fn saturated(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 pub trait Encoded {

@@ -83,7 +83,7 @@ let
       };
     };
 
-  patchedLatest = patched pkgs.linuxPackages_latest;
+  patchedSupported = patched pkgs.linuxPackages_7_2;
 
   failed =
     machine:
@@ -168,7 +168,7 @@ in
     }
     {
       name = "the patches are found for the kernel in use";
-      ok = failed patchedLatest == [ ] && patchedLatest.boot.kernelPatches != [ ];
+      ok = failed patchedSupported == [ ] && patchedSupported.boot.kernelPatches != [ ];
     }
     {
       name = "a kernel without patches is refused";

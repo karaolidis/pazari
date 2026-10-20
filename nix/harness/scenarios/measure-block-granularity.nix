@@ -5,6 +5,11 @@
 
   sample = 0.05;
 
+  daemon.settings.grant = {
+    floor = "1GiB";
+    min_interval = "500ms";
+  };
+
   guests =
     let
       arm = size: {
@@ -74,11 +79,6 @@
       fine = arm "2M";
       coarse = arm "128M";
     };
-
-  daemon.settings.grant = {
-    floor = "1GiB";
-    min_interval = "500ms";
-  };
 
   assertions = ''
     from pazari_harness.measure import bars, cdf, cycles, quantiles, record, save

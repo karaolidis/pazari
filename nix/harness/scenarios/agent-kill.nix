@@ -11,38 +11,18 @@
   guests.main = {
     daemon.ceiling = "1792MiB";
 
-    module =
-      {
-        config,
-        lib,
-        pkgs,
-        ...
-      }:
-      {
-        services.pazari-agent.settings.workload.burst_reserve = "512MiB";
+    module = { ... }: {
+      services.pazari-agent.settings.workload.burst_reserve = "512MiB";
 
-        services.pazari-agent.harness = {
-          workload.phases = [
-            "grow=800MiB,rate=384MiB/s"
-            "release=384MiB"
-            "grow=384MiB,rate=384MiB/s"
-            "hold=180s"
-          ];
-        };
-
-        systemd.services.pazari-harness-reaper = {
-          description = "pazari harness agent reaper";
-          wantedBy = [ "multi-user.target" ];
-          requires = [ "${config.services.pazari-agent.harness.workload.unit}.service" ];
-          after = [ "${config.services.pazari-agent.harness.workload.unit}.service" ];
-
-          serviceConfig = {
-            Type = "oneshot";
-            ExecStartPre = "${lib.getExe' pkgs.coreutils "sleep"} 20";
-            ExecStart = "${lib.getExe' config.systemd.package "systemctl"} kill --kill-whom=main --signal=KILL pazari-agent.service";
-          };
-        };
+      services.pazari-agent.harness = {
+        workload.phases = [
+          "grow=800MiB,rate=384MiB/s"
+          "release=384MiB"
+          "grow=384MiB,rate=384MiB/s"
+          "hold=180s"
+        ];
       };
+    };
   };
 
   assertions = ''
@@ -79,6 +59,11 @@
 
         collapsed(run, guest, GROW, "the braked workload is crawling", share=CRAWLING)
         braked = run.seen
+
+        guest.shell(
+            "systemctl kill --kill-whom=main --signal=KILL pazari-agent.service",
+            "the agent was killed under the braked workload",
+        )
 
         died = guest.agent.answering(
             120,

@@ -61,7 +61,7 @@
     };
 
   assertions = ''
-    MIB = 1024 * 1024
+    from pazari_harness.units import MIB
 
     MARGIN = 512 * MIB
 

@@ -28,10 +28,10 @@
         guest = run.guest
 
         size = run.daemon.gauge("pazarid_guest_size_bytes", guest.labels)
-        plugged = guest.agent.gauge("pazari_agent_total_mem_bytes")
+        booted = guest.agent.gauge("pazari_agent_total_mem_bytes")
 
         grew(run, guest, size)
-        followed(guest, plugged + BLOCK)
+        followed(guest, booted + BLOCK)
 
         stalled = collapsed(
             run, guest, GROW, "the brake collapsed the workload's fault rate"

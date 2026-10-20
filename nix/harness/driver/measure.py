@@ -334,7 +334,7 @@ def rtt_figure(run, path, rounds):
     save(figure, run, path, "hotplug round trip")
 
 
-def crawl_figure(run, path, arms, claim=None):
+def crawl_figure(run, path, arms):
     figure, axes = plt.subplots(1, 2, figsize=(13, 4.8), dpi=100)
     profile, sweep = axes
 
@@ -382,19 +382,6 @@ def crawl_figure(run, path, arms, claim=None):
             color="C7",
             linestyle="none",
             label="still alive when the window closed",
-        )
-
-    if claim is not None:
-        sweep.axhline(claim, color="C3", linewidth=1.0, linestyle="--")
-        sweep.annotate(
-            f"the {claim:g}s the sizing guidance claims",
-            xy=(1.0, claim),
-            xycoords=("axes fraction", "data"),
-            xytext=(-3, 3),
-            textcoords="offset points",
-            fontsize=8,
-            color="C3",
-            ha="right",
         )
 
     sweep.set_xscale("log", base=2)

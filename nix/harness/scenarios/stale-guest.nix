@@ -32,6 +32,10 @@
     FREEZE = "systemctl kill --kill-whom=main --signal=STOP pazari-agent.service"
     THAW = "systemctl kill --kill-whom=main --signal=CONT pazari-agent.service"
 
+    # status.interval and tick.interval, as nix/harness/common.nix sets them.
+    STATUS = 0.5
+    TICK = 0.5
+
     def check(run):
         guest = run.guest
 
@@ -87,7 +91,7 @@
         )
 
         run.require(
-            stale - frozen < 30,
+            stale - frozen <= 3 * STATUS + 2 * TICK + 2 * run.scenario.sample,
             f"the daemon called it in {stale - frozen:.1f}s, off three missed intervals",
         )
 

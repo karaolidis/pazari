@@ -20,25 +20,34 @@
     };
   };
 
-  guests.main = {
-    daemon.ceiling = "2560MiB";
+  guests =
+    let
+      guest = ceiling: phases: {
+        daemon = { inherit ceiling; };
 
-    module = { ... }: {
-      # The idle guest must not volunteer the memory before the host asks.
-      services.pazari-agent.settings.release = {
-        kind = "titrate";
-        cooldown = "600s";
-      };
+        module = { ... }: {
+          # The idle guests must not volunteer the memory before the host asks.
+          services.pazari-agent.settings.release = {
+            kind = "titrate";
+            cooldown = "600s";
+          };
 
-      services.pazari-agent.harness = {
-        workload.phases = [
-          "grow=1200MiB,rate=256MiB/s"
-          "release=900MiB"
-          "hold=600s"
-        ];
+          services.pazari-agent.harness.workload.phases = phases;
+        };
       };
+    in
+    {
+      main = guest "2560MiB" [
+        "grow=1200MiB,rate=256MiB/s"
+        "release=900MiB"
+        "hold=600s"
+      ];
+
+      small = guest "1536MiB" [
+        "grow=256MiB,rate=128MiB/s"
+        "hold=600s"
+      ];
     };
-  };
 
   host = { lib, pkgs, ... }: {
     zramSwap = {
@@ -55,7 +64,7 @@
           "--interval"
           "5s"
           "--no-reserve"
-          "grow=6GiB,rate=256MiB/s"
+          "grow=7GiB,rate=256MiB/s"
           "churn=300s,rate=1GiB/s"
         ];
 
@@ -68,22 +77,29 @@
 
   assertions = ''
     from pazari_harness.checks import BLOCK, grew, steady
+    from pazari_harness.units import MIB
 
     PRESSED = 10.0
 
     HOG = "pazari-harness-hog.service"
 
     def check(run):
-        guest = run.guest
+        guest = run.guests["main"]
+        small = run.guests["small"]
 
         size = run.daemon.gauge("pazarid_guest_size_bytes", guest.labels)
 
         grew(run, guest, size)
         steady(run, guest, "the engine settled with the workload holding its peak")
 
+        # The small guest grows on a throttle and holds its releases back, so any
+        # reclaim it runs is one the host asked for.
+        spared = run.daemon.gauge("pazarid_guest_size_bytes", small.labels)
+        untouched = small.agent.counter("pazari_agent_reclaims_total")
+
         guest.agent.reaches(
             "pazari_agent_workload_usage_bytes",
-            lambda value: value < 512 * 1024 * 1024,
+            lambda value: value < 512 * MIB,
             180,
             "the workload let go of most of what it held",
         )
@@ -168,6 +184,12 @@
             )
             == 0,
             "the guest never refused, so the host never had to shun it",
+        )
+
+        run.require(
+            small.agent.counter("pazari_agent_reclaims_total") == untouched
+            and run.daemon.gauge("pazarid_guest_size_bytes", small.labels) >= spared,
+            "the host took memory back from the guest holding the most, not the small one",
         )
 
         run.host.stop(HOG, "the hog gave the host's memory back")

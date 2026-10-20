@@ -64,8 +64,6 @@
 
     WINDOW = 360
 
-    CLAIM = 90
-
     PROMPT = 5
 
     ARMS = [
@@ -75,6 +73,10 @@
         {"name": "reserve512", "guard": 512 * MIB, "label": "burst_reserve = 512MiB"},
         {"name": "coarse", "guard": 512 * MIB, "label": "burst_reserve = 512MiB, 256MiB faults"},
     ]
+
+    # The sizing guidance's reference table: these reserves never let a refused
+    # workload reach memory.max over the window.
+    HOLDING = ["reserve64", "reserve256", "reserve512"]
 
     def check(run):
         arms = crawl(run, ARMS, WINDOW)
@@ -94,41 +96,25 @@
                 },
             )
 
-        crawl_figure(run, "brake-hold.svg", arms, claim=CLAIM)
+        crawl_figure(run, "brake-hold.svg", arms)
 
         held = {arm["name"]: arm["exhausted"] for arm in arms}
 
         run.require(
             held["released"] is not None and held["released"] <= PROMPT,
-            f"a released brake let the burst reach memory.max in "
-            f"{held['released']}s, which is no brake at all",
+            f"a released brake let the burst reach memory.max in {held['released']}s",
         )
 
-        for name in ["reserve64", "reserve256", "reserve512", "coarse"]:
+        for name in HOLDING:
             run.require(
-                held[name] is None or held[name] > held["released"],
-                f"{name} held the same burst no longer than a released brake did",
+                held[name] is None,
+                f"{name} kept the refused burst off memory.max for the whole {WINDOW}s, "
+                f"as the sizing guidance claims",
             )
 
         run.require(
-            held["reserve512"] is None or held["reserve512"] >= CLAIM,
-            f"a 512MiB burst reserve held the burst for "
-            f"{WINDOW if held['reserve512'] is None else held['reserve512']}s, against the "
-            f"{CLAIM}s the sizing guidance claims",
-        )
-
-        for smaller, larger in [("reserve64", "reserve256"), ("reserve256", "reserve512")]:
-            if held[smaller] is not None and held[larger] is not None:
-                run.require(
-                    held[larger] >= held[smaller],
-                    f"{larger} held longer than {smaller}, so the reserve is what buys "
-                    f"the time",
-                )
-
-        run.require(
-            held["coarse"] is None or held["reserve512"] is None or held["coarse"] <= held["reserve512"],
-            f"faulting 256MiB at a time crossed the same reserve no faster than 1MiB "
-            f"faults did, which the sizing guidance does not expect",
+            held["coarse"] is None or held["coarse"] > held["released"],
+            "256MiB faults crossed the 512MiB reserve slower than a released brake",
         )
   '';
 }

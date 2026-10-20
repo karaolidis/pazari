@@ -82,12 +82,12 @@
             guest.agent.counter("pazari_agent_max_events") == 0,
             "nothing in the guest ever reached memory.max",
         )
-        ceiling = guest.agent.gauge("pazari_agent_memory_max_bytes")
+        limit = guest.agent.gauge("pazari_agent_memory_max_bytes")
 
         run.wait_for(
             lambda: guest.agent.held(
                 "pazari_agent_memory_high_bytes",
-                lambda value: value < ceiling,
+                lambda value: value < limit,
                 over=20,
                 since=stalled,
             ),

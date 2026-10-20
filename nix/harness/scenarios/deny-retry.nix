@@ -45,7 +45,11 @@
     from pazari_harness.series import gaps, rises
     from pazari_harness.units import GIB
 
-    SPACED = 6.0
+    # grant.min_interval above, the delay the host names.
+    NAMED = 8.0
+
+    # tick.interval, as nix/harness/common.nix sets it.
+    TICK = 0.5
 
     HOG = "pazari-harness-hog.service"
 
@@ -97,7 +101,7 @@
             f"the guest retried more than once: it asked at {[round(at, 1) for at in asked]}",
         )
         run.require(
-            min(spacing) >= SPACED,
+            min(spacing) >= NAMED - TICK - 2 * run.scenario.sample,
             "every retry waited out the delay the host named: the closest two asks "
             f"were {min(spacing):.1f}s apart",
         )

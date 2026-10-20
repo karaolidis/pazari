@@ -225,7 +225,7 @@ impl World {
         self.link.status_due(now)
     }
 
-    pub fn note_interval(&mut self, pressure: Pressure) {
+    pub fn note_interval(&mut self, now: Timestamp, pressure: Pressure) {
         let slack = self.slack();
 
         self.calm = self.calm.then(
@@ -234,7 +234,7 @@ impl World {
                 && slack.is_some_and(|slack| slack >= self.guest.block_size.get()),
         );
 
-        self.release.observe(slack, pressure);
+        self.release.observe(now, slack, pressure);
     }
 
     /// Whether the workload has been calm long enough to end an exhaustion.

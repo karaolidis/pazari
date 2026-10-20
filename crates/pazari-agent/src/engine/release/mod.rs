@@ -12,7 +12,7 @@ use crate::engine::{config::ReleaseConfig, counters::Pressure};
 #[enum_dispatch]
 pub trait Release {
     /// One interval's worth of what the guest has to spare.
-    fn observe(&mut self, slack: Option<u64>, pressure: Pressure);
+    fn observe(&mut self, now: Timestamp, slack: Option<u64>, pressure: Pressure);
 
     /// How much to give back this interval, if anything.
     fn due(&mut self, now: Timestamp, pressure: Pressure) -> Option<NonZeroU64>;

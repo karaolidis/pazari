@@ -36,7 +36,7 @@ impl Titrate {
 }
 
 impl Release for Titrate {
-    fn observe(&mut self, slack: Option<u64>, pressure: Pressure) {
+    fn observe(&mut self, _now: Timestamp, slack: Option<u64>, pressure: Pressure) {
         let sparing = !pressure.throttled
             && !pressure.breached
             && slack.is_some_and(|slack| slack >= self.config.step.get());
@@ -97,7 +97,7 @@ mod tests {
 
     fn spare(release: &mut Titrate, intervals: u32) {
         for _ in 0..intervals {
-            release.observe(Some(256 * MIB), CALM);
+            release.observe(at(0), Some(256 * MIB), CALM);
         }
     }
 
@@ -117,7 +117,7 @@ mod tests {
         let mut release = titrate();
 
         spare(&mut release, 2);
-        release.observe(Some(255 * MIB), CALM);
+        release.observe(at(0), Some(255 * MIB), CALM);
 
         assert!(!release.spared());
     }
@@ -128,6 +128,7 @@ mod tests {
 
         spare(&mut release, 2);
         release.observe(
+            at(0),
             Some(256 * MIB),
             Pressure {
                 throttled: true,

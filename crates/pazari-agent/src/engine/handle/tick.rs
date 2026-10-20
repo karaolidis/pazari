@@ -31,7 +31,7 @@ impl Engine {
 
         let pressure = self.counters.take();
 
-        self.world.note_interval(pressure);
+        self.world.note_interval(now, pressure);
 
         self.transition(now, fx, |phase, step| phase.advance(step, pressure));
         self.transition(now, fx, |phase, step| phase.on_interval(step, pressure));

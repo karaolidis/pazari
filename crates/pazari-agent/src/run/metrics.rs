@@ -3,9 +3,12 @@ use pazari_metrics::{
 };
 use pazari_proto::{GuestMessage, HostMessage};
 
-use crate::engine::{Action, Engine, Event, Phase, PhaseKind, Snapshot};
+use crate::engine::{Action, Engine, Event, PhaseKind, Snapshot, Tally};
 
 const PREFIX: &str = "pazari_agent";
+
+/// The labels of a series that carries none, and is absent until it has a value.
+type Unlabelled = [(&'static str, &'static str); 0];
 
 #[derive(Debug, Default)]
 pub struct Observer(Option<Series>);
@@ -85,8 +88,7 @@ impl Observer {
             return;
         };
 
-        let phase = engine.phase();
-        let kind = phase.kind();
+        let kind = engine.phase().kind();
 
         for candidate in PhaseKind::ALL {
             series
@@ -97,33 +99,20 @@ impl Observer {
                 .set(i64::from(candidate == kind));
         }
 
-        if series.was.map(Phase::kind) != Some(kind) {
-            match phase {
-                Phase::Exhausted(_) => {
-                    series.exhaustions.inc();
-                }
-                Phase::Reclaiming(_) => {
-                    series.throttle_reclaims.inc();
-                }
-                Phase::Steady(_) | Phase::Growing(_) | Phase::Releasing(_) => {}
-            }
-
-            if matches!(series.was, Some(Phase::Reclaiming(_)))
-                && !matches!(phase, Phase::Steady(_))
-            {
-                series.throttle_reclaim_shortfalls.inc();
-            }
-        }
-
-        series.was = Some(phase);
+        series.publish(engine.tally());
 
         series.limits.high.set_saturating(engine.high());
         series.limits.max.set_saturating(engine.max());
         series.limits.total_mem.set_saturating(engine.total_mem());
-        series
-            .limits
-            .ceiling
-            .set_saturating(engine.ceiling().unwrap_or(0));
+
+        if let Some(ceiling) = engine.ceiling() {
+            series
+                .limits
+                .ceiling
+                .get_or_create(&[])
+                .set_saturating(ceiling);
+        }
+
         series
             .limits
             .brake_released
@@ -154,10 +143,28 @@ struct Series {
     connections: Counter,
     disconnections: Counter,
 
-    was: Option<Phase>,
+    published: Tally,
 }
 
 impl Series {
+    /// Brings the counters up to the engine's tally.
+    fn publish(&mut self, tally: Tally) {
+        self.exhaustions
+            .inc_by(tally.exhaustions.saturating_sub(self.published.exhaustions));
+        self.throttle_reclaims.inc_by(
+            tally
+                .throttle_reclaims
+                .saturating_sub(self.published.throttle_reclaims),
+        );
+        self.throttle_reclaim_shortfalls.inc_by(
+            tally
+                .throttle_reclaim_shortfalls
+                .saturating_sub(self.published.throttle_reclaim_shortfalls),
+        );
+
+        self.published = tally;
+    }
+
     fn register(&self, registry: &mut Registry) {
         self.limits.register(registry);
         self.reading.register(registry);
@@ -239,7 +246,7 @@ struct Limits {
     high: Gauge,
     max: Gauge,
     total_mem: Gauge,
-    ceiling: Gauge,
+    ceiling: Family<Unlabelled, Gauge>,
     brake_released: Gauge,
 }
 
@@ -265,7 +272,7 @@ impl Limits {
         );
         registry.register_with_unit(
             "ceiling",
-            "The most memory the host allows, 0 until it has said",
+            "The most memory the host allows",
             Unit::Bytes,
             self.ceiling.clone(),
         );
@@ -342,6 +349,12 @@ mod tests {
         assert!(text.contains(series), "{series} is not in:\n{text}");
     }
 
+    fn lacks(registry: &Registry, series: &str) {
+        let text = registry.encoded().expect("a registry encodes");
+
+        assert!(!text.contains(series), "{series} is in:\n{text}");
+    }
+
     fn connected() -> Event {
         Event::Connected {
             now: at(0),
@@ -373,7 +386,10 @@ mod tests {
         );
         carries(&registry, &format!("pazari_agent_memory_max_bytes {MAX0}"));
         carries(&registry, &format!("pazari_agent_total_mem_bytes {BOOT}"));
-        carries(&registry, &format!("pazari_agent_ceiling_bytes {CEILING}"));
+        carries(
+            &registry,
+            &format!("pazari_agent_ceiling_bytes{{}} {CEILING}"),
+        );
         carries(&registry, "pazari_agent_brake_released 0");
         carries(&registry, "pazari_agent_connected 1");
 
@@ -384,13 +400,13 @@ mod tests {
     }
 
     #[test]
-    fn a_ceiling_the_host_has_not_named_reads_as_nothing() {
+    fn a_ceiling_the_host_has_not_named_is_not_published() {
         let (mut observer, registry) = Observer::new();
         let (engine, _) = Engine::try_new(config(), boot()).expect("a workable boot");
 
         observer.refresh(&engine);
 
-        carries(&registry, "pazari_agent_ceiling_bytes 0");
+        lacks(&registry, "pazari_agent_ceiling_bytes{");
         carries(&registry, "pazari_agent_mode{mode=\"steady\"} 1");
         carries(&registry, "pazari_agent_connected 0");
     }
@@ -557,6 +573,55 @@ mod tests {
         carries(
             &registry,
             "pazari_agent_throttle_reclaim_shortfalls_total 1",
+        );
+    }
+
+    #[test]
+    fn a_fall_between_refreshes_is_still_counted() {
+        let (mut observer, registry) = Observer::new();
+        let mut engine = started_with(config(), BOOT);
+
+        wake(&mut engine, at(100), 1);
+        observer.refresh(&engine);
+
+        carries(&registry, "pazari_agent_exhaustions_total 1");
+
+        engine.handle(Event::TotalChanged {
+            now: at(101),
+            total_mem: 2560 * MIB,
+        });
+        wake(&mut engine, at(102), 2);
+        observer.refresh(&engine);
+
+        carries(&registry, "pazari_agent_mode{mode=\"exhausted\"} 1");
+        carries(&registry, "pazari_agent_exhaustions_total 2");
+    }
+
+    #[test]
+    fn a_throttle_reclaim_between_refreshes_is_still_counted() {
+        let (mut observer, registry) = Observer::new();
+        let mut engine = started_with(
+            EngineConfig {
+                throttle: ThrottleMode::Reclaim {
+                    amount: bytes(256 * MIB),
+                },
+                ..config()
+            },
+            CEILING,
+        );
+
+        wake(&mut engine, at(100), 1);
+        observer.refresh(&engine);
+
+        reclaimed(&mut engine, at(101), 256 * MIB);
+        wake(&mut engine, at(102), 2);
+        observer.refresh(&engine);
+
+        carries(&registry, "pazari_agent_mode{mode=\"reclaiming\"} 1");
+        carries(&registry, "pazari_agent_throttle_reclaims_total 2");
+        carries(
+            &registry,
+            "pazari_agent_throttle_reclaim_shortfalls_total 0",
         );
     }
 

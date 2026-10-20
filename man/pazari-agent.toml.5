@@ -410,7 +410,8 @@ equals
 The guest's
 .Va MemTotal .
 .It Va ceiling_bytes
-The ceiling set by the host, or 0 if not yet known.
+The ceiling set by the host.
+Absent until the host has set one.
 .It Va workload_usage_bytes
 .Va memory.current
 of the workload cgroup.

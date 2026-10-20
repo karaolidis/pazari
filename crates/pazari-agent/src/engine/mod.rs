@@ -14,6 +14,7 @@ mod phase;
 mod refusal;
 mod release;
 mod streak;
+mod tally;
 mod world;
 
 #[cfg(test)]
@@ -32,6 +33,7 @@ pub use crate::engine::{
     error::EngineError,
     event::{BootInfo, Event, Snapshot},
     phase::{Phase, PhaseKind},
+    tally::Tally,
 };
 use crate::engine::{
     counters::CounterTracker,
@@ -190,6 +192,12 @@ impl Engine {
     #[must_use]
     pub const fn pending_request(&self) -> Option<RequestId> {
         self.phase.pending_request()
+    }
+
+    /// The transitions made since the engine started.
+    #[must_use]
+    pub const fn tally(&self) -> Tally {
+        self.world.tally()
     }
 }
 #[cfg(test)]

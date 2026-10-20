@@ -15,6 +15,7 @@ use crate::engine::{
     refusal::Refusal,
     release::{Release, ReleaseStrategy},
     streak::Streak,
+    tally::{Tally, Transition},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -140,6 +141,7 @@ pub struct World {
     release: ReleaseStrategy,
     calm: Streak,
     reclaim: Reclaim,
+    tally: Tally,
 }
 
 impl World {
@@ -152,6 +154,7 @@ impl World {
             release: ReleaseStrategy::from(config.release),
             calm: Streak::BROKEN,
             reclaim: Reclaim::Idle,
+            tally: Tally::default(),
             config,
         }
     }
@@ -174,6 +177,14 @@ impl World {
 
     pub const fn connected(&self) -> bool {
         self.link.connected()
+    }
+
+    pub const fn tally(&self) -> Tally {
+        self.tally
+    }
+
+    pub const fn record(&mut self, transition: Transition) {
+        self.tally.record(transition);
     }
 
     pub const fn take_id(&mut self) -> RequestId {

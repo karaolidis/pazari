@@ -14,6 +14,7 @@ use crate::engine::{
         steady::Steady,
     },
     refusal::Refusal,
+    tally::Transition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +52,8 @@ impl Exhausted {
                     ceiling = ?step.limits().ceiling(),
                     "workload demand exceeds its ceiling",
                 );
+
+                step.world.record(Transition::Exhaustion);
 
                 step.now
             }
@@ -268,6 +271,11 @@ mod tests {
         assert_eq!(asked, (105..=111).collect::<Vec<_>>());
         assert!(matches!(engine.phase(), Phase::Exhausted(_)));
         assert!(engine.brake_released());
+        assert_eq!(
+            engine.tally().exhaustions,
+            1,
+            "each refused retry counted as another exhaustion"
+        );
     }
 
     #[test]

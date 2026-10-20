@@ -20,6 +20,7 @@ use crate::engine::{
     effects::Effects,
     limits::{Brake, Limits, Moved},
     refusal::Refusal,
+    tally::Transition,
     world::{Guest, World},
 };
 
@@ -182,6 +183,8 @@ impl Phase {
         let Some(amount) = step.world.throttle_reclaim() else {
             return Growing::braked(step);
         };
+
+        step.world.record(Transition::ThrottleReclaim);
 
         if step.world.reclaiming() {
             return Reclaiming::waiting(step, amount);

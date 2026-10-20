@@ -7,6 +7,7 @@ use tracing::debug;
 use crate::engine::{
     phase::{Phase, State, Step, growing::Growing, steady::Steady},
     refusal::Refusal,
+    tally::Transition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,12 @@ impl Reclaiming {
             braked: step.now,
             stage: Stage::Waiting { wanted: amount },
         })
+    }
+
+    fn fell_short(step: &mut Step<'_>, braked: Timestamp) -> Phase {
+        step.world.record(Transition::ThrottleReclaimShortfall);
+
+        Growing::braked_at(step, braked)
     }
 
     fn run(step: &mut Step<'_>, braked: Timestamp, amount: NonZeroU64) -> Phase {
@@ -85,7 +92,7 @@ impl State for Reclaiming {
                 };
 
                 if step.world.throttle_reclaim().is_none() {
-                    return Growing::braked_at(step, self.braked);
+                    return Self::fell_short(step, self.braked);
                 }
 
                 Self::run(step, self.braked, left)
@@ -102,7 +109,7 @@ impl State for Reclaiming {
                     "the reclaim fell short; asking the host",
                 );
 
-                Growing::braked_at(step, self.braked)
+                Self::fell_short(step, self.braked)
             }
         }
     }
@@ -156,6 +163,8 @@ mod tests {
             vec![request(1, BOOT, 2560 * MIB)]
         );
         assert!(matches!(engine.phase(), Phase::Growing(_)));
+        assert_eq!(engine.tally().throttle_reclaims, 1);
+        assert_eq!(engine.tally().throttle_reclaim_shortfalls, 1);
     }
 
     #[test]

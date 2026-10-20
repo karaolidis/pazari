@@ -108,7 +108,7 @@ impl Kind {
     const fn advance(&self, frontier: u64) -> u64 {
         match *self {
             Self::Grow { target_bytes, .. } => frontier.saturating_add(target_bytes.get()),
-            Self::Release { target_bytes, .. } => frontier.saturating_sub(target_bytes.get()),
+            Self::Release { target_bytes, .. } => frontier - target_bytes.get(),
             Self::Churn { .. } | Self::Hold { .. } | Self::Cache { .. } => frontier,
         }
     }
@@ -154,7 +154,7 @@ impl Plan {
                     return Err(PlanError::Underflow {
                         index,
                         spec: spec.to_owned(),
-                        over: target_bytes.get().saturating_sub(frontier),
+                        over: target_bytes.get() - frontier,
                         frontier,
                     });
                 }

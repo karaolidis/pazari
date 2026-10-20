@@ -17,7 +17,7 @@ pub use crate::runtime::{
     config::{Backend, Paths, ReclaimConfig, RuntimeConfig, ThpAlways},
     error::RuntimeError,
     preflight::{Check, CheckKind, Preflight, Report, Severity},
-    reclaim::{ReclaimHandle, Reclaimer},
+    reclaim::Reclaimer,
     snapshot::{Snapshots, Ticker},
     throttle::ThrottleWatcher,
     topology::{HotplugListener, Topology},

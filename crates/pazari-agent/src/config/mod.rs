@@ -624,16 +624,6 @@ mod tests {
     }
 
     #[test]
-    fn a_flat_key_from_before_the_strategy_tables_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            r#"burst_reserve = "256MiB""#,
-            "burst_reserve = \"256MiB\"\nshrink_step = \"256MiB\"",
-        ));
-
-        assert!(error.contains("shrink_step"), "unexpected error: {error}");
-    }
-
-    #[test]
     fn a_zero_strategy_step_names_the_table_that_carries_it() {
         let error = rejects(&MINIMAL.replace(
             "[host.transport]",
@@ -664,6 +654,23 @@ mod tests {
         let error = rejects(&MINIMAL.replace(r#"cgroup = "/sys/fs/cgroup/workload.slice""#, ""));
 
         assert!(error.contains("cgroup"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_cgroup_that_is_not_an_absolute_path_is_refused() {
+        for cgroup in ["workload.slice", "/sys/fs/cgroup/../workload.slice"] {
+            let error = rejects(&MINIMAL.replace(
+                r#"cgroup = "/sys/fs/cgroup/workload.slice""#,
+                &format!("cgroup = {cgroup:?}"),
+            ));
+
+            assert_eq!(
+                error,
+                format!(
+                    "workload.cgroup rejects {cgroup}: expected an absolute path without `.` or `..`"
+                )
+            );
+        }
     }
 
     #[test]

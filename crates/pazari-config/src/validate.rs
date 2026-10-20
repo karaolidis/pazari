@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt,
+    path::{Component, PathBuf},
+};
 
 use pazari_types::RangeError;
 
@@ -36,6 +39,28 @@ impl<T> Positive<T> for Option<T> {
         self.ok_or_else(|| ConfigError::Zero {
             field: field.into(),
             what,
+        })
+    }
+}
+
+/// Names the field a path that has to stand on its own came from.
+pub trait Absolute {
+    fn absolute(self, field: impl Into<String>) -> Result<PathBuf, ConfigError>;
+}
+
+impl Absolute for PathBuf {
+    fn absolute(self, field: impl Into<String>) -> Result<PathBuf, ConfigError> {
+        let mut components = self.components();
+
+        if components.next() == Some(Component::RootDir)
+            && components.all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Ok(self);
+        }
+
+        Err(ConfigError::Relative {
+            field: field.into(),
+            path: self,
         })
     }
 }

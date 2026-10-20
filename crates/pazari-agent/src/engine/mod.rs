@@ -25,7 +25,7 @@ use pazari_types::Timestamp;
 use tracing::debug;
 
 pub use crate::engine::{
-    action::{Action, OomGroup},
+    action::{Action, Ground, OomGroup},
     config::{
         EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, SweepConfig,
         ThrottleMode, TitrateConfig,
@@ -50,10 +50,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn try_new(
-        config: EngineConfig,
-        boot: BootInfo,
-    ) -> Result<(Self, Vec<Action>), EngineError> {
+    pub fn try_new(config: EngineConfig, boot: BootInfo) -> Result<(Self, Ground), EngineError> {
         let floor = config
             .service_reserve
             .saturating_add(config.burst_reserve.get())
@@ -76,16 +73,16 @@ impl Engine {
 
         let limits = engine.world.limits();
 
-        let actions = vec![
-            Action::SetMax(limits.max()),
-            Action::SetHigh(limits.high()),
-            Action::SetOomGroup(match config.exhaustion {
+        let ground = Ground {
+            max: limits.max(),
+            high: limits.high(),
+            oom_group: match config.exhaustion {
                 ExhaustionMode::Stall { .. } => OomGroup::PerProcess,
                 ExhaustionMode::Kill => OomGroup::Whole,
-            }),
-        ];
+            },
+        };
 
-        Ok((engine, actions))
+        Ok((engine, ground))
     }
 
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
@@ -222,15 +219,15 @@ mod tests {
 
     #[test]
     fn new_establishes_ground_state() {
-        let (engine, actions) = Engine::try_new(config(), boot()).expect("a workable boot");
+        let (engine, ground) = Engine::try_new(config(), boot()).expect("a workable boot");
 
         assert_eq!(
-            actions,
-            vec![
-                Action::SetMax(MAX0),
-                Action::SetHigh(HIGH0),
-                Action::SetOomGroup(OomGroup::PerProcess),
-            ]
+            ground,
+            Ground {
+                max: MAX0,
+                high: HIGH0,
+                oom_group: OomGroup::PerProcess,
+            }
         );
         assert!(matches!(engine.phase(), Phase::Steady(_)));
         assert_eq!(engine.high(), HIGH0);
@@ -243,9 +240,9 @@ mod tests {
             exhaustion: ExhaustionMode::Kill,
             ..config()
         };
-        let (_, actions) = Engine::try_new(config, boot()).expect("a workable boot");
+        let (_, ground) = Engine::try_new(config, boot()).expect("a workable boot");
 
-        assert_eq!(actions[2], Action::SetOomGroup(OomGroup::Whole));
+        assert_eq!(ground.oom_group, OomGroup::Whole);
     }
 
     #[test]
@@ -872,7 +869,7 @@ mod tests {
         release: ReleaseConfig,
         timeline: &[(u64, Move)],
     ) -> Result<Vec<PhaseKind>, TestCaseError> {
-        let (mut engine, actions) =
+        let (mut engine, _) =
             Engine::try_new(properties_config(throttle, release), boot()).expect("a workable boot");
         let mut now = Timestamp::START;
         let mut model = Model {
@@ -882,10 +879,23 @@ mod tests {
         };
         let mut visited = vec![engine.phase().kind()];
 
-        check(&engine, &actions, &mut model)?;
+        check(&engine, &[], &mut model)?;
 
         for (gap, step) in timeline {
             now = now.saturating_add(Duration::from_millis(*gap));
+
+            // The session connects and disconnects in turn, and passes host
+            // messages on only in between; a reclaim finishes only once started.
+            let possible = match *step {
+                Move::Connect { .. } => !model.connected,
+                Move::Reclaimed { .. } => model.reclaiming,
+                Move::Tick { .. } | Move::Wake { .. } | Move::Plug { .. } => true,
+                _ => model.connected,
+            };
+
+            if !possible {
+                continue;
+            }
 
             let event = match *step {
                 Move::Tick {

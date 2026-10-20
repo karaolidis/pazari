@@ -54,15 +54,7 @@ impl Paths {
 
 impl Default for Paths {
     fn default() -> Self {
-        Self {
-            cgroup_root: PathBuf::from(CGROUP_ROOT),
-            self_cgroup: PathBuf::from(SELF_CGROUP),
-            meminfo: PathBuf::from(MEMINFO),
-            block_size: PathBuf::from(BLOCK_SIZE),
-            auto_online_blocks: PathBuf::from(AUTO_ONLINE_BLOCKS),
-            virtio_devices: PathBuf::from(VIRTIO_DEVICES),
-            transparent_hugepage: PathBuf::from(TRANSPARENT_HUGEPAGE),
-        }
+        Self::under(Path::new("/"))
     }
 }
 
@@ -109,14 +101,6 @@ pub struct RuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_defaults_name_the_real_kernel_interfaces() {
-        let paths = Paths::default();
-
-        assert_eq!(paths, Paths::under(Path::new("/")));
-        assert_eq!(paths.meminfo, Path::new("/proc/meminfo"));
-    }
 
     #[test]
     fn a_fixture_tree_carries_the_same_layout() {

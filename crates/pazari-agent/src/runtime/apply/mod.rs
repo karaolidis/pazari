@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use pazari_proto::GuestMessage;
 use pazari_types::Clock;
-use tracing::{debug, trace};
+use tracing::trace;
 
 use crate::{
-    engine::Action,
+    engine::{Action, Ground},
     runtime::{
         cgroup::{Cgroup, Limit},
         config::ReclaimConfig,
@@ -34,6 +34,12 @@ impl<C: Cgroup + 'static> Applier<C> {
         &mut self.reclaimer
     }
 
+    pub async fn ground(&self, ground: Ground) -> Result<(), RuntimeError> {
+        self.cgroup.set_max(Limit::Bytes(ground.max)).await?;
+        self.cgroup.set_high(Limit::Bytes(ground.high)).await?;
+        self.cgroup.set_oom_group(ground.oom_group).await
+    }
+
     pub async fn apply(
         &mut self,
         actions: Vec<Action>,
@@ -49,12 +55,7 @@ impl<C: Cgroup + 'static> Applier<C> {
                 Action::StartReclaim { bytes } => {
                     self.reclaimer.start(bytes)?;
                 }
-                Action::CancelReclaim => {
-                    if let Some(reclaim) = self.reclaimer.handle() {
-                        debug!("cancelling the in-flight reclaim");
-                        reclaim.cancel();
-                    }
-                }
+                Action::CancelReclaim => self.reclaimer.cancel(),
                 Action::Send(message) => send(message),
             }
         }
@@ -149,13 +150,14 @@ mod tests {
 
         applier
             .apply(
-                vec![Action::StartReclaim { bytes: 128 * MIB }],
+                vec![Action::StartReclaim {
+                    bytes: bytes(128 * MIB),
+                }],
                 &mut |message| sent.push(message),
             )
             .await
             .unwrap();
 
-        assert!(applier.reclaimer().is_running());
         assert_eq!(sent, Vec::new());
 
         applier.reclaimer().finished().await.unwrap();
@@ -181,7 +183,9 @@ mod tests {
         let mut applier = applier(&cgroup);
         let mut sent = Vec::new();
 
-        let reclaim = Action::StartReclaim { bytes: 512 * MIB };
+        let reclaim = Action::StartReclaim {
+            bytes: bytes(512 * MIB),
+        };
 
         let error = applier
             .apply(vec![reclaim.clone(), reclaim], &mut |message| {
@@ -205,7 +209,9 @@ mod tests {
 
         applier
             .apply(
-                vec![Action::StartReclaim { bytes: 1024 * MIB }],
+                vec![Action::StartReclaim {
+                    bytes: bytes(1024 * MIB),
+                }],
                 &mut |message| sent.push(message),
             )
             .await
@@ -216,14 +222,6 @@ mod tests {
             })
             .await
             .unwrap();
-
-        assert!(
-            applier
-                .reclaimer()
-                .handle()
-                .expect("a running reclaim")
-                .is_cancelled()
-        );
 
         applier.reclaimer().finished().await.unwrap();
 
@@ -243,7 +241,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!applier.reclaimer().is_running());
         assert_eq!(cgroup.calls(), Vec::new());
     }
 }

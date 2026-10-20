@@ -94,12 +94,27 @@ impl Guest {
         }
     }
 
+    /// Whether the guest cannot take a reclaim: it has not negotiated, or one
+    /// is outstanding.
     #[must_use]
     pub fn asked(&self) -> bool {
         self.session
             .as_ref()
             .and_then(Session::negotiated)
             .is_none_or(|session| session.reclaim.is_some())
+    }
+
+    /// The session a reclaim goes to, unless the guest is [`asked`](Self::asked).
+    pub fn askable(&mut self) -> Option<(&PeerId, &mut Negotiated)> {
+        let Session { peer, phase } = self.session.as_mut()?;
+
+        let session = phase.negotiated_mut()?;
+
+        if session.reclaim.is_some() {
+            return None;
+        }
+
+        Some((peer, session))
     }
 
     /// Whether a shrink is on its way to the device.
@@ -140,14 +155,24 @@ impl Guest {
     /// Absent until the device has reported a size.
     #[must_use]
     pub fn view<'a>(&'a self, id: GuestId, spec: &'a GuestSpec) -> Option<GuestView<'a>> {
-        Some(GuestView {
+        Some(self.view_at(id, spec, self.geometry?))
+    }
+
+    #[must_use]
+    pub fn view_at<'a>(
+        &'a self,
+        id: GuestId,
+        spec: &'a GuestSpec,
+        geometry: Geometry,
+    ) -> GuestView<'a> {
+        GuestView {
             id,
             spec,
-            geometry: self.geometry?,
+            geometry,
             requested: self.requested(),
             session: self.session.as_ref().and_then(Session::negotiated),
             granted: self.granted,
-        })
+        }
     }
 }
 
@@ -220,26 +245,26 @@ impl Guests {
     }
 
     #[must_use]
-    pub fn get(&self, id: GuestId) -> Option<&Entry> {
-        self.entries.get(id.index())
+    pub fn get(&self, id: GuestId) -> &Entry {
+        &self.entries[id.index()]
     }
 
-    pub fn get_mut(&mut self, id: GuestId) -> Option<&mut Entry> {
-        self.entries.get_mut(id.index())
+    pub fn get_mut(&mut self, id: GuestId) -> &mut Entry {
+        &mut self.entries[id.index()]
     }
 
     #[must_use]
-    pub fn state(&self, id: GuestId) -> Option<&Guest> {
-        self.get(id).map(|entry| &entry.state)
+    pub fn state(&self, id: GuestId) -> &Guest {
+        &self.get(id).state
     }
 
-    pub fn state_mut(&mut self, id: GuestId) -> Option<&mut Guest> {
-        self.get_mut(id).map(|entry| &mut entry.state)
+    pub fn state_mut(&mut self, id: GuestId) -> &mut Guest {
+        &mut self.get_mut(id).state
     }
 
     #[must_use]
     pub fn session(&self, id: GuestId) -> Option<&Session> {
-        self.state(id)?.session.as_ref()
+        self.state(id).session.as_ref()
     }
 
     #[must_use]
@@ -248,17 +273,17 @@ impl Guests {
     }
 
     pub fn session_mut(&mut self, id: GuestId) -> Option<&mut Session> {
-        self.state_mut(id)?.session.as_mut()
+        self.state_mut(id).session.as_mut()
     }
 
     #[must_use]
-    pub fn ceiling(&self, id: GuestId) -> Option<NonZeroU64> {
-        self.get(id).map(|entry| entry.spec.ceiling)
+    pub fn ceiling(&self, id: GuestId) -> NonZeroU64 {
+        self.get(id).spec.ceiling
     }
 
     #[must_use]
     pub fn name(&self, id: GuestId) -> &str {
-        self.get(id).map_or("?", |entry| entry.spec.name.as_str())
+        &self.get(id).spec.name
     }
 
     #[must_use]
@@ -278,24 +303,13 @@ impl Guests {
             .map(|(index, entry)| (GuestId::from_index(index), entry))
     }
 
+    /// Every guest but `asking` that has reported a size.
     #[must_use]
-    pub fn views(&self, asking: GuestId) -> (Option<GuestView<'_>>, Vec<GuestView<'_>>) {
-        let mut mine = None;
-        let mut others = Vec::with_capacity(self.len());
-
-        for (id, entry) in self.iter() {
-            let Some(view) = entry.view(id) else {
-                continue;
-            };
-
-            if id == asking {
-                mine = Some(view);
-            } else {
-                others.push(view);
-            }
-        }
-
-        (mine, others)
+    pub fn others(&self, asking: GuestId) -> Vec<GuestView<'_>> {
+        self.iter()
+            .filter(|&(id, _)| id != asking)
+            .filter_map(|(id, entry)| entry.view(id))
+            .collect()
     }
 }
 

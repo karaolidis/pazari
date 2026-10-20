@@ -212,11 +212,11 @@ impl World {
     }
 
     pub fn rebrake(&mut self, fx: &mut Effects) {
-        self.limits.reapply(fx);
+        self.limits.apply(self.limits.brake(), fx);
     }
 
     pub fn start_reclaim(&mut self, bytes: NonZeroU64, fx: &mut Effects) {
-        fx.emit(Action::StartReclaim { bytes: bytes.get() });
+        fx.emit(Action::StartReclaim { bytes });
 
         self.reclaim = Reclaim::Running;
     }
@@ -323,8 +323,8 @@ impl World {
     }
 
     /// How much to give back this interval, if anything.
-    pub fn release_due(&mut self, now: Timestamp, pressure: Pressure) -> Option<NonZeroU64> {
-        self.release.due(now, pressure)
+    pub fn release_due(&self, now: Timestamp) -> Option<NonZeroU64> {
+        self.release.due(now)
     }
 
     /// Whether the workload has been calm long enough to end an exhaustion.
@@ -342,11 +342,7 @@ impl World {
 
     /// How far the workload's usage reaches past the memory the guest has.
     fn deficit(&self) -> Option<u64> {
-        let need = self
-            .guest
-            .usage()?
-            .saturating_add(self.limits.service_reserve())
-            .saturating_add(self.limits.burst_reserve());
+        let need = self.guest.usage()?.saturating_add(self.limits.reserves());
 
         Some(need.saturating_sub(self.limits.total_mem()))
     }
@@ -564,7 +560,6 @@ mod tests {
         let left = 4096 * MIB - given;
 
         assert_eq!(left, SERVICE + BURST + BLOCK);
-        assert_eq!(world.limits().reserves() + BLOCK, left);
     }
 
     #[test]
@@ -579,11 +574,11 @@ mod tests {
         let mut world = world();
         world.connect(Duration::ZERO, 0);
 
-        assert_eq!(world.take_id().get(), 1);
-        assert_eq!(world.take_id().get(), 2);
+        assert_eq!(world.take_id(), RequestId(1));
+        assert_eq!(world.take_id(), RequestId(2));
 
         world.connect(Duration::ZERO, 0);
 
-        assert_eq!(world.take_id().get(), 1);
+        assert_eq!(world.take_id(), RequestId(1));
     }
 }

@@ -105,10 +105,6 @@ pub trait State: Copy {
         None
     }
 
-    fn on_connected(self, _step: &mut Step<'_>) -> Phase {
-        self.stay()
-    }
-
     fn on_disconnected(self, _step: &mut Step<'_>) -> Phase {
         self.stay()
     }

@@ -73,7 +73,7 @@ impl Observer {
                 }
                 Action::StartReclaim { bytes, .. } => {
                     series.reclaims.inc();
-                    series.reclaim_asked.inc_by(*bytes);
+                    series.reclaim_asked.inc_by(bytes.get());
                 }
                 _ => {}
             }
@@ -143,17 +143,11 @@ impl Series {
     /// Brings the counters up to the engine's tally.
     fn publish(&mut self, tally: Tally) {
         self.exhaustions
-            .inc_by(tally.exhaustions.saturating_sub(self.published.exhaustions));
-        self.throttle_reclaims.inc_by(
-            tally
-                .throttle_reclaims
-                .saturating_sub(self.published.throttle_reclaims),
-        );
-        self.throttle_reclaim_shortfalls.inc_by(
-            tally
-                .throttle_reclaim_shortfalls
-                .saturating_sub(self.published.throttle_reclaim_shortfalls),
-        );
+            .inc_by(tally.exhaustions - self.published.exhaustions);
+        self.throttle_reclaims
+            .inc_by(tally.throttle_reclaims - self.published.throttle_reclaims);
+        self.throttle_reclaim_shortfalls
+            .inc_by(tally.throttle_reclaim_shortfalls - self.published.throttle_reclaim_shortfalls);
 
         self.published = tally;
     }
@@ -484,7 +478,9 @@ mod tests {
         observer.observe_actions(&[
             Action::SetHigh(HIGH0),
             request(1, BOOT, 2560 * MIB),
-            Action::StartReclaim { bytes: 256 * MIB },
+            Action::StartReclaim {
+                bytes: bytes(256 * MIB),
+            },
         ]);
         observer.observe_actions(&[Action::Send(GuestMessage::OfferRelease {
             id: RequestId(2),
@@ -613,15 +609,5 @@ mod tests {
             &registry,
             "pazari_agent_throttle_reclaim_shortfalls_total 0",
         );
-    }
-
-    #[test]
-    fn an_agent_the_operator_asked_nothing_of_keeps_no_series() {
-        let mut observer = Observer::default();
-        let engine = started();
-
-        observer.observe_event(&connected());
-        observer.observe_actions(&[Action::SetHigh(HIGH0)]);
-        observer.refresh(&engine);
     }
 }

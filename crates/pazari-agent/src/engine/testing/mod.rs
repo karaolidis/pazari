@@ -179,8 +179,10 @@ pub const fn request(id: u64, current: u64, target: u64) -> Action {
     })
 }
 
-pub const fn reclaim(bytes: u64) -> Action {
-    Action::StartReclaim { bytes }
+pub const fn reclaim(value: u64) -> Action {
+    Action::StartReclaim {
+        bytes: bytes(value),
+    }
 }
 
 pub const fn deny(id: RequestId) -> HostMessage {

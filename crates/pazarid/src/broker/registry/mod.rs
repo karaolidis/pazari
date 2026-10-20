@@ -71,13 +71,8 @@ impl Registry {
     }
 
     #[must_use]
-    pub fn spec(&self, id: GuestId) -> Option<&GuestSpec> {
-        self.specs.get(id.index())
-    }
-
-    #[must_use]
-    pub fn ceiling(&self, id: GuestId) -> Option<NonZeroU64> {
-        self.spec(id).map(|spec| spec.ceiling)
+    pub fn spec(&self, id: GuestId) -> &GuestSpec {
+        &self.specs[id.index()]
     }
 
     #[must_use]
@@ -119,12 +114,9 @@ mod tests {
         assert_eq!(registry.lookup(&vsock(5)), None);
         assert_eq!(registry.lookup(&unix("/run/pazari/one.sock")), None);
 
-        assert_eq!(registry.ceiling(one), Some(bytes(CEILING)));
-        assert_eq!(registry.ceiling(two), Some(bytes(512 * MIB)));
-        assert_eq!(
-            registry.spec(one).map(|spec| spec.name.as_str()),
-            Some("one")
-        );
+        assert_eq!(registry.spec(one).ceiling, bytes(CEILING));
+        assert_eq!(registry.spec(two).ceiling, bytes(512 * MIB));
+        assert_eq!(registry.spec(one).name, "one");
         assert_eq!(registry.len(), 2);
         assert!(!registry.is_empty());
     }
@@ -162,20 +154,5 @@ mod tests {
             }
         );
         assert_eq!(registry.lookup(&vsock(4)), None);
-    }
-
-    #[test]
-    fn a_guest_outside_the_registry_has_no_ceiling() {
-        let mut ours = Registry::new();
-        let mut theirs = Registry::new();
-
-        ours.insert(vsock(3), guest("one", CEILING)).unwrap();
-        theirs.insert(vsock(9), guest("other", CEILING)).unwrap();
-        let stranger = theirs
-            .insert(vsock(10), guest("stranger", CEILING))
-            .unwrap();
-
-        assert_eq!(ours.ceiling(stranger), None);
-        assert_eq!(ours.spec(stranger), None);
     }
 }

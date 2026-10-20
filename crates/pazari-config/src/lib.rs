@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 
 pub use crate::{
     error::ConfigError,
-    validate::{Positive, Ranged, ordered},
+    validate::{Absolute, Positive, Ranged, ordered},
 };
 
 pub trait Settings: Sized {
@@ -22,17 +22,6 @@ pub trait Settings: Sized {
     type Error: From<ConfigError>;
 
     fn resolve(file: Self::File) -> Result<Self, Self::Error>;
-
-    /// Tidies the printed template.
-    #[must_use]
-    fn polish(template: &str) -> String {
-        // doku pads the blank comment lines between enum variant fields.
-        let mut lines = template.lines().map(str::trim_end).collect::<Vec<_>>();
-
-        spaced(&mut lines);
-
-        lines.join("\n")
-    }
 
     fn load(path: &Path) -> Result<Self, Self::Error> {
         let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
@@ -63,11 +52,21 @@ pub trait Settings: Sized {
             ..Default::default()
         };
 
-        let mut template = Self::polish(&doku::to_toml_fmt::<Self::File>(&formatting));
+        let mut template = polish(&doku::to_toml_fmt::<Self::File>(&formatting));
         template.push('\n');
 
         template
     }
+}
+
+/// Tidies the printed template.
+fn polish(template: &str) -> String {
+    // doku pads the blank comment lines between enum variant fields.
+    let mut lines = template.lines().map(str::trim_end).collect::<Vec<_>>();
+
+    spaced(&mut lines);
+
+    lines.join("\n")
 }
 
 /// Puts a table's own comment under the blank line that separates it from the

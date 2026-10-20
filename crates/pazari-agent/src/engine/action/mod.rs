@@ -1,4 +1,14 @@
+use std::num::NonZeroU64;
+
 use pazari_proto::GuestMessage;
+
+/// The limits the workload starts under, before the engine handles any event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ground {
+    pub max: u64,
+    pub high: u64,
+    pub oom_group: OomGroup,
+}
 
 /// Whether the kernel's OOM killer takes the workload as a whole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +26,7 @@ pub enum Action {
     SetMax(u64),
     SetOomGroup(OomGroup),
 
-    StartReclaim { bytes: u64 },
+    StartReclaim { bytes: NonZeroU64 },
 
     CancelReclaim,
 

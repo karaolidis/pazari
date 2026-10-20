@@ -25,7 +25,7 @@ use pazari_transport::{
 use pazari_types::{Clock, Delay, Interval, Psi, Timestamp};
 use pazarid::{
     broker::{
-        Action, Broker, Event, Grantable, Guest, GuestId, GuestSpec, Negotiated, Policy, Registry,
+        Action, Broker, Event, Grantable, GuestId, GuestSpec, Negotiated, Policy, Registry,
         Revocation, StalledShrinks,
     },
     run::{Peers, Report},
@@ -317,7 +317,7 @@ impl Harness {
             total_mem: BOOT,
         };
 
-        let (engine, emitted) = Engine::try_new(engine_config(), boot).expect("a workable boot");
+        let (engine, _) = Engine::try_new(engine_config(), boot).expect("a workable boot");
 
         let geometry = watch::Sender::new(BOOT);
 
@@ -357,7 +357,7 @@ impl Harness {
             total_mem: BOOT,
             high_events: 0,
             taken: Vec::new(),
-            emitted,
+            emitted: Vec::new(),
             heard: Vec::new(),
         };
 
@@ -428,7 +428,7 @@ impl Harness {
 
                         queue.push_back(GuestEvent::ReclaimFinished {
                             now,
-                            reclaimed: *bytes,
+                            reclaimed: bytes.get(),
                         });
                     }
                     _ => {}
@@ -625,11 +625,11 @@ impl Harness {
     }
 
     fn size(&self) -> Option<u64> {
-        self.broker.guest(self.guest).and_then(Guest::size)
+        self.broker.guest(self.guest).size()
     }
 
     fn requested(&self) -> Option<u64> {
-        self.broker.guest(self.guest).and_then(Guest::requested)
+        self.broker.guest(self.guest).requested()
     }
 
     fn granted(&self, mark: Mark) -> bool {
@@ -937,7 +937,9 @@ async fn an_idle_guest_offers_memory_back_and_is_shrunk() {
     assert_eq!(
         harness.acted(mark),
         vec![
-            GuestAction::StartReclaim { bytes: RELEASE },
+            GuestAction::StartReclaim {
+                bytes: bytes(RELEASE),
+            },
             GuestAction::SetHigh(SHRUNK - SERVICE - BURST),
             GuestAction::SetMax(SHRUNK - SERVICE),
         ]

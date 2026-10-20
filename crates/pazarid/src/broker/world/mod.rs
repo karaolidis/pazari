@@ -59,18 +59,18 @@ impl World {
     }
 
     #[must_use]
-    pub fn ceiling(&self, guest: GuestId) -> Option<NonZeroU64> {
+    pub fn ceiling(&self, guest: GuestId) -> NonZeroU64 {
         self.guests.ceiling(guest)
     }
 
     #[must_use]
     pub fn geometry(&self, guest: GuestId) -> Option<Geometry> {
-        self.guests.state(guest)?.geometry()
+        self.guests.state(guest).geometry()
     }
 
     #[must_use]
     pub fn requested(&self, guest: GuestId) -> Option<u64> {
-        self.guests.state(guest)?.requested()
+        self.guests.state(guest).requested()
     }
 
     pub fn answer(&self, peer: &PeerId, id: RequestId, decision: Decision, fx: &mut Effects) {
@@ -108,9 +108,7 @@ impl World {
     }
 
     pub fn close(&mut self, guest: GuestId, peer: &PeerId, fx: &mut Effects) {
-        if let Some(state) = self.guests.state_mut(guest) {
-            state.session = None;
-        }
+        self.guests.state_mut(guest).session = None;
 
         fx.close(peer);
     }
@@ -118,13 +116,13 @@ impl World {
     pub fn open_session(&mut self, guest: GuestId, peer: PeerId) -> bool {
         self.guests
             .state_mut(guest)
-            .is_some_and(|state| state.session.replace(Session::new(peer)).is_some())
+            .session
+            .replace(Session::new(peer))
+            .is_some()
     }
 
     pub fn drop_session(&mut self, guest: GuestId) -> bool {
-        self.guests
-            .state_mut(guest)
-            .is_some_and(|state| state.session.take().is_some())
+        self.guests.state_mut(guest).session.take().is_some()
     }
 
     pub const fn unsized_deny(&self) -> Decision {
@@ -134,16 +132,20 @@ impl World {
         }
     }
 
-    pub fn arbitrate(&mut self, now: Timestamp, guest: GuestId, ask: Ask) -> Decision {
-        let (asking, others) = self.guests.views(guest);
-
-        let Some(asking) = asking else {
-            return Decision::UNKNOWN;
-        };
+    /// Puts `ask` to the arbiter, for a guest whose device is at `geometry`.
+    pub fn arbitrate(
+        &mut self,
+        now: Timestamp,
+        guest: GuestId,
+        geometry: Geometry,
+        ask: Ask,
+    ) -> Decision {
+        let entry = self.guests.get(guest);
+        let others = self.guests.others(guest);
 
         let request = Request {
             now,
-            guest: asking,
+            guest: entry.state.view_at(guest, &entry.spec, geometry),
             ask,
             others: &others,
             host: self.host,
@@ -180,23 +182,17 @@ impl World {
     }
 
     pub fn observe_total_mem(&mut self, guest: GuestId, total_mem: u64) {
-        if let Some(state) = self.guests.state_mut(guest) {
-            state.observe(total_mem);
-        }
+        self.guests.state_mut(guest).observe(total_mem);
     }
 
     pub fn note_granted(&mut self, guest: GuestId, now: Timestamp) {
-        if let Some(state) = self.guests.state_mut(guest) {
-            state.granted = Some(now);
-        }
+        self.guests.state_mut(guest).granted = Some(now);
     }
 
     pub fn actuate(&mut self, now: Timestamp, guest: GuestId, target: u64, fx: &mut Effects) {
         let deadline = Deadline::after(now, self.policy.actuation_deadline.get());
 
-        let Some(state) = self.guests.state_mut(guest) else {
-            return;
-        };
+        let state = self.guests.state_mut(guest);
 
         let Some(size) = state.size() else {
             return;
@@ -226,9 +222,7 @@ impl World {
     }
 
     pub fn settle(&mut self, guest: GuestId, size: u64, hotplugged: u64) {
-        let Some(Entry { spec, state }) = self.guests.get_mut(guest) else {
-            return;
-        };
+        let Entry { spec, state } = self.guests.get_mut(guest);
 
         state.settle(size, hotplugged);
 

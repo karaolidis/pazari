@@ -127,12 +127,12 @@ impl Region {
 
     /// The bytes mapped.
     #[must_use]
-    pub fn bytes(&self) -> u64 {
+    pub const fn bytes(&self) -> u64 {
         widen(self.len)
     }
 
     #[must_use]
-    pub fn page(&self) -> u64 {
+    pub const fn page(&self) -> u64 {
         widen(self.page)
     }
 
@@ -311,8 +311,8 @@ const fn xorshift(mut state: u64) -> u64 {
     state
 }
 
-fn widen(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
+const fn widen(value: usize) -> u64 {
+    value as u64
 }
 
 #[cfg(test)]

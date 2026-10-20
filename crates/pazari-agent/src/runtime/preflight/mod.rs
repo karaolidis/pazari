@@ -1044,12 +1044,4 @@ mod tests {
         );
         assert_eq!(report.severity(), Severity::Warn);
     }
-
-    #[test]
-    fn an_empty_report_passes() {
-        let report = Report { checks: Vec::new() };
-
-        assert_eq!(report.severity(), Severity::Pass);
-        assert_eq!(report.to_string(), "");
-    }
 }

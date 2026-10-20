@@ -1,36 +1,4 @@
-use std::fmt;
-
-use crate::error::RangeError;
-
-pub(crate) mod sealed {
-    /// Builds the newtype without checking its range, for [`super::Bounded::try_new`] only.
-    pub trait Wrap {
-        type Raw;
-
-        fn wrap(value: Self::Raw) -> Self;
-    }
-}
-
-/// A newtype over a raw scalar that only admits part of its range.
-pub trait Bounded: sealed::Wrap<Raw = <Self as Bounded>::Raw> + Copy + Sized {
-    type Raw: Copy + fmt::Debug;
-
-    const NAME: &'static str;
-
-    const BOUNDS: &'static str;
-
-    fn contains(value: <Self as Bounded>::Raw) -> bool;
-
-    fn try_new(value: <Self as Bounded>::Raw) -> Result<Self, RangeError> {
-        if !Self::contains(value) {
-            return Err(RangeError::new(Self::NAME, &value, Self::BOUNDS));
-        }
-
-        Ok(<Self as sealed::Wrap>::wrap(value))
-    }
-}
-
-/// Declares a [`Bounded`] newtype.
+/// Declares a newtype over a raw scalar that only admits part of its range.
 macro_rules! bounded {
     (
         $(#[$attr:meta])*
@@ -48,30 +16,20 @@ macro_rules! bounded {
         impl $name {
             pub const MAX: $max = $ceiling;
 
-            pub fn try_new(value: $raw) -> ::core::result::Result<Self, $crate::RangeError> {
-                <Self as $crate::Bounded>::try_new(value)
+            pub(crate) const NAME: &'static str = ::core::stringify!($name);
+            pub(crate) const BOUNDS: &'static str = $bounds;
+
+            pub fn try_new($value: $raw) -> ::core::result::Result<Self, $crate::RangeError> {
+                if !$contains {
+                    return Err($crate::RangeError::new(Self::NAME, &$value, Self::BOUNDS));
+                }
+
+                Ok(Self($value))
             }
 
             #[must_use]
             pub const fn get(self) -> $raw {
                 self.0
-            }
-        }
-
-        impl $crate::Bounded for $name {
-            type Raw = $raw;
-
-            const NAME: &'static str = ::core::stringify!($name);
-            const BOUNDS: &'static str = $bounds;
-
-            fn contains($value: $raw) -> bool $contains
-        }
-
-        impl $crate::bounded::sealed::Wrap for $name {
-            type Raw = $raw;
-
-            fn wrap(value: $raw) -> Self {
-                Self(value)
             }
         }
 
@@ -102,54 +60,50 @@ pub(crate) use bounded;
 
 #[cfg(test)]
 mod tests {
-    use std::{fmt, time::Duration};
+    use std::time::Duration;
 
-    use serde::{Serialize, de::DeserializeOwned};
+    use crate::{Delay, Interval, Psi, Swappiness};
 
-    use crate::{Bounded, Delay, Interval, Psi, Swappiness};
+    macro_rules! round_trips {
+        ($type:ty, $raw:expr) => {{
+            let value = <$type>::try_new($raw).expect("the fixture is inside the range");
 
-    fn round_trips<T>(raw: <T as Bounded>::Raw)
-    where
-        T: Bounded + Serialize + DeserializeOwned + PartialEq + fmt::Debug,
-    {
-        let value = T::try_new(raw).expect("the fixture is inside the range");
+            let text = serde_json::to_string(&value).expect("a valid value serialises");
+            let back: $type = serde_json::from_str(&text).expect("its own output deserialises");
 
-        let text = serde_json::to_string(&value).expect("a valid value serialises");
-        let back: T = serde_json::from_str(&text).expect("its own output deserialises");
-
-        assert_eq!(back, value, "{} lost {raw:?} in a round trip", T::NAME);
+            assert_eq!(
+                back,
+                value,
+                "{} lost {:?} in a round trip",
+                <$type>::NAME,
+                $raw
+            );
+        }};
     }
 
-    fn rejects<T>(raw: <T as Bounded>::Raw)
-    where
-        T: Bounded + fmt::Debug,
-    {
-        let error = T::try_new(raw).expect_err("the fixture is outside the range");
+    macro_rules! rejects {
+        ($type:ty, $raw:expr) => {{
+            let error = <$type>::try_new($raw).expect_err("the fixture is outside the range");
 
-        assert_eq!(error.what, T::NAME);
-        assert_eq!(error.bounds, T::BOUNDS);
-        assert_eq!(error.value, format!("{raw:?}"));
+            assert_eq!(error.what, <$type>::NAME);
+            assert_eq!(error.bounds, <$type>::BOUNDS);
+            assert_eq!(error.value, format!("{:?}", $raw));
+        }};
     }
 
     #[test]
     fn every_bounded_type_survives_its_own_serialisation() {
-        round_trips::<Interval>(Duration::from_millis(1_500));
-        round_trips::<Delay>(Duration::from_secs(30));
-        round_trips::<Psi>(5.5);
-        round_trips::<Swappiness>(60);
+        round_trips!(Interval, Duration::from_millis(1_500));
+        round_trips!(Delay, Duration::from_secs(30));
+        round_trips!(Psi, 5.5);
+        round_trips!(Swappiness, 60);
     }
 
     #[test]
     fn every_rejection_names_its_type_and_bounds() {
-        rejects::<Interval>(Duration::ZERO);
-        rejects::<Delay>(Duration::from_secs(86_401));
-        rejects::<Psi>(101.0);
-        rejects::<Swappiness>(201);
-    }
-
-    #[test]
-    fn the_range_agrees_with_what_it_admits() {
-        assert!(Interval::contains(Duration::from_secs(1)));
-        assert!(!Interval::contains(Duration::ZERO));
+        rejects!(Interval, Duration::ZERO);
+        rejects!(Delay, Duration::from_secs(86_401));
+        rejects!(Psi, 101.0);
+        rejects!(Swappiness, 201);
     }
 }

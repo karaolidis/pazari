@@ -93,8 +93,8 @@ impl State for Steady {
         Releasing::begin(step, will_release, Some(Owed::new(id)))
     }
 
-    fn on_interval(self, step: &mut Step<'_>, pressure: Pressure) -> Phase {
-        let Some(desired) = step.world.release_due(step.now, pressure) else {
+    fn on_interval(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
+        let Some(desired) = step.world.release_due(step.now) else {
             return self.stay();
         };
 

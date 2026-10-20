@@ -49,13 +49,13 @@ impl Release for Sweep {
             since: self.spare.map_or(now, |spare| spare.since),
             bytes,
         });
-    }
 
-    fn due(&mut self, now: Timestamp, pressure: Pressure) -> Option<NonZeroU64> {
         if pressure.breached {
             self.cooldown.extend(now);
         }
+    }
 
+    fn due(&self, now: Timestamp) -> Option<NonZeroU64> {
         if self.cooldown.active(now) {
             return None;
         }
@@ -100,10 +100,10 @@ mod tests {
         let mut release = sweep();
 
         spare(&mut release, 0, 299, 4096 * MIB);
-        assert_eq!(release.due(at(299), QUIET), None);
+        assert_eq!(release.due(at(299)), None);
 
         spare(&mut release, 300, 300, 4096 * MIB);
-        assert_eq!(release.due(at(300), QUIET), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(300)), NonZeroU64::new(4096 * MIB));
     }
 
     #[test]
@@ -113,7 +113,7 @@ mod tests {
         spare(&mut release, 0, 150, 8192 * MIB);
         spare(&mut release, 151, 300, 1024 * MIB);
 
-        assert_eq!(release.due(at(300), QUIET), NonZeroU64::new(1024 * MIB));
+        assert_eq!(release.due(at(300)), NonZeroU64::new(1024 * MIB));
     }
 
     #[test]
@@ -124,8 +124,8 @@ mod tests {
         release.observe(at(201), Some(255 * MIB), QUIET);
         spare(&mut release, 202, 400, 4096 * MIB);
 
-        assert_eq!(release.due(at(400), QUIET), None);
-        assert_eq!(release.due(at(502), QUIET), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(400)), None);
+        assert_eq!(release.due(at(502)), NonZeroU64::new(4096 * MIB));
     }
 
     #[test]
@@ -136,7 +136,7 @@ mod tests {
         release.observe(at(201), None, QUIET);
         spare(&mut release, 202, 400, 4096 * MIB);
 
-        assert_eq!(release.due(at(400), QUIET), None);
+        assert_eq!(release.due(at(400)), None);
     }
 
     #[test]
@@ -147,7 +147,7 @@ mod tests {
         release.observe(at(201), Some(4096 * MIB), THROTTLED);
         spare(&mut release, 202, 400, 4096 * MIB);
 
-        assert_eq!(release.due(at(400), QUIET), None);
+        assert_eq!(release.due(at(400)), None);
     }
 
     #[test]
@@ -156,10 +156,10 @@ mod tests {
 
         spare(&mut release, 0, 300, 4096 * MIB);
         release.rested(at(300));
-        assert_eq!(release.due(at(300), QUIET), None);
+        assert_eq!(release.due(at(300)), None);
 
         spare(&mut release, 301, 601, 4096 * MIB);
-        assert_eq!(release.due(at(601), QUIET), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(601)), NonZeroU64::new(4096 * MIB));
     }
 
     #[test]
@@ -172,8 +172,8 @@ mod tests {
         release.rested(at(100));
         spare(&mut release, 101, 129, 4096 * MIB);
 
-        assert_eq!(release.due(at(129), QUIET), None);
-        assert_eq!(release.due(at(130), QUIET), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(129)), None);
+        assert_eq!(release.due(at(130)), NonZeroU64::new(4096 * MIB));
     }
 
     #[test]
@@ -184,11 +184,12 @@ mod tests {
         });
 
         release.rested(at(100));
-        spare(&mut release, 101, 120, 4096 * MIB);
+        spare(&mut release, 101, 119, 4096 * MIB);
+        release.observe(at(120), Some(4096 * MIB), BREACHED);
+        spare(&mut release, 121, 150, 4096 * MIB);
 
-        assert_eq!(release.due(at(120), BREACHED), None);
-        assert_eq!(release.due(at(149), QUIET), None);
-        assert_eq!(release.due(at(150), QUIET), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(149)), None);
+        assert_eq!(release.due(at(150)), NonZeroU64::new(4096 * MIB));
     }
 
     #[test]
@@ -202,6 +203,6 @@ mod tests {
         release.recovered();
         spare(&mut release, 101, 101, 4096 * MIB);
 
-        assert_eq!(release.due(at(101), QUIET), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(101)), NonZeroU64::new(4096 * MIB));
     }
 }

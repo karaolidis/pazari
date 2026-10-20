@@ -69,14 +69,6 @@ impl Limits {
         matches!(self.brake, Brake::Released)
     }
 
-    pub const fn service_reserve(self) -> u64 {
-        self.service_reserve
-    }
-
-    pub const fn burst_reserve(self) -> u64 {
-        self.burst_reserve.get()
-    }
-
     pub const fn reserves(self) -> u64 {
         self.service_reserve
             .saturating_add(self.burst_reserve.get())
@@ -134,10 +126,6 @@ impl Limits {
             self.set_high(high, fx);
             self.set_max(max, fx);
         }
-    }
-
-    pub fn reapply(&mut self, fx: &mut Effects) {
-        self.apply(self.brake, fx);
     }
 
     fn set_high(&mut self, value: u64, fx: &mut Effects) {
@@ -224,7 +212,7 @@ mod tests {
 
         fx.drain();
         limits.set_total_mem(4096 * MIB);
-        limits.reapply(&mut fx);
+        limits.apply(limits.brake(), &mut fx);
 
         assert_eq!(
             fx.drain(),

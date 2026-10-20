@@ -12,7 +12,7 @@ use std::{
 
 use bytesize::ByteSize;
 use doku::Document;
-use pazari_config::{ConfigError, Positive, Ranged, ordered};
+use pazari_config::{Absolute, ConfigError, Positive, Ranged, ordered};
 use pazari_transport::{
     AnyConnector, UnixConnector, VsockConnector,
     adapter::vsock::{DEFAULT_VSOCK_PORT, VMADDR_CID_HOST},
@@ -140,7 +140,7 @@ impl File {
         let runtime = RuntimeConfig {
             tick_interval: Interval::try_new(self.tick.interval).at("tick.interval")?,
 
-            cgroup: self.workload.cgroup,
+            cgroup: self.workload.cgroup.absolute("workload.cgroup")?,
             backend: self.workload.backend.resolve(),
 
             hotplug_debounce: Interval::try_new(self.resize.hotplug_debounce)

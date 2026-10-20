@@ -21,24 +21,6 @@ impl Owed {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Outcome {
-    Offered,
-    Spent,
-    Braked,
-    Ended,
-}
-
-impl Outcome {
-    const fn refusal(self) -> Option<Refusal> {
-        match self {
-            Self::Offered | Self::Ended => None,
-            Self::Spent => Some(Refusal::Spent),
-            Self::Braked => Some(Refusal::Braked),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Freeing {
         bytes: NonZeroU64,
@@ -94,27 +76,18 @@ impl Releasing {
         }
     }
 
-    const fn answers(self, id: RequestId) -> bool {
-        matches!(self.pending_request(), Some(pending) if pending.get() == id.get())
+    fn answers(self, id: RequestId) -> bool {
+        matches!(self.pending_request(), Some(pending) if pending == id)
     }
 
-    fn answer(self, step: &mut Step<'_>, outcome: Outcome) {
-        let Stage::Freeing {
+    /// Refuses the host reclaim this release was answering, if it was one.
+    fn refuse(self, step: &mut Step<'_>, refusal: Refusal) {
+        if let Stage::Freeing {
             owed: Some(owed), ..
         } = self.stage
-        else {
-            return;
-        };
-
-        if let Some(refusal) = outcome.refusal() {
+        {
             step.nak(owed.0, refusal);
         }
-    }
-
-    fn finish(self, step: &mut Step<'_>, outcome: Outcome) -> Phase {
-        self.answer(step, outcome);
-
-        Steady::released(step)
     }
 
     const fn settling(target: u64, expires: Deadline) -> Self {
@@ -134,7 +107,7 @@ impl State for Releasing {
             return self.stay();
         }
 
-        self.answer(step, Outcome::Braked);
+        self.refuse(step, Refusal::Braked);
 
         step.world.cancel_reclaim(step.fx);
 
@@ -147,9 +120,7 @@ impl State for Releasing {
 
     fn advance(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
         match self.stage {
-            Stage::Settling { expires, .. } if expires.reached(step.now) => {
-                self.finish(step, Outcome::Offered)
-            }
+            Stage::Settling { expires, .. } if expires.reached(step.now) => Steady::released(step),
             _ => self.stay(),
         }
     }
@@ -157,7 +128,7 @@ impl State for Releasing {
     fn on_total_changed(self, step: &mut Step<'_>, moved: Moved) -> Phase {
         match self.stage {
             Stage::Settling { target, .. } if step.limits().total_mem() <= target => {
-                self.finish(step, Outcome::Offered)
+                Steady::released(step)
             }
             _ => {
                 if moved != Moved::Unchanged {
@@ -190,7 +161,7 @@ impl State for Releasing {
             return self.stay();
         }
 
-        self.finish(step, Outcome::Offered)
+        Steady::released(step)
     }
 
     fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, _desired: u64) -> Phase {
@@ -204,21 +175,17 @@ impl State for Releasing {
             return self.stay();
         };
 
-        if !step.world.connected() {
-            return self.finish(step, Outcome::Ended);
-        }
-
         let Some(releasable) = step.world.release_budget_after_reclaim(bytes, reclaimed) else {
-            return self.finish(step, Outcome::Spent);
-        };
+            self.refuse(step, Refusal::Spent);
 
-        self.answer(step, Outcome::Offered);
+            return Steady::released(step);
+        };
 
         let id = step.world.take_id();
         let current = step.limits().total_mem();
 
         debug!(
-            id = id.get(),
+            id = id.0,
             current,
             releasable = releasable.get(),
             asked = bytes.get(),
@@ -240,16 +207,10 @@ impl State for Releasing {
         })
     }
 
-    fn on_connected(self, step: &mut Step<'_>) -> Phase {
-        step.world.cancel_reclaim(step.fx);
-
-        Steady::released(step)
-    }
-
     fn on_disconnected(self, step: &mut Step<'_>) -> Phase {
         step.world.cancel_reclaim(step.fx);
 
-        self.finish(step, Outcome::Ended)
+        Steady::released(step)
     }
 }
 

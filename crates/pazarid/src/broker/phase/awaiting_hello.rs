@@ -27,7 +27,7 @@ impl AwaitingHello {
     /// Absent while there is no hello to answer or the device has not reported.
     pub fn welcome(self, step: &mut Step<'_>) -> Option<Negotiated> {
         let held = self.held?;
-        let ceiling = step.ceiling()?;
+        let ceiling = step.ceiling();
         let hotplugged = step.geometry()?.hotplugged;
 
         step.world.observe_total_mem(step.guest, held.total_mem);
@@ -109,12 +109,6 @@ impl State for AwaitingHello {
                 total_mem,
                 "guest declared an impossible geometry",
             );
-
-            return self.reject(step);
-        }
-
-        if step.ceiling().is_none() {
-            warn!(peer = %step.peer, "hello from an unregistered guest");
 
             return self.reject(step);
         }

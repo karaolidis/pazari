@@ -30,17 +30,17 @@ impl Titrate {
 }
 
 impl Release for Titrate {
-    fn observe(&mut self, _now: Timestamp, slack: Option<u64>, pressure: Pressure) {
+    fn observe(&mut self, now: Timestamp, slack: Option<u64>, pressure: Pressure) {
         let sparing = pressure.calm() && slack.is_some_and(|slack| slack >= self.config.step.get());
 
         self.spare = self.spare.then(sparing);
-    }
 
-    fn due(&mut self, now: Timestamp, pressure: Pressure) -> Option<NonZeroU64> {
         if pressure.breached {
             self.cooldown.extend(now);
         }
+    }
 
+    fn due(&self, now: Timestamp) -> Option<NonZeroU64> {
         (self.spared() && !self.cooldown.active(now)).then_some(self.config.step)
     }
 
@@ -75,10 +75,10 @@ mod tests {
         let mut release = titrate();
 
         spare(&mut release, 2);
-        assert_eq!(release.due(at(0), QUIET), None);
+        assert_eq!(release.due(at(0)), None);
 
         spare(&mut release, 1);
-        assert_eq!(release.due(at(0), QUIET), NonZeroU64::new(256 * MIB));
+        assert_eq!(release.due(at(0)), NonZeroU64::new(256 * MIB));
     }
 
     #[test]
@@ -111,8 +111,8 @@ mod tests {
         assert!(!release.spared());
 
         spare(&mut release, 3);
-        assert_eq!(release.due(at(129), QUIET), None);
-        assert_eq!(release.due(at(130), QUIET), NonZeroU64::new(256 * MIB));
+        assert_eq!(release.due(at(129)), None);
+        assert_eq!(release.due(at(130)), NonZeroU64::new(256 * MIB));
     }
 
     #[test]
@@ -120,11 +120,11 @@ mod tests {
         let mut release = titrate();
 
         release.rested(at(100));
+        release.observe(at(120), Some(256 * MIB), BREACHED);
         spare(&mut release, 3);
 
-        assert_eq!(release.due(at(120), BREACHED), None);
-        assert_eq!(release.due(at(149), QUIET), None);
-        assert_eq!(release.due(at(150), QUIET), NonZeroU64::new(256 * MIB));
+        assert_eq!(release.due(at(149)), None);
+        assert_eq!(release.due(at(150)), NonZeroU64::new(256 * MIB));
     }
 
     #[test]
@@ -135,6 +135,6 @@ mod tests {
         release.recovered();
         spare(&mut release, 3);
 
-        assert_eq!(release.due(at(101), QUIET), NonZeroU64::new(256 * MIB));
+        assert_eq!(release.due(at(101)), NonZeroU64::new(256 * MIB));
     }
 }

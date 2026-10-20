@@ -1,5 +1,6 @@
 use std::{
     future,
+    num::NonZeroU64,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -8,6 +9,7 @@ use std::{
 
 use pazari_types::Clock;
 use tokio::task::JoinHandle;
+use tracing::debug;
 
 use crate::{
     engine::Event,
@@ -18,27 +20,10 @@ use crate::{
     },
 };
 
-/// Stops a running reclaim from outside the task that awaits it.
-#[derive(Debug, Clone)]
-pub struct ReclaimHandle {
-    cancelled: Arc<AtomicBool>,
-}
-
-impl ReclaimHandle {
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
-    }
-
-    #[must_use]
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
-    }
-}
-
 #[derive(Debug)]
 struct Run {
-    bytes: u64,
-    handle: ReclaimHandle,
+    bytes: NonZeroU64,
+    cancelled: Arc<AtomicBool>,
     task: JoinHandle<Result<u64, RuntimeError>>,
 }
 
@@ -62,41 +47,37 @@ impl<C: Cgroup + 'static> Reclaimer<C> {
         }
     }
 
-    #[must_use]
-    pub const fn is_running(&self) -> bool {
-        self.run.is_some()
-    }
-
-    #[must_use]
-    pub fn handle(&self) -> Option<ReclaimHandle> {
-        self.run.as_ref().map(|run| run.handle.clone())
-    }
-
-    pub fn start(&mut self, bytes: u64) -> Result<ReclaimHandle, RuntimeError> {
+    pub fn start(&mut self, bytes: NonZeroU64) -> Result<(), RuntimeError> {
         if let Some(run) = &self.run {
             return Err(RuntimeError::ReclaimInFlight {
-                bytes,
-                running: run.bytes,
+                bytes: bytes.get(),
+                running: run.bytes.get(),
             });
         }
 
-        let handle = ReclaimHandle {
-            cancelled: Arc::new(AtomicBool::new(false)),
-        };
+        let cancelled = Arc::new(AtomicBool::new(false));
 
         let cgroup = Arc::clone(&self.cgroup);
-        let cancelled = Arc::clone(&handle.cancelled);
+        let stop = Arc::clone(&cancelled);
         let config = self.config;
 
-        let task = tokio::spawn(async move { run(&*cgroup, bytes, config, &cancelled).await });
+        let task = tokio::spawn(async move { run(&*cgroup, bytes, config, &stop).await });
 
         self.run = Some(Run {
             bytes,
-            handle: handle.clone(),
+            cancelled,
             task,
         });
 
-        Ok(handle)
+        Ok(())
+    }
+
+    /// Stops the running reclaim, if there is one, after its current chunk.
+    pub fn cancel(&self) {
+        if let Some(run) = &self.run {
+            debug!("cancelling the in-flight reclaim");
+            run.cancelled.store(true, Ordering::Relaxed);
+        }
     }
 
     pub async fn finished(&mut self) -> Result<Event, RuntimeError> {
@@ -119,12 +100,12 @@ impl<C: Cgroup + 'static> Reclaimer<C> {
 /// Walks `bytes` in requests of at most one chunk.
 async fn run<C: Cgroup>(
     cgroup: &C,
-    bytes: u64,
+    bytes: NonZeroU64,
     config: ReclaimConfig,
     cancelled: &AtomicBool,
 ) -> Result<u64, RuntimeError> {
     let mut reclaimed = 0_u64;
-    let mut left = bytes;
+    let mut left = bytes.get();
 
     while left > 0 && !cancelled.load(Ordering::Relaxed) {
         let ask = left.min(config.chunk.get());
@@ -133,8 +114,8 @@ async fn run<C: Cgroup>(
             break;
         }
 
-        reclaimed = reclaimed.saturating_add(ask);
-        left = left.saturating_sub(ask);
+        reclaimed += ask;
+        left -= ask;
     }
 
     Ok(reclaimed)
@@ -193,21 +174,10 @@ mod tests {
         let cgroup = Arc::new(FakeCgroup::default());
         let mut reclaimer = reclaimer(&cgroup);
 
-        reclaimer.start(200 * MIB).unwrap();
+        reclaimer.start(bytes(200 * MIB)).unwrap();
 
         assert_eq!(reclaimed(&reclaimer.finished().await.unwrap()), 200 * MIB);
         assert_eq!(asked(&cgroup), vec![64 * MIB, 64 * MIB, 64 * MIB, 8 * MIB]);
-    }
-
-    #[tokio::test]
-    async fn a_release_of_nothing_writes_nothing() {
-        let cgroup = Arc::new(FakeCgroup::default());
-        let mut reclaimer = reclaimer(&cgroup);
-
-        reclaimer.start(0).unwrap();
-
-        assert_eq!(reclaimed(&reclaimer.finished().await.unwrap()), 0);
-        assert_eq!(asked(&cgroup), Vec::<u64>::new());
     }
 
     #[tokio::test]
@@ -222,7 +192,7 @@ mod tests {
             Clock::start(),
         );
 
-        reclaimer.start(128 * MIB).unwrap();
+        reclaimer.start(bytes(128 * MIB)).unwrap();
         reclaimer.finished().await.unwrap();
 
         assert_eq!(
@@ -249,7 +219,7 @@ mod tests {
         ]));
         let mut reclaimer = reclaimer(&cgroup);
 
-        reclaimer.start(256 * MIB).unwrap();
+        reclaimer.start(bytes(256 * MIB)).unwrap();
 
         assert_eq!(reclaimed(&reclaimer.finished().await.unwrap()), 128 * MIB);
         assert_eq!(asked(&cgroup), vec![64 * MIB, 64 * MIB, 64 * MIB]);
@@ -260,12 +230,11 @@ mod tests {
         let cgroup = Arc::new(FakeCgroup::default());
         let mut reclaimer = reclaimer(&cgroup);
 
-        let handle = reclaimer.start(512 * MIB).unwrap();
+        reclaimer.start(bytes(512 * MIB)).unwrap();
 
         step(&cgroup, 2).await;
-        handle.cancel();
+        reclaimer.cancel();
 
-        assert!(handle.is_cancelled());
         assert_eq!(reclaimed(&reclaimer.finished().await.unwrap()), 128 * MIB);
         assert_eq!(asked(&cgroup), vec![64 * MIB, 64 * MIB]);
     }
@@ -275,11 +244,10 @@ mod tests {
         let cgroup = Arc::new(FakeCgroup::default());
         let mut reclaimer = reclaimer(&cgroup);
 
-        reclaimer.start(512 * MIB).unwrap();
-        assert!(reclaimer.is_running());
+        reclaimer.start(bytes(512 * MIB)).unwrap();
 
         let error = reclaimer
-            .start(64 * MIB)
+            .start(bytes(64 * MIB))
             .expect_err("one release at a time");
 
         assert_eq!(
@@ -289,9 +257,7 @@ mod tests {
 
         reclaimer.finished().await.unwrap();
 
-        assert!(!reclaimer.is_running());
-        assert!(reclaimer.handle().is_none());
-        reclaimer.start(64 * MIB).expect("the first is done");
+        reclaimer.start(bytes(64 * MIB)).expect("the first is done");
     }
 
     #[tokio::test]
@@ -299,7 +265,7 @@ mod tests {
         let cgroup = Arc::new(FakeCgroup::scripted([Answer::Whole, Answer::Gone]));
         let mut reclaimer = reclaimer(&cgroup);
 
-        reclaimer.start(256 * MIB).unwrap();
+        reclaimer.start(bytes(256 * MIB)).unwrap();
 
         let error = reclaimer
             .finished()
@@ -310,6 +276,5 @@ mod tests {
             error.to_string().contains("memory.reclaim"),
             "unexpected error: {error}"
         );
-        assert!(!reclaimer.is_running());
     }
 }

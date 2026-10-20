@@ -62,7 +62,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
         total_mem, "guest memory geometry"
     );
 
-    let (engine, actions) = Engine::try_new(config.engine, boot)?;
+    let (engine, ground) = Engine::try_new(config.engine, boot)?;
 
     let (observer, exposition) = match config.metrics {
         Some(address) => {
@@ -78,16 +78,9 @@ pub async fn run(config: Config) -> Result<(), RunError> {
 
     let cgroup = Arc::new(AnyCgroup::open(&config.runtime).await?);
 
-    let mut applier = Applier::new(Arc::clone(&cgroup), config.runtime.reclaim, clock);
+    let applier = Applier::new(Arc::clone(&cgroup), config.runtime.reclaim, clock);
 
-    applier
-        .apply(actions, &mut |message| {
-            warn!(
-                ?message,
-                "engine emitted a message before the session opened"
-            );
-        })
-        .await?;
+    applier.ground(ground).await?;
 
     let mut ticker = Ticker::new(
         Snapshots::new(Arc::clone(&cgroup), topology.clone()),
@@ -95,7 +88,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
         clock,
     );
     let mut throttle = ThrottleWatcher::open(&config.runtime.cgroup, clock)?;
-    let hotplug = HotplugListener::bind(topology, config.runtime.hotplug_debounce, clock)?;
+    let mut hotplug = HotplugListener::bind(topology, config.runtime.hotplug_debounce, clock)?;
 
     let (total_mem, latest) = watch::channel(total_mem);
 
@@ -306,7 +299,7 @@ mod tests {
         let runtime = runtime_config(dir.path());
         let cgroup = Arc::new(AnyCgroup::open(&runtime).await.expect("a cgroupfs adapter"));
 
-        let (engine, actions) = Engine::try_new(
+        let (engine, ground) = Engine::try_new(
             EngineConfig {
                 exhaustion: ExhaustionMode::Kill,
                 ..config()
@@ -315,10 +308,10 @@ mod tests {
         )
         .expect("a workable boot");
 
-        let mut applier = Applier::new(Arc::clone(&cgroup), runtime.reclaim, clock);
+        let applier = Applier::new(Arc::clone(&cgroup), runtime.reclaim, clock);
 
         applier
-            .apply(actions, &mut |_| panic!("the engine is not connected yet"))
+            .ground(ground)
             .await
             .expect("the ground state lands");
 

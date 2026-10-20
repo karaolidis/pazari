@@ -84,9 +84,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
     let mut supervisors = Vec::with_capacity(devices.len());
 
     for (guest, qmp) in devices {
-        let spec = registry
-            .spec(guest)
-            .expect("the configuration pairs each device with a registered guest");
+        let spec = registry.spec(guest);
         let (target, targeted) = watch::channel(None);
 
         info!(

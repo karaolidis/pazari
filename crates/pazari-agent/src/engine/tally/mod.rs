@@ -27,6 +27,6 @@ impl Tally {
             Transition::ThrottleReclaimShortfall => &mut self.throttle_reclaim_shortfalls,
         };
 
-        *count = count.saturating_add(1);
+        *count += 1;
     }
 }

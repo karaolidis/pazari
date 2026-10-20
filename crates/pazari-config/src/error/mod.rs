@@ -17,6 +17,9 @@ pub enum ConfigError {
     #[error("{field}: {source}")]
     Range { field: String, source: RangeError },
 
+    #[error("{field} rejects {}: expected an absolute path without `.` or `..`", .path.display())]
+    Relative { field: String, path: PathBuf },
+
     #[error("{field} rejects 0: expected a positive {what}")]
     Zero { field: String, what: &'static str },
 

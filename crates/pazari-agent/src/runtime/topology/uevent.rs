@@ -1,4 +1,4 @@
-use std::{io, os::fd::OwnedFd, str, time::Duration};
+use std::{io, os::fd::OwnedFd, str};
 
 use pazari_types::{Clock, Interval};
 use rustix::net::{
@@ -6,7 +6,10 @@ use rustix::net::{
     netlink::{KOBJECT_UEVENT, SocketAddrNetlink},
     recv, socket_with,
 };
-use tokio::{io::unix::AsyncFd, time::timeout};
+use tokio::{
+    io::unix::AsyncFd,
+    time::{Instant, timeout_at},
+};
 
 use crate::{
     engine::Event,
@@ -46,24 +49,56 @@ fn is_memory_hotplug(payload: &[u8]) -> bool {
     subsystem == Some("memory") && matches!(action, Some("add" | "remove" | "online" | "offline"))
 }
 
-/// Waits until `debounce` passes without another memory hotplug from `next`.
-async fn settle(
-    debounce: Duration,
-    mut next: impl AsyncFnMut() -> Result<(), RuntimeError>,
-) -> Result<(), RuntimeError> {
-    while let Ok(hotplug) = timeout(debounce, next()).await {
-        hotplug?;
+/// Waits out a burst of memory hotplugs, keeping its place if it is dropped
+/// part way through.
+#[derive(Debug)]
+struct Settle {
+    debounce: Interval,
+
+    /// When the hotplugs heard so far count as settled.
+    quiet: Option<Instant>,
+}
+
+impl Settle {
+    const fn new(debounce: Interval) -> Self {
+        Self {
+            debounce,
+            quiet: None,
+        }
     }
 
-    Ok(())
+    /// Waits for a hotplug from `next`, then until `debounce` passes without
+    /// another.
+    async fn settled(
+        &mut self,
+        mut next: impl AsyncFnMut() -> Result<(), RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        loop {
+            let heard = match self.quiet {
+                None => next().await,
+                Some(quiet) => match timeout_at(quiet, next()).await {
+                    Ok(heard) => heard,
+                    Err(_) => return Ok(()),
+                },
+            };
+
+            heard?;
+
+            self.quiet = Some(Instant::now() + self.debounce.get());
+        }
+    }
+
+    const fn reset(&mut self) {
+        self.quiet = None;
+    }
 }
 
 /// Watches the kobject uevent socket for the guest's memory changing size.
 #[derive(Debug)]
 pub struct HotplugListener {
-    socket: AsyncFd<OwnedFd>,
+    uevents: Uevents,
     topology: Topology,
-    debounce: Interval,
+    settle: Settle,
     clock: Clock,
 }
 
@@ -97,29 +132,36 @@ impl HotplugListener {
         })?;
 
         Ok(Self {
-            socket,
+            uevents: Uevents(socket),
             topology,
-            debounce,
+            settle: Settle::new(debounce),
             clock,
         })
     }
 
-    pub async fn changed(&self) -> Result<Event, RuntimeError> {
+    pub async fn changed(&mut self) -> Result<Event, RuntimeError> {
         let mut payload = [0_u8; PAYLOAD];
 
-        self.hotplug(&mut payload).await?;
+        self.settle
+            .settled(async || self.uevents.hotplug(&mut payload).await)
+            .await?;
 
-        settle(self.debounce.get(), async || {
-            self.hotplug(&mut payload).await
-        })
-        .await?;
+        let total_mem = self.topology.total_mem().await?;
+
+        self.settle.reset();
 
         Ok(Event::TotalChanged {
             now: self.clock.now(),
-            total_mem: self.topology.total_mem().await?,
+            total_mem,
         })
     }
+}
 
+/// The kobject uevent socket.
+#[derive(Debug)]
+struct Uevents(AsyncFd<OwnedFd>);
+
+impl Uevents {
     /// Reads uevents until one is a memory hotplug.
     async fn hotplug(&self, payload: &mut [u8]) -> Result<(), RuntimeError> {
         loop {
@@ -133,14 +175,14 @@ impl HotplugListener {
 
     async fn recv(&self, payload: &mut [u8]) -> Result<usize, RuntimeError> {
         loop {
-            let mut ready =
-                self.socket
-                    .readable()
-                    .await
-                    .map_err(|source| RuntimeError::Netlink {
-                        step: NetlinkStep::Wait,
-                        source,
-                    })?;
+            let mut ready = self
+                .0
+                .readable()
+                .await
+                .map_err(|source| RuntimeError::Netlink {
+                    step: NetlinkStep::Wait,
+                    source,
+                })?;
 
             let read = ready.try_io(|socket| {
                 recv(socket.get_ref(), &mut *payload, RecvFlags::empty())
@@ -160,11 +202,12 @@ impl HotplugListener {
 
 #[cfg(test)]
 mod tests {
-    use std::future;
+    use std::{future, time::Duration};
 
-    use tokio::time::{Instant, sleep};
+    use tokio::time::sleep;
 
     use super::*;
+    use crate::engine::testing::interval_ms;
 
     fn payload(header: &str, fields: &[&str]) -> Vec<u8> {
         let mut bytes = header.as_bytes().to_vec();
@@ -240,41 +283,89 @@ mod tests {
         )));
     }
 
+    const DEBOUNCE: Duration = Duration::from_millis(100);
+
+    fn settle() -> Settle {
+        Settle::new(interval_ms(100))
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_settle_ends_one_debounce_after_the_last_hotplug() {
-        let debounce = Duration::from_millis(100);
+        let mut settle = settle();
+        let mut heard = 0;
         let start = Instant::now();
 
-        settle(debounce, async || future::pending().await)
+        settle
+            .settled(async || {
+                heard += 1;
+
+                if heard > 1 {
+                    future::pending::<()>().await;
+                }
+
+                Ok(())
+            })
             .await
             .expect("nothing fails");
 
-        assert_eq!(start.elapsed(), debounce);
+        assert_eq!(start.elapsed(), DEBOUNCE);
     }
 
     #[tokio::test(start_paused = true)]
     async fn each_memory_hotplug_starts_the_settle_over() {
+        let mut settle = settle();
         let mut heard = 0;
         let start = Instant::now();
 
-        let hotplugs = async || {
-            heard += 1;
+        settle
+            .settled(async || {
+                heard += 1;
 
-            if heard > 3 {
-                future::pending::<()>().await;
-            }
+                if heard > 4 {
+                    future::pending::<()>().await;
+                }
 
-            sleep(Duration::from_millis(50)).await;
+                if heard > 1 {
+                    sleep(Duration::from_millis(50)).await;
+                }
 
-            Ok(())
-        };
-
-        settle(Duration::from_millis(100), hotplugs)
+                Ok(())
+            })
             .await
             .expect("nothing fails");
 
-        assert_eq!(heard, 4, "the settle ended before the hotplugs did");
+        assert_eq!(heard, 5, "the settle ended before the hotplugs did");
         assert_eq!(start.elapsed(), Duration::from_millis(250));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_settle_dropped_part_way_keeps_the_hotplug_it_heard() {
+        let mut settle = settle();
+        let mut heard = 0;
+        let start = Instant::now();
+
+        let dropped = timeout_at(
+            start + Duration::from_millis(30),
+            settle.settled(async || {
+                heard += 1;
+
+                if heard > 1 {
+                    future::pending::<()>().await;
+                }
+
+                Ok(())
+            }),
+        )
+        .await;
+
+        assert!(dropped.is_err(), "the settle ended inside its debounce");
+
+        settle
+            .settled(async || future::pending().await)
+            .await
+            .expect("nothing fails");
+
+        assert_eq!(start.elapsed(), DEBOUNCE);
     }
 
     #[test]

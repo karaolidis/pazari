@@ -21,7 +21,6 @@ impl Engine {
         fx: &mut Effects,
     ) {
         self.world.connect(status_interval, hotplugged);
-        self.transition(now, fx, Phase::on_connected);
         self.emit_status(now, fx);
 
         if !self.adopt_ceiling(now, ceiling, fx) {

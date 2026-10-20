@@ -12,15 +12,10 @@ pub(crate) mod fixtures;
 pub struct RequestId(pub u64);
 
 impl RequestId {
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-
     /// The id after this one.
     #[must_use]
     pub const fn next(self) -> Self {
-        Self(self.0.saturating_add(1))
+        Self(self.0 + 1)
     }
 }
 
@@ -36,15 +31,10 @@ impl fmt::Display for RequestId {
 pub struct ReclaimId(pub u64);
 
 impl ReclaimId {
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-
     /// The id after this one.
     #[must_use]
     pub const fn next(self) -> Self {
-        Self(self.0.saturating_add(1))
+        Self(self.0 + 1)
     }
 }
 

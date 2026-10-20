@@ -110,13 +110,6 @@ pub enum Decision {
     },
 }
 
-impl Decision {
-    pub const UNKNOWN: Self = Self::Deny {
-        reason: DenyReason::Policy,
-        retry_after: None,
-    };
-}
-
 /// The replaceable half of the broker.
 pub trait Arbiter: fmt::Debug + Send {
     fn decide(&mut self, request: &Request<'_>) -> Decision;

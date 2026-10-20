@@ -11,10 +11,6 @@ impl Engine {
         message: &HostMessage,
         fx: &mut Effects,
     ) {
-        if !self.world.connected() {
-            return;
-        }
-
         match *message {
             HostMessage::Welcome { .. } => {}
             HostMessage::Ceiling { ceiling } => {

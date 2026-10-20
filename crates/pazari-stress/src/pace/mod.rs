@@ -9,30 +9,10 @@ pub struct Pacer {
 }
 
 impl Pacer {
-    /// A phase that goes as fast as the faults allow.
-    #[cfg(test)]
-    const fn burst(chunk: NonZeroU64) -> Self {
-        Self { rate: None, chunk }
-    }
-
-    /// A phase held to `rate` bytes a second.
-    #[must_use]
-    pub const fn at(rate: NonZeroU64, chunk: NonZeroU64) -> Self {
-        Self {
-            rate: Some(rate),
-            chunk,
-        }
-    }
-
     /// A phase held to `rate`, or bursting if there is none.
     #[must_use]
     pub const fn new(rate: Option<NonZeroU64>, chunk: NonZeroU64) -> Self {
         Self { rate, chunk }
-    }
-
-    #[cfg(test)]
-    const fn is_paced(&self) -> bool {
-        self.rate.is_some()
     }
 
     /// The bytes the next chunk moves, given what the phase has left to move.
@@ -81,16 +61,15 @@ mod tests {
     }
 
     fn deadlines(rate: u64, chunk: u64, chunks: u64) -> Vec<Duration> {
-        let pacer = Pacer::at(bytes(rate), bytes(chunk));
+        let pacer = Pacer::new(Some(bytes(rate)), bytes(chunk));
 
         (0..chunks).map(|nth| pacer.deadline(nth * chunk)).collect()
     }
 
     #[test]
     fn a_bursting_phase_never_waits() {
-        let pacer = Pacer::burst(bytes(MIB));
+        let pacer = Pacer::new(None, bytes(MIB));
 
-        assert!(!pacer.is_paced());
         assert_eq!(pacer.deadline(0), Duration::ZERO);
         assert_eq!(pacer.deadline(u64::MAX), Duration::ZERO);
     }
@@ -98,7 +77,7 @@ mod tests {
     #[test]
     fn the_first_chunk_of_a_paced_phase_goes_out_at_once() {
         assert_eq!(
-            Pacer::at(bytes(MIB), bytes(MIB)).deadline(0),
+            Pacer::new(Some(bytes(MIB)), bytes(MIB)).deadline(0),
             Duration::ZERO
         );
     }
@@ -128,7 +107,7 @@ mod tests {
     #[test]
     fn a_deadline_is_taken_from_the_total_so_it_cannot_drift() {
         let chunk = 7 * (1 << 10);
-        let pacer = Pacer::at(bytes(3 * MIB), bytes(chunk));
+        let pacer = Pacer::new(Some(bytes(3 * MIB)), bytes(chunk));
 
         for nth in 0..10_000_u64 {
             let issued = nth * chunk;
@@ -144,14 +123,14 @@ mod tests {
     #[test]
     fn a_deadline_beyond_the_clock_saturates() {
         assert_eq!(
-            Pacer::at(NonZeroU64::MIN, bytes(MIB)).deadline(u64::MAX),
+            Pacer::new(Some(NonZeroU64::MIN), bytes(MIB)).deadline(u64::MAX),
             Duration::from_nanos(u64::MAX)
         );
     }
 
     #[test]
     fn a_chunk_is_never_more_than_what_is_left() {
-        let pacer = Pacer::burst(bytes(MIB));
+        let pacer = Pacer::new(None, bytes(MIB));
 
         assert_eq!(pacer.step(4 * MIB), MIB);
         assert_eq!(pacer.step(MIB), MIB);

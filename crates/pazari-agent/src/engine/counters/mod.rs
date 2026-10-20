@@ -1,15 +1,5 @@
 use std::num::NonZeroU64;
 
-/// Times the workload reached `memory.max`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Breaches(NonZeroU64);
-
-impl Breaches {
-    pub const fn get(self) -> u64 {
-        self.0.get()
-    }
-}
-
 /// The `memory.events` counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Counters {
@@ -21,7 +11,9 @@ pub struct Counters {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Events {
     pub throttled: bool,
-    pub breaches: Option<Breaches>,
+
+    /// Times the workload reached `memory.max`.
+    pub breaches: Option<NonZeroU64>,
 }
 
 /// What the workload has run into since the last interval.
@@ -64,8 +56,7 @@ impl CounterTracker {
                 }),
             breaches: self
                 .seen
-                .and_then(|previous| NonZeroU64::new(max.saturating_sub(previous.max)))
-                .map(Breaches),
+                .and_then(|previous| NonZeroU64::new(max.saturating_sub(previous.max))),
         };
 
         self.seen = Some(Counters { high, max });
@@ -128,11 +119,8 @@ mod tests {
         tracker.observe(0, 4, Source::Tick);
         assert_eq!(tracker.observe(0, 4, Source::Tick).breaches, None);
         assert_eq!(
-            tracker
-                .observe(0, 7, Source::Tick)
-                .breaches
-                .map(Breaches::get),
-            Some(3)
+            tracker.observe(0, 7, Source::Tick).breaches,
+            NonZeroU64::new(3)
         );
     }
 

@@ -67,7 +67,7 @@ impl Growing {
         let current = step.limits().total_mem();
 
         debug!(
-            id = id.get(),
+            id = id.0,
             current,
             target,
             grow = ?step.world.grow(),
@@ -96,8 +96,8 @@ impl Growing {
         }
     }
 
-    const fn answers(self, id: RequestId) -> bool {
-        matches!(self.pending_request(), Some(pending) if pending.get() == id.get())
+    fn answers(self, id: RequestId) -> bool {
+        matches!(self.pending_request(), Some(pending) if pending == id)
     }
 
     /// When the exhaustion began, while a retry from it waits on the host.
@@ -215,10 +215,6 @@ impl State for Growing {
         step.nak(id, Refusal::Growing);
 
         self.stay()
-    }
-
-    fn on_connected(self, _step: &mut Step<'_>) -> Phase {
-        self.blocked()
     }
 
     fn on_interval(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {

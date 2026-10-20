@@ -121,7 +121,7 @@ impl Broker {
     }
 
     #[must_use]
-    pub fn guest(&self, guest: GuestId) -> Option<&Guest> {
+    pub fn guest(&self, guest: GuestId) -> &Guest {
         self.world.guests().state(guest)
     }
 
@@ -262,10 +262,7 @@ mod tests {
             message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB)),
             vec![grant(ONE, 1, 3072 * MIB), requested(ONE, 3072 * MIB),]
         );
-        assert_eq!(
-            broker.guest(id(ONE)).and_then(Guest::requested),
-            Some(3072 * MIB)
-        );
+        assert_eq!(broker.guest(id(ONE)).requested(), Some(3072 * MIB));
     }
 
     #[test]
@@ -288,7 +285,7 @@ mod tests {
             message(&mut broker, at(10), ONE, ask(1, CEILING, 8192 * MIB)),
             vec![deny(ONE, 1, DenyReason::Ceiling)]
         );
-        assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
+        assert_eq!(broker.guest(id(ONE)).requested(), None);
     }
 
     #[test]
@@ -329,7 +326,7 @@ mod tests {
             message(&mut broker, at(10), ONE, ask(1, BOOT, BOOT - GIB)),
             vec![grant(ONE, 1, BOOT - GIB)]
         );
-        assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
+        assert_eq!(broker.guest(id(ONE)).requested(), None);
     }
 
     #[test]
@@ -400,10 +397,7 @@ mod tests {
             GuestMessage::Status(status(BOOT + 64 * MIB, 512 * MIB)),
         );
 
-        assert_eq!(
-            broker.guest(id(ONE)).and_then(Guest::offset),
-            Some(192 * MIB)
-        );
+        assert_eq!(broker.guest(id(ONE)).offset(), Some(192 * MIB));
 
         assert_eq!(
             message(
@@ -432,10 +426,7 @@ mod tests {
             GuestMessage::Status(status(BOOT - RESERVED, 512 * MIB)),
         );
 
-        assert_eq!(
-            broker.guest(id(ONE)).and_then(Guest::offset),
-            Some(RESERVED)
-        );
+        assert_eq!(broker.guest(id(ONE)).offset(), Some(RESERVED));
     }
 
     #[test]
@@ -444,10 +435,7 @@ mod tests {
 
         sizes(&mut broker, at(5), ONE, BOOT);
 
-        assert_eq!(
-            broker.guest(id(ONE)).and_then(Guest::offset),
-            Some(RESERVED)
-        );
+        assert_eq!(broker.guest(id(ONE)).offset(), Some(RESERVED));
 
         assert_eq!(
             message(&mut broker, at(10), ONE, ask(1, BOOT - RESERVED, BOOT)),
@@ -464,7 +452,7 @@ mod tests {
 
         sizes(&mut broker, at(5), ONE, BOOT);
 
-        assert_eq!(broker.guest(id(ONE)).and_then(Guest::offset), None);
+        assert_eq!(broker.guest(id(ONE)).offset(), None);
 
         assert_eq!(
             message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB)),
@@ -519,7 +507,7 @@ mod tests {
             message(&mut broker, at(10), ONE, ask(1, BOOT, 3072 * MIB)),
             vec![closed(ONE)]
         );
-        assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
+        assert_eq!(broker.guest(id(ONE)).requested(), None);
     }
 
     #[test]
@@ -655,20 +643,14 @@ mod tests {
             sizes(&mut broker, at(11), ONE, 2560 * MIB),
             vec![geometry(ONE, 512 * MIB)]
         );
-        assert_eq!(
-            broker.guest(id(ONE)).and_then(Guest::requested),
-            Some(3072 * MIB)
-        );
+        assert_eq!(broker.guest(id(ONE)).requested(), Some(3072 * MIB));
 
         assert_eq!(
             sizes(&mut broker, at(12), ONE, 3072 * MIB),
             vec![geometry(ONE, GIB)]
         );
-        assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
-        assert_eq!(
-            broker.guest(id(ONE)).and_then(Guest::size),
-            Some(3072 * MIB)
-        );
+        assert_eq!(broker.guest(id(ONE)).requested(), None);
+        assert_eq!(broker.guest(id(ONE)).size(), Some(3072 * MIB));
     }
 
     #[test]
@@ -679,17 +661,11 @@ mod tests {
         sizes(&mut broker, at(11), ONE, 2560 * MIB);
 
         assert_eq!(tick(&mut broker, at(39)), vec![]);
-        assert_eq!(
-            broker.guest(id(ONE)).and_then(Guest::requested),
-            Some(3072 * MIB)
-        );
+        assert_eq!(broker.guest(id(ONE)).requested(), Some(3072 * MIB));
 
         assert_eq!(tick(&mut broker, at(40)), vec![]);
-        assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
-        assert_eq!(
-            broker.guest(id(ONE)).and_then(Guest::size),
-            Some(2560 * MIB)
-        );
+        assert_eq!(broker.guest(id(ONE)).requested(), None);
+        assert_eq!(broker.guest(id(ONE)).size(), Some(2560 * MIB));
     }
 
     #[test]
@@ -700,7 +676,7 @@ mod tests {
 
         assert_eq!(tick(&mut broker, at(39)), vec![]);
         assert_eq!(tick(&mut broker, at(40)), vec![requested(ONE, BOOT + GIB)]);
-        assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
+        assert_eq!(broker.guest(id(ONE)).requested(), None);
         assert_eq!(tick(&mut broker, at(41)), vec![]);
     }
 
@@ -719,7 +695,7 @@ mod tests {
         message(&mut broker, at(10), ONE, release(1, BOOT + GIB, 512 * MIB));
 
         assert_eq!(tick(&mut broker, at(40)), vec![]);
-        assert_eq!(broker.guest(id(ONE)).and_then(Guest::requested), None);
+        assert_eq!(broker.guest(id(ONE)).requested(), None);
     }
 
     #[test]
@@ -929,10 +905,7 @@ mod tests {
         assert!(!broker.is_negotiated(&vsock(ONE)));
         assert!(broker.negotiated(id(ONE)).is_none());
 
-        assert_eq!(
-            broker.guest(id(ONE)).and_then(Guest::requested),
-            Some(3072 * MIB)
-        );
+        assert_eq!(broker.guest(id(ONE)).requested(), Some(3072 * MIB));
     }
 
     #[test]
@@ -1127,8 +1100,8 @@ mod tests {
 
         message(&mut broker, at(10), ONE, release(1, u64::MAX, u64::MAX));
 
-        assert_eq!(broker.guest(id(TWO)).and_then(Guest::size), Some(BOOT));
-        assert_eq!(broker.guest(id(TWO)).and_then(Guest::requested), None);
+        assert_eq!(broker.guest(id(TWO)).size(), Some(BOOT));
+        assert_eq!(broker.guest(id(TWO)).requested(), None);
     }
 
     #[derive(Debug, Clone)]
@@ -1323,10 +1296,10 @@ mod tests {
             4 => (cid(), byte_count()).prop_map(|(cid, total_mem)| Step::Report { cid, total_mem }),
             1 => cid().prop_map(|cid| Step::Bye { cid }),
             2 => cid().prop_map(|cid| Step::Disconnect { cid }),
-            4 => (0_usize..3, byte_count()).prop_map(|(slot, size)| Step::Size { slot, size }),
+            4 => (0_usize..2, byte_count()).prop_map(|(slot, size)| Step::Size { slot, size }),
             3 => (byte_count(), byte_count(), pressure())
                 .prop_map(|(bytes, swap_free, psi)| Step::Available { bytes, swap_free, psi }),
-            2 => (0_usize..3, byte_count())
+            2 => (0_usize..2, byte_count())
                 .prop_map(|(slot, desired)| Step::Reclaim { slot, desired }),
             4 => Just(Step::Tick),
         ]
@@ -1387,10 +1360,7 @@ mod tests {
                 }
 
                 Action::SetRequested { guest, bytes } => {
-                    let ceiling = broker
-                        .guests()
-                        .ceiling(*guest)
-                        .expect("an actuated guest is registered");
+                    let ceiling = broker.guests().ceiling(*guest);
 
                     prop_assert!(
                         *bytes <= ceiling.get(),

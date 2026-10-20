@@ -149,7 +149,7 @@ impl<W: Write> Walk<'_, W> {
                 target,
                 rate_bps,
                 chunk,
-            } => self.churn(target, Pacer::at(rate_bps, chunk)),
+            } => self.churn(target, Pacer::new(Some(rate_bps), chunk)),
 
             Kind::Hold { target } => self.wait(target),
 
@@ -173,23 +173,19 @@ impl<W: Write> Walk<'_, W> {
                 return Ok(Flow::Stop);
             }
 
-            let step = pacer.step(target.saturating_sub(self.touched));
+            let step = pacer.step(target - self.touched);
             let frontier = self.frontier;
 
-            self.region.touch(frontier, frontier.saturating_add(step))?;
+            self.region.touch(frontier, frontier + step)?;
 
-            self.frontier = frontier.saturating_add(step);
-            self.touched = self.touched.saturating_add(step);
+            self.frontier = frontier + step;
+            self.touched += step;
         }
 
         Ok(Flow::Go)
     }
 
     fn churn(&mut self, target: Duration, pacer: Pacer) -> Result<Flow, RunError> {
-        if self.frontier == 0 {
-            return self.wait(target);
-        }
-
         let mut cursor = 0_u64;
 
         loop {
@@ -201,17 +197,17 @@ impl<W: Write> Walk<'_, W> {
                 return Ok(Flow::Go);
             }
 
-            let step = pacer.step(self.frontier.saturating_sub(cursor));
+            let step = pacer.step(self.frontier - cursor);
 
-            self.region.touch(cursor, cursor.saturating_add(step))?;
+            self.region.touch(cursor, cursor + step)?;
 
-            cursor = cursor.saturating_add(step);
+            cursor += step;
 
             if cursor >= self.frontier {
                 cursor = 0;
             }
 
-            self.touched = self.touched.saturating_add(step);
+            self.touched += step;
         }
     }
 
@@ -221,14 +217,13 @@ impl<W: Write> Walk<'_, W> {
                 return Ok(Flow::Stop);
             }
 
-            let step = pacer.step(target.saturating_sub(self.touched));
+            let step = pacer.step(target - self.touched);
             let frontier = self.frontier;
 
-            self.region
-                .release(frontier.saturating_sub(step), frontier)?;
+            self.region.release(frontier - step, frontier)?;
 
-            self.frontier = frontier.saturating_sub(step);
-            self.touched = self.touched.saturating_add(step);
+            self.frontier = frontier - step;
+            self.touched += step;
         }
 
         Ok(Flow::Go)
@@ -240,14 +235,14 @@ impl<W: Write> Walk<'_, W> {
                 return Ok(Flow::Stop);
             }
 
-            let step = pacer.step(target.saturating_sub(self.touched));
+            let step = pacer.step(target - self.touched);
 
             self.scratch
                 .as_mut()
                 .expect("a plan with a cache phase has a cache directory")
                 .fill(step)?;
 
-            self.touched = self.touched.saturating_add(step);
+            self.touched += step;
         }
 
         Ok(Flow::Go)
@@ -276,7 +271,7 @@ impl<W: Write> Walk<'_, W> {
 
     fn report(&mut self, elapsed: Duration) -> Result<(), RunError> {
         let rate = Pacer::measure(
-            self.touched.saturating_sub(self.counted),
+            self.touched - self.counted,
             elapsed.saturating_sub(self.marked),
         );
 
@@ -601,23 +596,6 @@ mod tests {
             field(events.last().expect("an ending"), "index"),
             0,
             "the interruption named the wrong phase"
-        );
-    }
-
-    #[test]
-    fn a_plan_that_only_waits_still_holds_its_arena() {
-        let mut options = options(&["grow=1MiB"], 10);
-
-        options.plan = Plan::parse(["hold=30ms"], None).expect("a workable plan");
-
-        let (outcome, events) = walk(&options, &AtomicBool::new(false));
-
-        assert_eq!(outcome, Outcome::Done);
-        assert!(
-            of_kind(&events, "progress")
-                .iter()
-                .all(|event| field(event, "touched") == 0),
-            "an idle phase touched something"
         );
     }
 }

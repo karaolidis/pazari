@@ -98,14 +98,11 @@ impl Negotiated {
     }
 
     #[must_use]
-    pub const fn accepts(&self, id: RequestId) -> bool {
-        match self.answered {
-            Some(answered) => id.get() > answered.get(),
-            None => true,
-        }
+    pub fn accepts(&self, id: RequestId) -> bool {
+        self.answered.is_none_or(|answered| id > answered)
     }
 
-    pub const fn accept(&mut self, id: RequestId) -> bool {
+    pub fn accept(&mut self, id: RequestId) -> bool {
         if !self.accepts(id) {
             return false;
         }
@@ -122,11 +119,9 @@ impl Negotiated {
     }
 
     /// Takes the first reply to the outstanding reclaim; any other is stray.
-    const fn answer_reclaim(&mut self, id: ReclaimId, reply: Reply) -> bool {
+    fn answer_reclaim(&mut self, id: ReclaimId, reply: Reply) -> bool {
         match &mut self.reclaim {
-            Some(reclaim)
-                if reclaim.id.get() == id.get() && matches!(reclaim.reply, Reply::Pending) =>
-            {
+            Some(reclaim) if reclaim.id == id && matches!(reclaim.reply, Reply::Pending) => {
                 reclaim.reply = reply;
 
                 true
@@ -169,7 +164,7 @@ impl Negotiated {
     ///
     /// An `Err` is answered without the arbiter.
     fn grow(&self, step: &Step<'_>, target: u64) -> Result<(Geometry, Ask), Decision> {
-        let ceiling = step.ceiling().ok_or(Decision::UNKNOWN)?;
+        let ceiling = step.ceiling();
         let geometry = step.geometry().ok_or_else(|| step.world.unsized_deny())?;
 
         // Where the device is heading, which a resize in flight moves off its size.
@@ -256,17 +251,13 @@ impl Negotiated {
             Err(decision) => return step.answer(id, decision),
         };
 
-        let decision = step.world.arbitrate(step.now, step.guest, ask);
+        let decision = step.world.arbitrate(step.now, step.guest, geometry, ask);
 
         let Decision::Grant { target } = decision else {
             return step.answer(id, decision);
         };
 
-        let Some(ceiling) = step.ceiling() else {
-            return step.answer(id, Decision::UNKNOWN);
-        };
-
-        let target = target.min(ceiling.get());
+        let target = target.min(step.ceiling().get());
 
         step.answer(
             id,

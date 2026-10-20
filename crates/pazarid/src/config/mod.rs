@@ -265,10 +265,10 @@ mod tests {
         );
         assert_eq!(
             config.registry.spec(guest),
-            Some(&GuestSpec {
+            &GuestSpec {
                 name: "example".to_owned(),
                 ceiling: bytes(8 * GIB),
-            })
+            }
         );
     }
 

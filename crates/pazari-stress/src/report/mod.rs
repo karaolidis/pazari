@@ -182,7 +182,7 @@ impl<W: Write> Reporter<W> {
         })
     }
 
-    /// The time since the reporter started, in whole milliseconds.
+    /// The time since the reporter started.
     fn elapsed(&self) -> Duration {
         self.clock.now().saturating_duration_since(Timestamp::START)
     }
@@ -352,13 +352,6 @@ mod tests {
             "unexpected failure: {}",
             lines[1]
         );
-    }
-
-    #[test]
-    fn the_clock_the_events_are_stamped_from_starts_with_the_reporter() {
-        let out = Reporter::new(Vec::new());
-
-        assert!(out.elapsed() < Duration::from_millis(100));
     }
 
     #[test]

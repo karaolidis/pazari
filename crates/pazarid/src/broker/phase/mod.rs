@@ -35,7 +35,7 @@ impl Step<'_> {
         self.world.name(self.guest)
     }
 
-    pub fn ceiling(&self) -> Option<NonZeroU64> {
+    pub fn ceiling(&self) -> NonZeroU64 {
         self.world.ceiling(self.guest)
     }
 

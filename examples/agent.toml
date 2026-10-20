@@ -23,7 +23,7 @@ burst_reserve = "256MiB"
 # - Through the runtime properties of a unit.
 #     kind = "systemd"
 #     # The unit carrying the limits as `MemoryHigh` and `MemoryMax`. Set me.
-#     unit = "workload.service"
+#     unit = "workload.slice"
 kind = "cgroupfs"
 
 [host]
@@ -84,13 +84,13 @@ kind = "grow"
 # How much more memory each request asks the host for.
 [grow]
 # Possible variants:
-# - One step at first. Each brake that follows soon after the last grow
+# - One step at first. Each throttle that follows soon after the last grow
 #   doubles it, up to `cap` steps.
 #     kind = "exponential"
 #     # The first request, and the unit later ones are multiples of.
 #     step = "512MiB"
 #
-#     # How soon after a grow a brake still doubles the next request.
+#     # How soon after a grow a throttle still doubles the next request.
 #     escalate_within = "10s"
 #
 #     # The most steps one request asks for.
@@ -131,7 +131,7 @@ recover_after = 3
 # allows.
 [exhaustion.mode]
 # Possible variants:
-# - Leave the band open and let the workload degrade.
+# - Keep the brake on until `timeout`, then release it.
 #     kind = "stall"
 #     # How long a workload may want more than the ceiling allows before the
 #     # agent stops waiting for the host to move.
@@ -141,10 +141,13 @@ recover_after = 3
 kind = "stall"
 
 [preflight]
-# Whether `/sys/kernel/mm/transparent_hugepage/enabled` set to `always`
-# fails preflight.
-thp_always_fatal = true
+# What preflight does when `/sys/kernel/mm/transparent_hugepage/enabled`
+# is set to `always`.
+# Possible variants:
+# - "fail"
+# - "warn"
+thp_always = "fail"
 
 [metrics]
-# The address the Prometheus endpoint answers scrapes on.
+# The address to serve `OpenMetrics` on.
 listen = "127.0.0.1:9651"

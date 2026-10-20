@@ -17,7 +17,7 @@
       environment.systemPackages = [ config.services.pazari-agent.package ];
 
       services.pazari-agent = {
-        settings.preflight.thp_always_fatal = false;
+        settings.preflight.thp_always = "warn";
 
         harness.workload.phases = [
           "grow=1GiB,rate=256MiB/s"
@@ -44,7 +44,7 @@
         )
 
         guest.shell(
-            "sed 's/^thp_always_fatal = false/thp_always_fatal = true/'"
+            "sed 's/^thp_always = \"warn\"/thp_always = \"fail\"/'"
             f" /etc/pazari/agent.toml > {STRICT}",
             "the shipped posture was put back into a copy of the agent's config",
         )

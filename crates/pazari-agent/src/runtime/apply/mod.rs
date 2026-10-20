@@ -1,4 +1,4 @@
-use std::{num::NonZeroU64, sync::Arc};
+use std::sync::Arc;
 
 use pazari_proto::GuestMessage;
 use pazari_types::Clock;
@@ -8,6 +8,7 @@ use crate::{
     engine::Action,
     runtime::{
         cgroup::{Cgroup, Limit},
+        config::ReclaimConfig,
         error::RuntimeError,
         reclaim::Reclaimer,
     },
@@ -22,9 +23,9 @@ pub struct Applier<C> {
 
 impl<C: Cgroup + 'static> Applier<C> {
     #[must_use]
-    pub fn new(cgroup: Arc<C>, chunk: NonZeroU64, clock: Clock) -> Self {
+    pub fn new(cgroup: Arc<C>, reclaim: ReclaimConfig, clock: Clock) -> Self {
         Self {
-            reclaimer: Reclaimer::new(Arc::clone(&cgroup), chunk, clock),
+            reclaimer: Reclaimer::new(Arc::clone(&cgroup), reclaim, clock),
             cgroup,
         }
     }
@@ -45,8 +46,8 @@ impl<C: Cgroup + 'static> Applier<C> {
                 Action::SetHigh(bytes) => self.cgroup.set_high(Limit::Bytes(bytes)).await?,
                 Action::SetMax(bytes) => self.cgroup.set_max(Limit::Bytes(bytes)).await?,
                 Action::SetOomGroup(group) => self.cgroup.set_oom_group(group).await?,
-                Action::StartReclaim { bytes, swappiness } => {
-                    self.reclaimer.start(bytes, swappiness)?;
+                Action::StartReclaim { bytes } => {
+                    self.reclaimer.start(bytes)?;
                 }
                 Action::CancelReclaim => {
                     if let Some(reclaim) = self.reclaimer.handle() {
@@ -67,10 +68,20 @@ mod tests {
     use pazari_types::Swappiness;
 
     use super::*;
-    use crate::runtime::testing::{Call, FakeCgroup, MIB, bytes};
+    use crate::{
+        engine::OomGroup,
+        runtime::testing::{Call, FakeCgroup, MIB, bytes},
+    };
 
     fn applier(cgroup: &Arc<FakeCgroup>) -> Applier<FakeCgroup> {
-        Applier::new(Arc::clone(cgroup), bytes(64 * MIB), Clock::start())
+        Applier::new(
+            Arc::clone(cgroup),
+            ReclaimConfig {
+                chunk: bytes(64 * MIB),
+                swappiness: Some(Swappiness::NONE),
+            },
+            Clock::start(),
+        )
     }
 
     #[tokio::test]
@@ -84,7 +95,7 @@ mod tests {
                 vec![
                     Action::SetMax(2048 * MIB),
                     Action::SetHigh(1792 * MIB),
-                    Action::SetOomGroup(true),
+                    Action::SetOomGroup(OomGroup::Whole),
                     Action::Send(GuestMessage::Bye {}),
                 ],
                 &mut |message| sent.push(message),
@@ -97,7 +108,7 @@ mod tests {
             vec![
                 Call::Max(Limit::Bytes(2048 * MIB)),
                 Call::High(Limit::Bytes(1792 * MIB)),
-                Call::OomGroup(true),
+                Call::OomGroup(OomGroup::Whole),
             ]
         );
         assert_eq!(sent, vec![GuestMessage::Bye {}]);
@@ -114,7 +125,7 @@ mod tests {
                 vec![
                     Action::SetHigh(1792 * MIB),
                     Action::SetMax(2048 * MIB),
-                    Action::SetOomGroup(true),
+                    Action::SetOomGroup(OomGroup::Whole),
                     Action::Send(GuestMessage::Bye {}),
                 ],
                 &mut |message| sent.push(message),
@@ -138,10 +149,7 @@ mod tests {
 
         applier
             .apply(
-                vec![Action::StartReclaim {
-                    bytes: 128 * MIB,
-                    swappiness: Some(Swappiness::NONE),
-                }],
+                vec![Action::StartReclaim { bytes: 128 * MIB }],
                 &mut |message| sent.push(message),
             )
             .await
@@ -173,10 +181,7 @@ mod tests {
         let mut applier = applier(&cgroup);
         let mut sent = Vec::new();
 
-        let reclaim = Action::StartReclaim {
-            bytes: 512 * MIB,
-            swappiness: None,
-        };
+        let reclaim = Action::StartReclaim { bytes: 512 * MIB };
 
         let error = applier
             .apply(vec![reclaim.clone(), reclaim], &mut |message| {
@@ -200,10 +205,7 @@ mod tests {
 
         applier
             .apply(
-                vec![Action::StartReclaim {
-                    bytes: 1024 * MIB,
-                    swappiness: None,
-                }],
+                vec![Action::StartReclaim { bytes: 1024 * MIB }],
                 &mut |message| sent.push(message),
             )
             .await

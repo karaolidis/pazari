@@ -130,7 +130,6 @@ mod tests {
     use std::time::Duration;
 
     use pazari_proto::{GuestMessage, HostMessage};
-    use pazari_types::Swappiness;
 
     use crate::engine::{Action, EngineConfig, Phase, ReleaseConfig, TitrateConfig, testing::*};
 
@@ -149,10 +148,7 @@ mod tests {
 
         assert_eq!(
             tick(&mut engine, at(143), snap(2560 * MIB, CALM, 1)),
-            vec![Action::StartReclaim {
-                bytes: 256 * MIB,
-                swappiness: Some(Swappiness::NONE),
-            }]
+            vec![reclaim(256 * MIB)]
         );
         assert!(matches!(engine.phase(), Phase::Releasing(_)));
     }
@@ -181,10 +177,7 @@ mod tests {
 
         assert_eq!(
             tick(&mut engine, at(145), snap(2560 * MIB, CALM, 1)),
-            vec![Action::StartReclaim {
-                bytes: 256 * MIB,
-                swappiness: Some(Swappiness::NONE),
-            }]
+            vec![reclaim(256 * MIB)]
         );
     }
 
@@ -203,10 +196,7 @@ mod tests {
 
         assert_eq!(
             tick(&mut engine, at(132), snap(2560 * MIB, CALM, 1)),
-            vec![Action::StartReclaim {
-                bytes: 256 * MIB,
-                swappiness: Some(Swappiness::NONE),
-            }]
+            vec![reclaim(256 * MIB)]
         );
     }
 
@@ -281,10 +271,7 @@ mod tests {
 
         assert_eq!(
             tick(&mut engine, at(143), snap(2560 * MIB, CALM, 1)),
-            vec![Action::StartReclaim {
-                bytes: 512 * MIB,
-                swappiness: Some(Swappiness::NONE),
-            }]
+            vec![reclaim(512 * MIB)]
         );
     }
 
@@ -310,10 +297,7 @@ mod tests {
                     id: ReclaimId(7),
                     will_release: 512 * MIB,
                 }),
-                Action::StartReclaim {
-                    bytes: 512 * MIB,
-                    swappiness: Some(Swappiness::NONE),
-                },
+                reclaim(512 * MIB),
             ]
         );
         assert!(matches!(engine.phase(), Phase::Releasing(_)));

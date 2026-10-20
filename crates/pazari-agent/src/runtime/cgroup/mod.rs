@@ -11,9 +11,12 @@ pub use crate::runtime::cgroup::{
     raw::RawCgroup,
     systemd::SystemdCgroup,
 };
-use crate::runtime::{
-    config::{Backend, RuntimeConfig},
-    error::RuntimeError,
+use crate::{
+    engine::OomGroup,
+    runtime::{
+        config::{Backend, RuntimeConfig},
+        error::RuntimeError,
+    },
 };
 
 pub const MEMORY_HIGH: &str = "memory.high";
@@ -40,7 +43,10 @@ pub trait Cgroup: Send + Sync {
 
     fn set_max(&self, limit: Limit) -> impl Future<Output = Result<(), RuntimeError>> + Send;
 
-    fn set_oom_group(&self, group: bool) -> impl Future<Output = Result<(), RuntimeError>> + Send;
+    fn set_oom_group(
+        &self,
+        group: OomGroup,
+    ) -> impl Future<Output = Result<(), RuntimeError>> + Send;
 
     fn events(&self) -> impl Future<Output = Result<MemoryEvents, RuntimeError>> + Send;
 
@@ -100,7 +106,7 @@ impl Cgroup for AnyCgroup {
     forward! {
         set_high(limit: Limit) -> ();
         set_max(limit: Limit) -> ();
-        set_oom_group(group: bool) -> ();
+        set_oom_group(group: OomGroup) -> ();
         events() -> MemoryEvents;
         current() -> u64;
         swap_current() -> u64;

@@ -1,15 +1,18 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use pazari_types::{Pressure, Swappiness};
 use zbus::{Connection, proxy, zvariant::Value};
 
-use crate::runtime::{
-    cgroup::{
-        Cgroup, Reclaimed,
-        parse::{Limit, MemoryEvents},
-        raw::RawCgroup,
+use crate::{
+    engine::OomGroup,
+    runtime::{
+        cgroup::{
+            Cgroup, Reclaimed,
+            parse::{Limit, MemoryEvents},
+            raw::RawCgroup,
+        },
+        error::RuntimeError,
     },
-    error::RuntimeError,
 };
 
 const MEMORY_HIGH: &str = "MemoryHigh";
@@ -63,16 +66,6 @@ impl SystemdCgroup {
     }
 
     #[must_use]
-    pub fn unit(&self) -> &str {
-        &self.unit
-    }
-
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        self.files.path()
-    }
-
-    #[must_use]
     pub fn released(&self) -> String {
         format!("{} {MEMORY_HIGH} = {INFINITY}", self.unit)
     }
@@ -102,7 +95,7 @@ impl Cgroup for SystemdCgroup {
         self.set(MEMORY_MAX, limit).await
     }
 
-    async fn set_oom_group(&self, group: bool) -> Result<(), RuntimeError> {
+    async fn set_oom_group(&self, group: OomGroup) -> Result<(), RuntimeError> {
         self.files.set_oom_group(group).await
     }
 
@@ -128,72 +121,5 @@ impl Cgroup for SystemdCgroup {
         swappiness: Option<Swappiness>,
     ) -> Result<Reclaimed, RuntimeError> {
         self.files.reclaim(bytes, swappiness).await
-    }
-}
-
-/// The cgroup systemd gives a unit under the unified hierarchy.
-#[must_use]
-pub fn unit_cgroup(root: &Path, unit: &str) -> PathBuf {
-    let mut path = root.to_path_buf();
-
-    if unit == "-.slice" {
-        return path;
-    }
-
-    match unit.strip_suffix(".slice") {
-        Some(name) => {
-            let parts: Vec<&str> = name.split('-').collect();
-
-            for depth in 1..parts.len() {
-                path.push(format!("{}.slice", parts[..depth].join("-")));
-            }
-        }
-        None => path.push("system.slice"),
-    }
-
-    path.push(unit);
-
-    path
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn root() -> &'static Path {
-        Path::new("/sys/fs/cgroup")
-    }
-
-    #[test]
-    fn a_unit_without_a_slice_lands_in_the_system_slice() {
-        assert_eq!(
-            unit_cgroup(root(), "workload.service"),
-            Path::new("/sys/fs/cgroup/system.slice/workload.service")
-        );
-        assert_eq!(
-            unit_cgroup(root(), "workload.scope"),
-            Path::new("/sys/fs/cgroup/system.slice/workload.scope")
-        );
-    }
-
-    #[test]
-    fn a_slice_nests_under_the_slices_its_name_spells_out() {
-        assert_eq!(
-            unit_cgroup(root(), "system.slice"),
-            Path::new("/sys/fs/cgroup/system.slice")
-        );
-        assert_eq!(
-            unit_cgroup(root(), "machine-qemu.slice"),
-            Path::new("/sys/fs/cgroup/machine.slice/machine-qemu.slice")
-        );
-        assert_eq!(
-            unit_cgroup(root(), "a-b-c.slice"),
-            Path::new("/sys/fs/cgroup/a.slice/a-b.slice/a-b-c.slice")
-        );
-    }
-
-    #[test]
-    fn the_root_slice_is_the_hierarchy_root() {
-        assert_eq!(unit_cgroup(root(), "-.slice"), root());
     }
 }

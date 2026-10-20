@@ -27,18 +27,29 @@ use crate::{
         EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, SweepConfig,
         ThrottleMode, TitrateConfig,
     },
-    runtime::{Backend, RuntimeConfig, config::RECLAIM_CHUNK},
+    runtime::{Backend, Paths, ReclaimConfig, RuntimeConfig, ThpAlways},
     session::SessionConfig,
 };
 
-const STALL_TIMEOUT: Duration = Duration::from_secs(60);
-const RECOVER_AFTER: u32 = 3;
+const TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const RECONNECT_MIN: Duration = Duration::from_millis(500);
+const RECONNECT_MAX: Duration = Duration::from_secs(30);
+
+const SETTLE_GRACE: Duration = Duration::from_secs(10);
+const DENY_BACKOFF: Duration = Duration::from_secs(5);
+const HOTPLUG_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// 64 MiB: large enough that releasing a few hundred megabytes is a handful of
+/// writes, small enough that a cancelled reclaim stops inside one of them.
+const RECLAIM_CHUNK: ByteSize = ByteSize::mib(64);
 
 const THROTTLE_RECLAIM: ByteSize = ByteSize::mib(256);
 
 const GROW_STEP: ByteSize = ByteSize::mib(512);
 const ESCALATE_WITHIN: Duration = Duration::from_secs(10);
-const GROW_CAP: u64 = 64;
+const GROW_CAP: u32 = 64;
 
 const RELEASE_STEP: ByteSize = ByteSize::mib(256);
 const RELEASE_AFTER: u32 = 3;
@@ -46,6 +57,11 @@ const RELEASE_COOLDOWN: Duration = Duration::from_secs(30);
 
 const SWEEP_MIN: ByteSize = ByteSize::mib(256);
 const SWEEP_HOLD: Duration = Duration::from_mins(5);
+
+const RECOVER_AFTER: u32 = 3;
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+const THP_ALWAYS: ThpAlwaysSection = ThpAlwaysSection::Fail;
 
 /// pazari-agent configuration.
 #[serde_inline_default]
@@ -94,14 +110,11 @@ pub struct File {
     #[serde(default)]
     preflight: PreflightSection,
 
-    #[serde(default)]
     metrics: Option<MetricsSection>,
 }
 
 impl File {
     pub fn resolve(self) -> Result<Config, ConfigError> {
-        let tick = Interval::try_new(self.tick.interval).at("tick.interval")?;
-
         let ExhaustionSection {
             recover_after,
             mode,
@@ -116,29 +129,28 @@ impl File {
             grow: self.grow.resolve()?,
             release: self.release.resolve()?,
 
-            deny_backoff: Interval::try_new(self.resize.deny_backoff).at("resize.deny_backoff")?,
             settle_grace: Interval::try_new(self.resize.settle_grace).at("resize.settle_grace")?,
+            deny_backoff: Interval::try_new(self.resize.deny_backoff).at("resize.deny_backoff")?,
             recover_after: NonZeroU32::new(recover_after)
                 .positive("exhaustion.recover_after", "count of intervals")?,
-
-            reclaim_swappiness: self
-                .reclaim
-                .swappiness
-                .map(Swappiness::try_new)
-                .transpose()
-                .at("reclaim.swappiness")?,
 
             exhaustion: mode.resolve()?,
         };
 
         let runtime = RuntimeConfig {
+            tick_interval: Interval::try_new(self.tick.interval).at("tick.interval")?,
+
+            cgroup: self.workload.cgroup,
             backend: self.workload.backend.resolve(),
-            tick_interval: tick,
+
             hotplug_debounce: Interval::try_new(self.resize.hotplug_debounce)
                 .at("resize.hotplug_debounce")?,
-            reclaim_chunk: NonZeroU64::new(self.reclaim.chunk.as_u64()).bytes("reclaim.chunk")?,
-            thp_always_fatal: self.preflight.thp_always_fatal,
-            ..RuntimeConfig::new(self.workload.cgroup)
+
+            reclaim: self.reclaim.resolve()?,
+
+            thp_always: self.preflight.thp_always.resolve(),
+
+            paths: Paths::default(),
         };
 
         Ok(Config {
@@ -162,7 +174,7 @@ pub struct TickSection {
 impl Default for TickSection {
     fn default() -> Self {
         Self {
-            interval: Duration::from_secs(1),
+            interval: TICK_INTERVAL,
         }
     }
 }
@@ -202,7 +214,7 @@ pub enum BackendSection {
     /// Through the runtime properties of a unit.
     Systemd {
         /// The unit carrying the limits as `MemoryHigh` and `MemoryMax`. Set me.
-        #[doku(example = "workload.service")]
+        #[doku(example = "workload.slice")]
         unit: String,
     },
 }
@@ -222,19 +234,19 @@ impl BackendSection {
 #[serde(deny_unknown_fields)]
 pub struct HostSection {
     /// How long to wait for the host's `welcome`.
-    #[serde_inline_default(Duration::from_secs(10))]
+    #[serde_inline_default(HANDSHAKE_TIMEOUT)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "10s")]
     handshake_timeout: Duration,
 
     /// The first reconnect delay.
-    #[serde_inline_default(Duration::from_millis(500))]
+    #[serde_inline_default(RECONNECT_MIN)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "500ms")]
     reconnect_min: Duration,
 
     /// The cap the reconnect delay doubles towards.
-    #[serde_inline_default(Duration::from_secs(30))]
+    #[serde_inline_default(RECONNECT_MAX)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "30s")]
     reconnect_max: Duration,
@@ -257,11 +269,11 @@ impl HostSection {
         )?;
 
         Ok(SessionConfig {
-            connector: self.transport.resolve(),
             handshake_timeout: Interval::try_new(self.handshake_timeout)
                 .at("host.handshake_timeout")?,
             reconnect_min,
             reconnect_max,
+            connector: self.transport.resolve(),
         })
     }
 }
@@ -323,9 +335,9 @@ pub struct ResizeSection {
 impl Default for ResizeSection {
     fn default() -> Self {
         Self {
-            settle_grace: Duration::from_secs(10),
-            deny_backoff: Duration::from_secs(5),
-            hotplug_debounce: Duration::from_millis(250),
+            settle_grace: SETTLE_GRACE,
+            deny_backoff: DENY_BACKOFF,
+            hotplug_debounce: HOTPLUG_DEBOUNCE,
         }
     }
 }
@@ -346,63 +358,22 @@ pub struct ReclaimSection {
 impl Default for ReclaimSection {
     fn default() -> Self {
         Self {
-            chunk: ByteSize::b(RECLAIM_CHUNK),
+            chunk: RECLAIM_CHUNK,
             swappiness: None,
         }
     }
 }
 
-#[derive(Debug, Deserialize, Document)]
-#[serde(default, deny_unknown_fields)]
-pub struct ExhaustionSection {
-    /// Calm intervals that end an exhaustion.
-    #[doku(example = "3")]
-    recover_after: u32,
-
-    /// What the agent does once the workload wants more than the ceiling
-    /// allows.
-    #[doku(example = "kind = \"stall\"")]
-    mode: ModeSection,
-}
-
-impl Default for ExhaustionSection {
-    fn default() -> Self {
-        Self {
-            recover_after: RECOVER_AFTER,
-            mode: ModeSection::Stall {
-                timeout: STALL_TIMEOUT,
-            },
-        }
-    }
-}
-
-/// What the agent does once the workload wants more than the ceiling allows.
-#[serde_inline_default]
-#[derive(Debug, Deserialize, Document)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ModeSection {
-    /// Leave the band open and let the workload degrade.
-    Stall {
-        /// How long a workload may want more than the ceiling allows before the
-        /// agent stops waiting for the host to move.
-        #[serde_inline_default(STALL_TIMEOUT)]
-        #[serde(deserialize_with = "humantime_serde::deserialize")]
-        #[doku(as = "String", example = "60s")]
-        timeout: Duration,
-    },
-
-    /// Let the workload reach `memory.max` and be killed as a unit.
-    Kill {},
-}
-
-impl ModeSection {
-    fn resolve(self) -> Result<ExhaustionMode, ConfigError> {
-        match self {
-            Self::Stall { timeout } => Ok(ExhaustionMode::Stall {
-                timeout: Interval::try_new(timeout).at("exhaustion.mode.timeout")?,
-            }),
-            Self::Kill {} => Ok(ExhaustionMode::Kill),
-        }
+impl ReclaimSection {
+    fn resolve(self) -> Result<ReclaimConfig, ConfigError> {
+        Ok(ReclaimConfig {
+            chunk: NonZeroU64::new(self.chunk.as_u64()).bytes("reclaim.chunk")?,
+            swappiness: self
+                .swappiness
+                .map(Swappiness::try_new)
+                .transpose()
+                .at("reclaim.swappiness")?,
+        })
     }
 }
 
@@ -439,7 +410,7 @@ impl ThrottleSection {
 #[derive(Debug, Deserialize, Document)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrowSection {
-    /// One step at first. Each brake that follows soon after the last grow
+    /// One step at first. Each throttle that follows soon after the last grow
     /// doubles it, up to `cap` steps.
     Exponential {
         /// The first request, and the unit later ones are multiples of.
@@ -447,7 +418,7 @@ pub enum GrowSection {
         #[doku(as = "String", example = "512MiB")]
         step: ByteSize,
 
-        /// How soon after a grow a brake still doubles the next request.
+        /// How soon after a grow a throttle still doubles the next request.
         #[serde_inline_default(ESCALATE_WITHIN)]
         #[serde(deserialize_with = "humantime_serde::deserialize")]
         #[doku(as = "String", example = "10s")]
@@ -456,7 +427,7 @@ pub enum GrowSection {
         /// The most steps one request asks for.
         #[serde_inline_default(GROW_CAP)]
         #[doku(example = "64")]
-        cap: u64,
+        cap: u32,
     },
 }
 
@@ -470,7 +441,7 @@ impl GrowSection {
             } => Ok(GrowConfig::Exponential(ExponentialConfig {
                 step: NonZeroU64::new(step.as_u64()).bytes("grow.step")?,
                 escalate_within: Interval::try_new(escalate_within).at("grow.escalate_within")?,
-                cap: NonZeroU64::new(cap).positive("grow.cap", "count of steps")?,
+                cap: NonZeroU32::new(cap).positive("grow.cap", "count of steps")?,
             })),
         }
     }
@@ -549,17 +520,87 @@ impl ReleaseSection {
 
 #[derive(Debug, Deserialize, Document)]
 #[serde(default, deny_unknown_fields)]
+pub struct ExhaustionSection {
+    /// Calm intervals that end an exhaustion.
+    #[doku(example = "3")]
+    recover_after: u32,
+
+    /// What the agent does once the workload wants more than the ceiling
+    /// allows.
+    #[doku(example = "kind = \"stall\"")]
+    mode: ModeSection,
+}
+
+impl Default for ExhaustionSection {
+    fn default() -> Self {
+        Self {
+            recover_after: RECOVER_AFTER,
+            mode: ModeSection::Stall {
+                timeout: STALL_TIMEOUT,
+            },
+        }
+    }
+}
+
+/// What the agent does once the workload wants more than the ceiling allows.
+#[serde_inline_default]
+#[derive(Debug, Deserialize, Document)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModeSection {
+    /// Keep the brake on until `timeout`, then release it.
+    Stall {
+        /// How long a workload may want more than the ceiling allows before the
+        /// agent stops waiting for the host to move.
+        #[serde_inline_default(STALL_TIMEOUT)]
+        #[serde(deserialize_with = "humantime_serde::deserialize")]
+        #[doku(as = "String", example = "60s")]
+        timeout: Duration,
+    },
+
+    /// Let the workload reach `memory.max` and be killed as a unit.
+    Kill {},
+}
+
+impl ModeSection {
+    fn resolve(self) -> Result<ExhaustionMode, ConfigError> {
+        match self {
+            Self::Stall { timeout } => Ok(ExhaustionMode::Stall {
+                timeout: Interval::try_new(timeout).at("exhaustion.mode.timeout")?,
+            }),
+            Self::Kill {} => Ok(ExhaustionMode::Kill),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Document)]
+#[serde(default, deny_unknown_fields)]
 pub struct PreflightSection {
-    /// Whether `/sys/kernel/mm/transparent_hugepage/enabled` set to `always`
-    /// fails preflight.
-    #[doku(example = "true")]
-    thp_always_fatal: bool,
+    /// What preflight does when `/sys/kernel/mm/transparent_hugepage/enabled`
+    /// is set to `always`.
+    #[doku(example = "\"fail\"")]
+    thp_always: ThpAlwaysSection,
 }
 
 impl Default for PreflightSection {
     fn default() -> Self {
         Self {
-            thp_always_fatal: true,
+            thp_always: THP_ALWAYS,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Document)]
+#[serde(rename_all = "snake_case")]
+pub enum ThpAlwaysSection {
+    Fail,
+    Warn,
+}
+
+impl ThpAlwaysSection {
+    const fn resolve(self) -> ThpAlways {
+        match self {
+            Self::Fail => ThpAlways::Fail,
+            Self::Warn => ThpAlways::Warn,
         }
     }
 }
@@ -567,7 +608,7 @@ impl Default for PreflightSection {
 #[derive(Debug, Deserialize, Document)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsSection {
-    /// The address the Prometheus endpoint answers scrapes on.
+    /// The address to serve `OpenMetrics` on.
     #[doku(as = "String", example = "127.0.0.1:9651")]
     listen: SocketAddr,
 }

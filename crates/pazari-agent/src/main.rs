@@ -66,7 +66,7 @@ async fn agent(cli: Cli) -> Result<ExitCode> {
         }
         Some(Command::Preflight) => {
             let config = config()?;
-            let report = Preflight::new(&config.runtime).run(config.engine.reclaim_swappiness);
+            let report = Preflight::new(&config.runtime).run();
             println!("{report}");
             Ok(if report.passed() {
                 ExitCode::SUCCESS

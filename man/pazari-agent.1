@@ -285,18 +285,22 @@ or boot with
 Transparent hugepages are not set to
 .Cm always .
 Fails by default; see
-.Cm preflight.thp_always_fatal
+.Cm preflight.thp_always
 in
 .Xr pazari-agent.toml 5 .
 .It Cm block size
 .Pa /sys/devices/system/memory/block_size_bytes
 is readable and non-zero.
+.It Cm meminfo
+.Pa /proc/meminfo
+is readable and carries the fields the agent reads.
 .It Cm balloon
 The guest has no virtio-balloon device.
 Warns if a virtio device cannot be identified.
 .It Cm swap
 The guest has swap and the workload cgroup may use it.
-Only ever a warning, and skipped when
+Warns if not.
+Skipped when
 .Cm reclaim.swappiness
 is 0.
 .El

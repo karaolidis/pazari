@@ -205,10 +205,7 @@ impl World {
     }
 
     pub fn start_reclaim(&mut self, bytes: NonZeroU64, fx: &mut Effects) {
-        fx.emit(Action::StartReclaim {
-            bytes: bytes.get(),
-            swappiness: self.config.reclaim_swappiness,
-        });
+        fx.emit(Action::StartReclaim { bytes: bytes.get() });
 
         self.reclaim = Reclaim::Running;
     }

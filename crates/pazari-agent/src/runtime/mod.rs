@@ -14,11 +14,11 @@ pub(crate) mod testing;
 pub use crate::runtime::{
     apply::Applier,
     cgroup::{AnyCgroup, Cgroup, Limit, MemoryEvents, RawCgroup, Reclaimed, SystemdCgroup},
-    config::{Backend, Paths, RuntimeConfig},
+    config::{Backend, Paths, ReclaimConfig, RuntimeConfig, ThpAlways},
     error::RuntimeError,
-    preflight::{Check, Preflight, Report, Severity},
+    preflight::{Check, CheckKind, Preflight, Report, Severity},
     reclaim::{ReclaimHandle, Reclaimer},
     snapshot::{Snapshots, Ticker},
     throttle::ThrottleWatcher,
-    topology::{Hotplug, HotplugListener, Topology},
+    topology::{HotplugListener, Topology},
 };

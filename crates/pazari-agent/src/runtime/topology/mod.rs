@@ -7,7 +7,7 @@ use std::{
 
 use pazari_types::{KernelFileError, MemInfo};
 
-pub use crate::runtime::topology::uevent::{Hotplug, HotplugListener};
+pub use crate::runtime::topology::uevent::HotplugListener;
 use crate::runtime::{config::Paths, error::RuntimeError};
 
 /// One-shot reads of the guest's memory geometry.
@@ -53,13 +53,7 @@ impl Topology {
     }
 }
 
-impl Default for Topology {
-    fn default() -> Self {
-        Self::new(&Paths::default())
-    }
-}
-
-fn parse_block_size(path: &Path, text: &str) -> Result<NonZeroU64, KernelFileError> {
+pub fn parse_block_size(path: &Path, text: &str) -> Result<NonZeroU64, KernelFileError> {
     const EXPECTED: &str = "a positive hexadecimal byte count";
 
     let text = text.trim();

@@ -1,13 +1,14 @@
 use std::{fmt, fs, path::Path};
 
-use pazari_types::Swappiness;
+use pazari_types::{MemInfo, Swappiness};
 
 use crate::runtime::{
     cgroup::{
         Limit, MEMORY_CURRENT, MEMORY_EVENTS, MEMORY_HIGH, MEMORY_MAX, MEMORY_OOM_GROUP,
         MEMORY_PRESSURE, MEMORY_RECLAIM, MEMORY_SWAP_CURRENT, MEMORY_SWAP_MAX,
     },
-    config::{RuntimeConfig, VIRTIO_BALLOON, VIRTIO_DEVICE_ID},
+    config::{RuntimeConfig, ThpAlways, VIRTIO_BALLOON, VIRTIO_DEVICE_ID},
+    topology::parse_block_size,
 };
 
 const CONTROLLERS: &str = "cgroup.controllers";
@@ -16,7 +17,12 @@ const SUBTREE_CONTROL: &str = "cgroup.subtree_control";
 /// The prefix of the `/proc/self/cgroup` line that names a cgroup v2 path.
 const UNIFIED_ENTRY: &str = "0::";
 
-const READS: [&str; 3] = [MEMORY_EVENTS, MEMORY_CURRENT, MEMORY_PRESSURE];
+const READS: [&str; 4] = [
+    MEMORY_EVENTS,
+    MEMORY_CURRENT,
+    MEMORY_PRESSURE,
+    MEMORY_SWAP_CURRENT,
+];
 
 const WRITES: [&str; 4] = [MEMORY_HIGH, MEMORY_MAX, MEMORY_OOM_GROUP, MEMORY_RECLAIM];
 
@@ -39,9 +45,67 @@ impl fmt::Display for Severity {
     }
 }
 
+/// Which check a result belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckKind {
+    CgroupV2,
+    WorkloadCgroup,
+    AgentCgroup,
+    MemoryController,
+    AutoOnlining,
+    TransparentHugepages,
+    BlockSize,
+    Meminfo,
+    Balloon,
+    Swap,
+}
+
+impl CheckKind {
+    const fn pass(self, detail: String) -> Check {
+        Check {
+            kind: self,
+            severity: Severity::Pass,
+            detail,
+        }
+    }
+
+    const fn warn(self, detail: String) -> Check {
+        Check {
+            kind: self,
+            severity: Severity::Warn,
+            detail,
+        }
+    }
+
+    const fn fail(self, detail: String) -> Check {
+        Check {
+            kind: self,
+            severity: Severity::Fail,
+            detail,
+        }
+    }
+}
+
+impl fmt::Display for CheckKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::CgroupV2 => "cgroup v2",
+            Self::WorkloadCgroup => "workload cgroup",
+            Self::AgentCgroup => "agent cgroup",
+            Self::MemoryController => "memory controller",
+            Self::AutoOnlining => "auto-onlining",
+            Self::TransparentHugepages => "transparent hugepages",
+            Self::BlockSize => "block size",
+            Self::Meminfo => "meminfo",
+            Self::Balloon => "balloon",
+            Self::Swap => "swap",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Check {
-    pub name: &'static str,
+    pub kind: CheckKind,
     pub severity: Severity,
     pub detail: String,
 }
@@ -51,38 +115,8 @@ impl fmt::Display for Check {
         write!(
             formatter,
             "{} {}: {}",
-            self.severity, self.name, self.detail
+            self.severity, self.kind, self.detail
         )
-    }
-}
-
-/// One check's name, so the severities it can reach do not each have to carry it.
-#[derive(Debug, Clone, Copy)]
-struct Named(&'static str);
-
-impl Named {
-    const fn pass(self, detail: String) -> Check {
-        Check {
-            name: self.0,
-            severity: Severity::Pass,
-            detail,
-        }
-    }
-
-    const fn warn(self, detail: String) -> Check {
-        Check {
-            name: self.0,
-            severity: Severity::Warn,
-            detail,
-        }
-    }
-
-    const fn fail(self, detail: String) -> Check {
-        Check {
-            name: self.0,
-            severity: Severity::Fail,
-            detail,
-        }
     }
 }
 
@@ -138,7 +172,7 @@ impl<'a> Preflight<'a> {
     }
 
     #[must_use]
-    pub fn run(self, swappiness: Option<Swappiness>) -> Report {
+    pub fn run(self) -> Report {
         Report {
             checks: vec![
                 self.cgroup_v2(),
@@ -148,14 +182,15 @@ impl<'a> Preflight<'a> {
                 self.auto_onlining(),
                 self.transparent_hugepages(),
                 self.block_size(),
+                self.meminfo(),
                 self.balloon(),
-                self.swap(swappiness),
+                self.swap(),
             ],
         }
     }
 
     fn cgroup_v2(self) -> Check {
-        let check = Named("cgroup v2");
+        let check = CheckKind::CgroupV2;
 
         let root = &self.config.paths.cgroup_root;
         let controllers = root.join(CONTROLLERS);
@@ -171,7 +206,7 @@ impl<'a> Preflight<'a> {
     }
 
     fn workload_cgroup(self) -> Check {
-        let check = Named("workload cgroup");
+        let check = CheckKind::WorkloadCgroup;
 
         let cgroup = &self.config.cgroup;
 
@@ -204,7 +239,7 @@ impl<'a> Preflight<'a> {
     }
 
     fn agent_cgroup(self) -> Check {
-        let check = Named("agent cgroup");
+        let check = CheckKind::AgentCgroup;
 
         let path = &self.config.paths.self_cgroup;
         let workload = &self.config.cgroup;
@@ -264,7 +299,7 @@ impl<'a> Preflight<'a> {
     }
 
     fn memory_controller(self) -> Check {
-        let check = Named("memory controller");
+        let check = CheckKind::MemoryController;
 
         let Some(parent) = self.config.cgroup.parent() else {
             return check.fail(format!(
@@ -296,7 +331,7 @@ impl<'a> Preflight<'a> {
     }
 
     fn auto_onlining(self) -> Check {
-        let check = Named("auto-onlining");
+        let check = CheckKind::AutoOnlining;
 
         let path = &self.config.paths.auto_online_blocks;
 
@@ -324,7 +359,7 @@ impl<'a> Preflight<'a> {
     }
 
     fn balloon(self) -> Check {
-        let check = Named("balloon");
+        let check = CheckKind::Balloon;
 
         let path = &self.config.paths.virtio_devices;
 
@@ -385,7 +420,7 @@ impl<'a> Preflight<'a> {
     }
 
     fn transparent_hugepages(self) -> Check {
-        let check = Named("transparent hugepages");
+        let check = CheckKind::TransparentHugepages;
 
         let path = &self.config.paths.transparent_hugepage;
 
@@ -416,15 +451,14 @@ impl<'a> Preflight<'a> {
             path.display()
         );
 
-        if self.config.thp_always_fatal {
-            check.fail(detail)
-        } else {
-            check.warn(detail)
+        match self.config.thp_always {
+            ThpAlways::Fail => check.fail(detail),
+            ThpAlways::Warn => check.warn(detail),
         }
     }
 
     fn block_size(self) -> Check {
-        let check = Named("block size");
+        let check = CheckKind::BlockSize;
 
         let path = &self.config.paths.block_size;
 
@@ -435,17 +469,35 @@ impl<'a> Preflight<'a> {
             }
         };
 
-        match u64::from_str_radix(&value, 16) {
-            Ok(bytes) if bytes > 0 => check.pass(format!("blocks are {bytes} bytes")),
-            _ => check.fail(format!(
-                "{} holds {value:?}, which is not a positive hexadecimal byte count",
-                path.display()
-            )),
+        match parse_block_size(path, &value) {
+            Ok(bytes) => check.pass(format!("blocks are {bytes} bytes")),
+            Err(error) => check.fail(error.to_string()),
         }
     }
 
-    fn swap(self, swappiness: Option<Swappiness>) -> Check {
-        let check = Named("swap");
+    /// Reads `/proc/meminfo`, which every tick parses.
+    fn read_meminfo(self) -> Result<MemInfo, String> {
+        let path = &self.config.paths.meminfo;
+
+        let text = fs::read_to_string(path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+
+        MemInfo::parse(path, &text).map_err(|error| error.to_string())
+    }
+
+    fn meminfo(self) -> Check {
+        let check = CheckKind::Meminfo;
+
+        match self.read_meminfo() {
+            Ok(info) => check.pass(format!("MemTotal is {} bytes", info.total)),
+            Err(detail) => check.fail(detail),
+        }
+    }
+
+    fn swap(self) -> Check {
+        let check = CheckKind::Swap;
+
+        let swappiness = self.config.reclaim.swappiness;
 
         if swappiness == Some(Swappiness::NONE) {
             return check.pass("reclaim runs at swappiness=0 and never swaps".to_owned());
@@ -458,17 +510,12 @@ impl<'a> Preflight<'a> {
 
         let meminfo = &self.config.paths.meminfo;
 
-        let total = match fs::read_to_string(meminfo) {
-            Ok(text) => text.lines().find_map(|line| {
-                let rest = line.strip_prefix("SwapTotal:")?;
-                rest.split_whitespace().next()?.parse().ok()
-            }),
-            Err(error) => {
-                return check.warn(format!("cannot read {}: {error}", meminfo.display()));
-            }
+        let swap_total = match self.read_meminfo() {
+            Ok(info) => info.swap_total,
+            Err(detail) => return check.fail(detail),
         };
 
-        if total == Some(0) || total.is_none() {
+        if swap_total == 0 {
             return check.warn(format!(
                 "{intent}, and {} reports no swap",
                 meminfo.display()
@@ -483,13 +530,6 @@ impl<'a> Preflight<'a> {
             return check.warn(format!("{intent}, and {} is 0", path.display()));
         }
 
-        if !self.config.cgroup.join(MEMORY_SWAP_CURRENT).is_file() {
-            return check.warn(format!(
-                "{intent}, and {} has no {MEMORY_SWAP_CURRENT}: swap accounting is off and the agent cannot see what it freed",
-                self.config.cgroup.display()
-            ));
-        }
-
         check.pass(format!("{intent}, and the guest has swap to use"))
     }
 }
@@ -497,22 +537,35 @@ impl<'a> Preflight<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{config::Paths, testing::Guest};
+    use crate::runtime::{
+        config::{Paths, ReclaimConfig},
+        testing::Guest,
+    };
 
-    fn severity(report: &Report, name: &str) -> Severity {
+    fn swapping(guest: &Guest) -> RuntimeConfig {
+        RuntimeConfig {
+            reclaim: ReclaimConfig {
+                swappiness: Some(Swappiness::try_new(60).expect("60 is a swappiness")),
+                ..guest.config.reclaim
+            },
+            ..guest.config.clone()
+        }
+    }
+
+    fn severity(report: &Report, kind: CheckKind) -> Severity {
         report
             .checks()
             .iter()
-            .find(|check| check.name == name)
+            .find(|check| check.kind == kind)
             .map(|check| check.severity)
             .expect("the check ran")
     }
 
-    fn detail(report: &Report, name: &str) -> String {
+    fn detail(report: &Report, kind: CheckKind) -> String {
         report
             .checks()
             .iter()
-            .find(|check| check.name == name)
+            .find(|check| check.kind == kind)
             .map(|check| check.detail.clone())
             .expect("the check ran")
     }
@@ -520,11 +573,11 @@ mod tests {
     #[test]
     fn a_guest_that_is_set_up_passes_every_check() {
         let guest = Guest::new();
-        let report = Preflight::new(&guest.config).run(Some(Swappiness::NONE));
+        let report = Preflight::new(&guest.config).run();
 
         assert_eq!(report.severity(), Severity::Pass, "{report}");
         assert!(report.passed());
-        assert_eq!(report.checks().len(), 9);
+        assert_eq!(report.checks().len(), 10);
     }
 
     #[test]
@@ -532,10 +585,10 @@ mod tests {
         let guest = Guest::new();
         Guest::remove(&guest.config.paths.cgroup_root.join(CONTROLLERS));
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "cgroup v2"), Severity::Fail);
-        assert!(detail(&report, "cgroup v2").contains("cgroup v2 is not mounted"));
+        assert_eq!(severity(&report, CheckKind::CgroupV2), Severity::Fail);
+        assert!(detail(&report, CheckKind::CgroupV2).contains("cgroup v2 is not mounted"));
         assert!(!report.passed());
     }
 
@@ -544,13 +597,29 @@ mod tests {
         let guest = Guest::new();
         Guest::remove(&guest.config.cgroup.join(MEMORY_RECLAIM));
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "workload cgroup"), Severity::Fail);
+        assert_eq!(severity(&report, CheckKind::WorkloadCgroup), Severity::Fail);
         assert!(
-            detail(&report, "workload cgroup").contains("memory.reclaim is not writable"),
+            detail(&report, CheckKind::WorkloadCgroup).contains("memory.reclaim is not writable"),
             "{}",
-            detail(&report, "workload cgroup")
+            detail(&report, CheckKind::WorkloadCgroup)
+        );
+    }
+
+    #[test]
+    fn a_workload_cgroup_without_swap_accounting_fails() {
+        let guest = Guest::new();
+        Guest::remove(&guest.config.cgroup.join(MEMORY_SWAP_CURRENT));
+
+        let report = Preflight::new(&guest.config).run();
+
+        assert_eq!(severity(&report, CheckKind::WorkloadCgroup), Severity::Fail);
+        assert!(
+            detail(&report, CheckKind::WorkloadCgroup)
+                .contains("memory.swap.current is not readable"),
+            "{}",
+            detail(&report, CheckKind::WorkloadCgroup)
         );
     }
 
@@ -562,9 +631,9 @@ mod tests {
             ..guest.config.clone()
         };
 
-        let report = Preflight::new(&config).run(None);
+        let report = Preflight::new(&config).run();
 
-        assert_eq!(severity(&report, "workload cgroup"), Severity::Fail);
+        assert_eq!(severity(&report, CheckKind::WorkloadCgroup), Severity::Fail);
     }
 
     #[test]
@@ -572,10 +641,10 @@ mod tests {
         let guest = Guest::new();
         Guest::write(&guest.config.paths.self_cgroup, "0::/workload.slice\n");
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "agent cgroup"), Severity::Fail);
-        assert!(detail(&report, "agent cgroup").contains("inside the cgroup it brakes"));
+        assert_eq!(severity(&report, CheckKind::AgentCgroup), Severity::Fail);
+        assert!(detail(&report, CheckKind::AgentCgroup).contains("inside the cgroup it brakes"));
         assert!(!report.passed());
     }
 
@@ -589,7 +658,7 @@ mod tests {
         );
 
         assert_eq!(
-            severity(&Preflight::new(&guest.config).run(None), "agent cgroup"),
+            severity(&Preflight::new(&guest.config).run(), CheckKind::AgentCgroup),
             Severity::Fail
         );
     }
@@ -601,7 +670,7 @@ mod tests {
         Guest::write(&guest.config.paths.self_cgroup, "0::/workload.slice2\n");
 
         assert_eq!(
-            severity(&Preflight::new(&guest.config).run(None), "agent cgroup"),
+            severity(&Preflight::new(&guest.config).run(), CheckKind::AgentCgroup),
             Severity::Pass
         );
     }
@@ -613,10 +682,10 @@ mod tests {
         for text in ["0::/\n", "0::/elsewhere.slice\n", "3:memory:/workload\n"] {
             Guest::write(&guest.config.paths.self_cgroup, text);
 
-            let report = Preflight::new(&guest.config).run(None);
+            let report = Preflight::new(&guest.config).run();
 
             assert_eq!(
-                severity(&report, "agent cgroup"),
+                severity(&report, CheckKind::AgentCgroup),
                 Severity::Warn,
                 "did not warn on {text:?}"
             );
@@ -626,7 +695,7 @@ mod tests {
         Guest::remove(&guest.config.paths.self_cgroup);
 
         assert_eq!(
-            severity(&Preflight::new(&guest.config).run(None), "agent cgroup"),
+            severity(&Preflight::new(&guest.config).run(), CheckKind::AgentCgroup),
             Severity::Warn
         );
     }
@@ -644,10 +713,13 @@ mod tests {
             "cpu pids\n",
         );
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "memory controller"), Severity::Fail);
-        assert!(detail(&report, "memory controller").contains("does not list memory"));
+        assert_eq!(
+            severity(&report, CheckKind::MemoryController),
+            Severity::Fail
+        );
+        assert!(detail(&report, CheckKind::MemoryController).contains("does not list memory"));
     }
 
     #[test]
@@ -655,13 +727,13 @@ mod tests {
         let guest = Guest::new();
         Guest::write(&guest.config.paths.auto_online_blocks, "offline\n");
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "auto-onlining"), Severity::Fail);
+        assert_eq!(severity(&report, CheckKind::AutoOnlining), Severity::Fail);
         assert!(
-            detail(&report, "auto-onlining").contains("never reaches MemTotal"),
+            detail(&report, CheckKind::AutoOnlining).contains("never reaches MemTotal"),
             "{}",
-            detail(&report, "auto-onlining")
+            detail(&report, CheckKind::AutoOnlining)
         );
         assert!(!report.passed());
     }
@@ -671,7 +743,10 @@ mod tests {
         let guest = Guest::new();
 
         assert_eq!(
-            severity(&Preflight::new(&guest.config).run(None), "auto-onlining"),
+            severity(
+                &Preflight::new(&guest.config).run(),
+                CheckKind::AutoOnlining
+            ),
             Severity::Pass
         );
 
@@ -681,14 +756,14 @@ mod tests {
                 &format!("{policy}\n"),
             );
 
-            let report = Preflight::new(&guest.config).run(None);
+            let report = Preflight::new(&guest.config).run();
 
             assert_eq!(
-                severity(&report, "auto-onlining"),
+                severity(&report, CheckKind::AutoOnlining),
                 Severity::Warn,
                 "{policy}"
             );
-            assert!(detail(&report, "auto-onlining").contains("online_movable"));
+            assert!(detail(&report, CheckKind::AutoOnlining).contains("online_movable"));
         }
     }
 
@@ -697,15 +772,18 @@ mod tests {
         let guest = Guest::new();
         Guest::write(&guest.config.paths.auto_online_blocks, "sideways\n");
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "auto-onlining"), Severity::Fail);
-        assert!(detail(&report, "auto-onlining").contains("not an onlining policy"));
+        assert_eq!(severity(&report, CheckKind::AutoOnlining), Severity::Fail);
+        assert!(detail(&report, CheckKind::AutoOnlining).contains("not an onlining policy"));
 
         Guest::remove(&guest.config.paths.auto_online_blocks);
 
         assert_eq!(
-            severity(&Preflight::new(&guest.config).run(None), "auto-onlining"),
+            severity(
+                &Preflight::new(&guest.config).run(),
+                CheckKind::AutoOnlining
+            ),
             Severity::Fail
         );
     }
@@ -718,15 +796,15 @@ mod tests {
             "0x0005\n",
         );
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "balloon"), Severity::Fail);
+        assert_eq!(severity(&report, CheckKind::Balloon), Severity::Fail);
         assert!(
-            detail(&report, "balloon").contains("virtio2"),
+            detail(&report, CheckKind::Balloon).contains("virtio2"),
             "{}",
-            detail(&report, "balloon")
+            detail(&report, CheckKind::Balloon)
         );
-        assert!(detail(&report, "balloon").contains("underneath the negotiation"));
+        assert!(detail(&report, CheckKind::Balloon).contains("underneath the negotiation"));
         assert!(!report.passed());
     }
 
@@ -735,7 +813,7 @@ mod tests {
         let guest = Guest::new();
 
         assert_eq!(
-            severity(&Preflight::new(&guest.config).run(None), "balloon"),
+            severity(&Preflight::new(&guest.config).run(), CheckKind::Balloon),
             Severity::Pass
         );
 
@@ -747,10 +825,10 @@ mod tests {
             ..guest.config.clone()
         };
 
-        let report = Preflight::new(&bare).run(None);
+        let report = Preflight::new(&bare).run();
 
-        assert_eq!(severity(&report, "balloon"), Severity::Pass);
-        assert!(detail(&report, "balloon").contains("no virtio bus"));
+        assert_eq!(severity(&report, CheckKind::Balloon), Severity::Pass);
+        assert!(detail(&report, CheckKind::Balloon).contains("no virtio bus"));
     }
 
     #[test]
@@ -761,10 +839,10 @@ mod tests {
             "balloon?\n",
         );
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "balloon"), Severity::Warn);
-        assert!(detail(&report, "balloon").contains("not a device id"));
+        assert_eq!(severity(&report, CheckKind::Balloon), Severity::Warn);
+        assert!(detail(&report, CheckKind::Balloon).contains("not a device id"));
         assert!(report.passed(), "a warning still starts the agent");
 
         Guest::write(
@@ -773,10 +851,10 @@ mod tests {
         );
         Guest::dir(&guest.config.paths.virtio_devices.join("virtio3"));
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "balloon"), Severity::Warn);
-        assert!(detail(&report, "balloon").contains("cannot read"));
+        assert_eq!(severity(&report, CheckKind::Balloon), Severity::Warn);
+        assert!(detail(&report, CheckKind::Balloon).contains("cannot read"));
     }
 
     #[test]
@@ -787,10 +865,10 @@ mod tests {
         Guest::dir(&devices.join("virtio2"));
         Guest::write(&devices.join("virtio3/device"), "0x0005\n");
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "balloon"), Severity::Fail);
-        assert!(detail(&report, "balloon").contains("virtio3"));
+        assert_eq!(severity(&report, CheckKind::Balloon), Severity::Fail);
+        assert!(detail(&report, CheckKind::Balloon).contains("virtio3"));
     }
 
     #[test]
@@ -801,18 +879,26 @@ mod tests {
             "[always] madvise never\n",
         );
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "transparent hugepages"), Severity::Fail);
-        assert!(detail(&report, "transparent hugepages").contains("overshoots memory.high"));
+        assert_eq!(
+            severity(&report, CheckKind::TransparentHugepages),
+            Severity::Fail
+        );
+        assert!(
+            detail(&report, CheckKind::TransparentHugepages).contains("overshoots memory.high")
+        );
 
         let lenient = RuntimeConfig {
-            thp_always_fatal: false,
+            thp_always: ThpAlways::Warn,
             ..guest.config
         };
 
         assert_eq!(
-            severity(&Preflight::new(&lenient).run(None), "transparent hugepages"),
+            severity(
+                &Preflight::new(&lenient).run(),
+                CheckKind::TransparentHugepages
+            ),
             Severity::Warn
         );
     }
@@ -826,8 +912,8 @@ mod tests {
 
             assert_eq!(
                 severity(
-                    &Preflight::new(&guest.config).run(None),
-                    "transparent hugepages"
+                    &Preflight::new(&guest.config).run(),
+                    CheckKind::TransparentHugepages
                 ),
                 Severity::Pass,
                 "rejected {mode}"
@@ -838,8 +924,8 @@ mod tests {
 
         assert_eq!(
             severity(
-                &Preflight::new(&guest.config).run(None),
-                "transparent hugepages"
+                &Preflight::new(&guest.config).run(),
+                CheckKind::TransparentHugepages
             ),
             Severity::Fail
         );
@@ -850,18 +936,18 @@ mod tests {
         let guest = Guest::new();
 
         assert_eq!(
-            severity(&Preflight::new(&guest.config).run(None), "block size"),
+            severity(&Preflight::new(&guest.config).run(), CheckKind::BlockSize),
             Severity::Pass
         );
         assert_eq!(
-            detail(&Preflight::new(&guest.config).run(None), "block size"),
+            detail(&Preflight::new(&guest.config).run(), CheckKind::BlockSize),
             "blocks are 134217728 bytes"
         );
 
         Guest::write(&guest.config.paths.block_size, "0x8000000\n");
 
         assert_eq!(
-            severity(&Preflight::new(&guest.config).run(None), "block size"),
+            severity(&Preflight::new(&guest.config).run(), CheckKind::BlockSize),
             Severity::Fail
         );
     }
@@ -875,10 +961,10 @@ mod tests {
              SwapTotal:            0 kB\n",
         );
 
-        let report = Preflight::new(&guest.config).run(None);
+        let report = Preflight::new(&guest.config).run();
 
-        assert_eq!(severity(&report, "swap"), Severity::Warn);
-        assert!(detail(&report, "swap").contains("reports no swap"));
+        assert_eq!(severity(&report, CheckKind::Swap), Severity::Warn);
+        assert!(detail(&report, CheckKind::Swap).contains("reports no swap"));
         assert!(report.passed(), "a warning still starts the agent");
     }
 
@@ -887,30 +973,68 @@ mod tests {
         let guest = Guest::new();
         Guest::write(&guest.config.cgroup.join(MEMORY_SWAP_MAX), "0\n");
 
-        let swappiness = Swappiness::try_new(60).expect("60 is a swappiness");
-        let report = Preflight::new(&guest.config).run(Some(swappiness));
+        let report = Preflight::new(&swapping(&guest)).run();
 
-        assert_eq!(severity(&report, "swap"), Severity::Warn);
-        assert!(detail(&report, "swap").contains("swappiness=60"));
+        assert_eq!(severity(&report, CheckKind::Swap), Severity::Warn);
+        assert!(detail(&report, CheckKind::Swap).contains("swappiness=60"));
     }
 
     #[test]
     fn swapping_reclaim_with_swap_to_use_passes() {
         let guest = Guest::new();
-        let swappiness = Swappiness::try_new(60).expect("60 is a swappiness");
 
         assert_eq!(
-            severity(&Preflight::new(&guest.config).run(Some(swappiness)), "swap"),
+            severity(&Preflight::new(&swapping(&guest)).run(), CheckKind::Swap),
             Severity::Pass
         );
+    }
+
+    #[test]
+    fn a_meminfo_that_does_not_parse_fails_whatever_reclaim_swaps() {
+        let guest = Guest::new();
+        Guest::write(
+            &guest.config.paths.meminfo,
+            "MemTotal:       2096756 kB\nMemFree:         131072 kB\nMemAvailable:   1729396 kB\n\
+             SwapTotal:          wat kB\n",
+        );
+
+        let never = RuntimeConfig {
+            reclaim: ReclaimConfig {
+                swappiness: Some(Swappiness::NONE),
+                ..guest.config.reclaim
+            },
+            ..guest.config
+        };
+
+        let report = Preflight::new(&never).run();
+
+        assert_eq!(severity(&report, CheckKind::Meminfo), Severity::Fail);
+        assert!(
+            detail(&report, CheckKind::Meminfo).contains("which is not a count of kB"),
+            "{}",
+            detail(&report, CheckKind::Meminfo)
+        );
+        assert_eq!(severity(&report, CheckKind::Swap), Severity::Pass);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn a_meminfo_that_cannot_be_read_fails() {
+        let guest = Guest::new();
+        Guest::remove(&guest.config.paths.meminfo);
+
+        let report = Preflight::new(&guest.config).run();
+
+        assert_eq!(severity(&report, CheckKind::Meminfo), Severity::Fail);
+        assert!(detail(&report, CheckKind::Meminfo).contains("cannot read"));
     }
 
     #[test]
     fn a_report_prints_one_line_a_check() {
         let report = Report {
             checks: vec![
-                Named("cgroup v2").pass("a unified hierarchy".to_owned()),
-                Named("swap").warn("no swap".to_owned()),
+                CheckKind::CgroupV2.pass("a unified hierarchy".to_owned()),
+                CheckKind::Swap.warn("no swap".to_owned()),
             ],
         };
 

@@ -22,12 +22,12 @@ type Stream = GuestStream<AnyConnection>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionConfig {
-    pub connector: AnyConnector,
-
     pub handshake_timeout: Interval,
 
     pub reconnect_min: Interval,
     pub reconnect_max: Interval,
+
+    pub connector: AnyConnector,
 }
 
 #[derive(Debug)]
@@ -96,6 +96,14 @@ impl Outbound {
     }
 }
 
+/// What the host's `welcome` told the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Welcome {
+    ceiling: u64,
+    status_interval: Duration,
+    hotplugged: u64,
+}
+
 /// Why a connection ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
@@ -162,8 +170,11 @@ async fn attempt(
         return Outcome::Retry;
     }
 
-    let Some((ceiling, status_interval, hotplugged)) =
-        welcome(&mut stream, config.handshake_timeout.get()).await
+    let Some(Welcome {
+        ceiling,
+        status_interval,
+        hotplugged,
+    }) = welcome(&mut stream, config.handshake_timeout.get()).await
     else {
         return Outcome::Retry;
     };
@@ -199,7 +210,7 @@ async fn attempt(
     outcome
 }
 
-async fn welcome(stream: &mut Stream, within: Duration) -> Option<(u64, Duration, u64)> {
+async fn welcome(stream: &mut Stream, within: Duration) -> Option<Welcome> {
     let first = match timeout(within, stream.recv()).await {
         Ok(Ok(Some(message))) => message,
         Ok(Ok(None)) => {
@@ -236,7 +247,11 @@ async fn welcome(stream: &mut Stream, within: Duration) -> Option<(u64, Duration
         return None;
     }
 
-    Some((ceiling, status_interval, hotplugged))
+    Some(Welcome {
+        ceiling,
+        status_interval,
+        hotplugged,
+    })
 }
 
 async fn pump(
@@ -286,28 +301,16 @@ mod tests {
     use tokio::{io::AsyncReadExt as _, net::UnixStream};
 
     use super::*;
-
-    const MIB: u64 = 1 << 20;
-    const BOOT: u64 = 2048 * MIB;
-    const BLOCK: u64 = 128 * MIB;
-    const CEILING: u64 = 4096 * MIB;
+    use crate::engine::testing::{BLOCK, BOOT, CEILING, MIB, bytes, interval, interval_ms};
 
     type HostStream = pazari_transport::HostStream<UnixStream>;
 
-    fn bytes(value: u64) -> NonZeroU64 {
-        NonZeroU64::new(value).expect("a positive byte count")
-    }
-
-    fn interval(value: Duration) -> Interval {
-        Interval::try_new(value).expect("a positive interval under a day")
-    }
-
     fn config(path: &Path) -> SessionConfig {
         SessionConfig {
+            handshake_timeout: interval(5),
+            reconnect_min: interval_ms(1),
+            reconnect_max: interval_ms(5),
             connector: AnyConnector::Unix(UnixConnector::new(path)),
-            handshake_timeout: interval(Duration::from_secs(5)),
-            reconnect_min: interval(Duration::from_millis(1)),
-            reconnect_max: interval(Duration::from_millis(5)),
         }
     }
 
@@ -574,7 +577,7 @@ mod tests {
         let listener = fixture.listen();
 
         let mut config = config(&fixture.path());
-        config.handshake_timeout = interval(Duration::from_millis(50));
+        config.handshake_timeout = interval_ms(50);
 
         let (session, outbound) = Session::spawn(
             config,

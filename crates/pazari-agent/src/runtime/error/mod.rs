@@ -1,8 +1,30 @@
-use std::{io, path::PathBuf};
+use std::{fmt, io, path::PathBuf};
 
 use pazari_types::KernelFileError;
 use thiserror::Error;
 use tokio::task::JoinError;
+
+/// What the agent was doing with the kobject uevent socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetlinkStep {
+    Open,
+    Bind,
+    Watch,
+    Wait,
+    Read,
+}
+
+impl fmt::Display for NetlinkStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Open => "open",
+            Self::Bind => "bind",
+            Self::Watch => "watch",
+            Self::Wait => "wait on",
+            Self::Read => "read from",
+        })
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -19,9 +41,9 @@ pub enum RuntimeError {
     #[error("failed to watch {} for throttle events: {source}", .path.display())]
     Watch { path: PathBuf, source: io::Error },
 
-    #[error("failed to {what} the kobject uevent netlink socket: {source}")]
+    #[error("failed to {step} the kobject uevent netlink socket: {source}")]
     Netlink {
-        what: &'static str,
+        step: NetlinkStep,
         source: io::Error,
     },
 
@@ -87,6 +109,19 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "/sys/devices/system/memory/block_size_bytes holds \"wat\", which is not a lowercase hexadecimal byte count"
+        );
+    }
+
+    #[test]
+    fn a_netlink_failure_names_the_step_it_failed_at() {
+        let error = RuntimeError::Netlink {
+            step: NetlinkStep::Wait,
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "failed to wait on the kobject uevent netlink socket: permission denied"
         );
     }
 

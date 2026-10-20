@@ -18,10 +18,10 @@ use crate::{
     config::Config,
     engine::{BootInfo, Engine, Event},
     runtime::{
-        AnyCgroup, Applier, Cgroup, HotplugListener, Limit, Preflight, RuntimeConfig, Severity,
-        Snapshots, ThrottleWatcher, Ticker, Topology,
+        AnyCgroup, Applier, Cgroup, HotplugListener, Limit, Preflight, RuntimeConfig, RuntimeError,
+        Severity, Snapshots, ThrottleWatcher, Ticker, Topology,
     },
-    session::{Geometry, Session},
+    session::{Geometry, Outbound, Session},
 };
 
 pub async fn run(config: Config) -> Result<(), RunError> {
@@ -34,7 +34,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
         "resolved settings",
     );
 
-    let report = Preflight::new(&config.runtime).run(config.engine.reclaim_swappiness);
+    let report = Preflight::new(&config.runtime).run();
 
     if !report.passed() {
         return Err(RunError::Preflight { report });
@@ -62,9 +62,9 @@ pub async fn run(config: Config) -> Result<(), RunError> {
         total_mem, "guest memory geometry"
     );
 
-    let (mut engine, actions) = Engine::try_new(config.engine, boot)?;
+    let (engine, actions) = Engine::try_new(config.engine, boot)?;
 
-    let (mut observer, exposition) = match config.metrics {
+    let (observer, exposition) = match config.metrics {
         Some(address) => {
             let (observer, published) = Observer::new();
             let exposition = Exposition::bind(address, published).await?;
@@ -78,7 +78,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
 
     let cgroup = Arc::new(AnyCgroup::open(&config.runtime).await?);
 
-    let mut applier = Applier::new(Arc::clone(&cgroup), config.runtime.reclaim_chunk, clock);
+    let mut applier = Applier::new(Arc::clone(&cgroup), config.runtime.reclaim, clock);
 
     applier
         .apply(actions, &mut |message| {
@@ -124,46 +124,38 @@ pub async fn run(config: Config) -> Result<(), RunError> {
 
     info!("agent started");
 
+    let mut agent = Agent {
+        engine,
+        observer,
+        applier,
+        total_mem,
+        outbound,
+    };
+
     loop {
         let step = tokio::select! {
             tick = ticker.tick() => Step::Event(tick?),
             wake = throttle.wake() => Step::Event(wake?),
             changed = hotplug.changed() => Step::Event(changed?),
-            finished = applier.reclaimer().finished() => Step::Event(finished?),
+            finished = agent.applier.reclaimer().finished() => Step::Event(finished?),
             event = session.event() => Step::Event(event.ok_or(RunError::SessionLost)?),
             () = notifier.due() => Step::Ping,
             _ = terminate.recv() => Step::Stop,
             _ = interrupt.recv() => Step::Stop,
         };
 
-        let event = match step {
-            Step::Event(event) => event,
-            Step::Ping => {
-                notifier.ping();
-                continue;
-            }
+        match step {
+            Step::Event(event) => agent.handle(event).await?,
+            Step::Ping => notifier.ping(),
             Step::Stop => break,
-        };
-
-        observer.observe_event(&event);
-
-        let actions = engine.handle(event);
-
-        observer.refresh(&engine);
-        observer.observe_actions(&actions);
-
-        total_mem.send_replace(engine.total_mem());
-
-        applier
-            .apply(actions, &mut |message| outbound.send(message))
-            .await?;
+        }
     }
 
     info!("stopping");
     notifier.stopping();
 
-    outbound.send(GuestMessage::Bye {});
-    session.shutdown(outbound).await;
+    agent.outbound.send(GuestMessage::Bye {});
+    session.shutdown(agent.outbound).await;
     cgroup.set_high(Limit::Max).await?;
 
     if let Some(endpoint) = endpoint {
@@ -192,72 +184,62 @@ enum Step {
     Stop,
 }
 
+/// Passes each event to the engine and carries out what it decides.
+#[derive(Debug)]
+struct Agent<C> {
+    engine: Engine,
+    observer: Observer,
+    applier: Applier<C>,
+    total_mem: watch::Sender<u64>,
+    outbound: Outbound,
+}
+
+impl<C: Cgroup + 'static> Agent<C> {
+    async fn handle(&mut self, event: Event) -> Result<(), RuntimeError> {
+        self.observer.observe_event(&event);
+
+        let actions = self.engine.handle(event);
+
+        self.observer.refresh(&self.engine);
+        self.observer.observe_actions(&actions);
+
+        self.total_mem.send_replace(self.engine.total_mem());
+
+        let outbound = &self.outbound;
+
+        self.applier
+            .apply(actions, &mut |message| outbound.send(message))
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        num::{NonZeroU32, NonZeroU64},
-        path::Path,
-        time::Duration,
-    };
+    use std::{fs, path::Path, time::Duration};
 
     use pazari_proto::{Host, HostMessage, JsonLinesCodec, PROTOCOL_VERSION, Status};
     use pazari_transport::{AnyConnector, Listener, MessageStream, UnixConnector, UnixListener};
-    use pazari_types::{Delay, Interval};
     use tempfile::TempDir;
     use tokio::{net::UnixStream, time::timeout};
 
     use super::*;
     use crate::{
         engine::{
-            EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, Snapshot,
-            ThrottleMode, TitrateConfig,
+            EngineConfig, ExhaustionMode,
+            testing::{
+                BOOT, BURST, BUSY, CEILING, MIB, SERVICE, boot, config, interval, interval_ms, snap,
+            },
         },
-        runtime::{cgroup::MEMORY_HIGH, testing::cgroup_dir},
+        runtime::{
+            cgroup::{MEMORY_HIGH, MEMORY_MAX, MEMORY_OOM_GROUP},
+            testing::{cgroup_dir, runtime_config},
+        },
         session::SessionConfig,
     };
-
-    const MIB: u64 = 1 << 20;
-    const BOOT: u64 = 2048 * MIB;
-    const BLOCK: u64 = 128 * MIB;
-    const SERVICE: u64 = 256 * MIB;
-    const BURST: u64 = 256 * MIB;
-    const CEILING: u64 = 4096 * MIB;
 
     const PATIENCE: Duration = Duration::from_secs(5);
 
     type HostStream = MessageStream<UnixStream, JsonLinesCodec, Host>;
-
-    fn bytes(value: u64) -> NonZeroU64 {
-        NonZeroU64::new(value).expect("a positive byte count")
-    }
-
-    fn interval(secs: u64) -> Interval {
-        Interval::try_new(Duration::from_secs(secs)).expect("a positive interval under a day")
-    }
-
-    fn engine_config() -> EngineConfig {
-        EngineConfig {
-            service_reserve: SERVICE,
-            burst_reserve: bytes(BURST),
-            throttle: ThrottleMode::Grow,
-            grow: GrowConfig::Exponential(ExponentialConfig {
-                step: bytes(512 * MIB),
-                escalate_within: interval(10),
-                cap: bytes(64),
-            }),
-            release: ReleaseConfig::Titrate(TitrateConfig {
-                step: bytes(256 * MIB),
-                after: NonZeroU32::new(3).expect("a positive count"),
-                cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
-            }),
-            deny_backoff: interval(5),
-            settle_grace: interval(10),
-            recover_after: NonZeroU32::new(3).expect("a positive count"),
-            reclaim_swappiness: None,
-            exhaustion: ExhaustionMode::Kill,
-        }
-    }
 
     fn read(dir: &Path, name: &str) -> String {
         fs::read_to_string(dir.join(name))
@@ -277,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn the_brake_is_released_on_whatever_cgroup_the_file_named() {
         let dir = cgroup_dir();
-        let config = RuntimeConfig::new(dir.path());
+        let config = runtime_config(dir.path());
 
         fs::write(dir.path().join(MEMORY_HIGH), "1073741824\n").expect("a starting limit");
 
@@ -289,7 +271,7 @@ mod tests {
     #[tokio::test]
     async fn releasing_a_brake_that_is_already_off_is_still_a_release() {
         let dir = cgroup_dir();
-        let config = RuntimeConfig::new(dir.path());
+        let config = runtime_config(dir.path());
 
         panic_open(&config).await.expect("the brake comes off");
         panic_open(&config).await.expect("and stays off");
@@ -300,14 +282,14 @@ mod tests {
     #[tokio::test]
     async fn a_cgroup_that_is_not_there_is_reported() {
         let dir = TempDir::new().expect("a temporary directory");
-        let config = RuntimeConfig::new(dir.path().join("absent"));
+        let config = runtime_config(&dir.path().join("absent"));
 
         let error = panic_open(&config)
             .await
             .expect_err("there is nothing to write");
 
         assert!(
-            error.to_string().contains("memory.high"),
+            error.to_string().contains(MEMORY_HIGH),
             "unexpected error: {error}"
         );
     }
@@ -321,47 +303,55 @@ mod tests {
 
         let listener = UnixListener::bind(&path).expect("a bound listener");
 
-        let runtime = RuntimeConfig::new(dir.path());
+        let runtime = runtime_config(dir.path());
         let cgroup = Arc::new(AnyCgroup::open(&runtime).await.expect("a cgroupfs adapter"));
 
-        let (mut engine, actions) = Engine::try_new(
-            engine_config(),
-            BootInfo {
-                block_size: bytes(BLOCK),
-                total_mem: BOOT,
+        let (engine, actions) = Engine::try_new(
+            EngineConfig {
+                exhaustion: ExhaustionMode::Kill,
+                ..config()
             },
+            boot(),
         )
         .expect("a workable boot");
 
-        let mut applier = Applier::new(Arc::clone(&cgroup), runtime.reclaim_chunk, clock);
+        let mut applier = Applier::new(Arc::clone(&cgroup), runtime.reclaim, clock);
 
         applier
             .apply(actions, &mut |_| panic!("the engine is not connected yet"))
             .await
             .expect("the ground state lands");
 
-        assert_eq!(read(dir.path(), "memory.max"), (BOOT - SERVICE).to_string());
+        assert_eq!(read(dir.path(), MEMORY_MAX), (BOOT - SERVICE).to_string());
         assert_eq!(
-            read(dir.path(), "memory.high"),
+            read(dir.path(), MEMORY_HIGH),
             (BOOT - SERVICE - BURST).to_string()
         );
-        assert_eq!(read(dir.path(), "memory.oom.group"), "1");
+        assert_eq!(read(dir.path(), MEMORY_OOM_GROUP), "1");
 
         let (total_mem, latest) = watch::channel(BOOT);
 
         let (mut session, outbound) = Session::spawn(
             SessionConfig {
-                connector: AnyConnector::Unix(UnixConnector::new(&path)),
                 handshake_timeout: interval(5),
-                reconnect_min: Interval::try_new(Duration::from_millis(1)).expect("a tick"),
-                reconnect_max: Interval::try_new(Duration::from_millis(5)).expect("a tick"),
+                reconnect_min: interval_ms(1),
+                reconnect_max: interval_ms(5),
+                connector: AnyConnector::Unix(UnixConnector::new(&path)),
             },
             Geometry {
-                block_size: bytes(BLOCK),
+                block_size: boot().block_size,
                 total_mem: latest,
             },
             clock,
         );
+
+        let mut agent = Agent {
+            engine,
+            observer: Observer::default(),
+            applier,
+            total_mem,
+            outbound,
+        };
 
         let (connection, _) = timeout(PATIENCE, listener.accept())
             .await
@@ -381,34 +371,13 @@ mod tests {
         .await
         .expect("a writable connection");
 
-        let drive = async |event: Event, engine: &mut Engine, applier: &mut Applier<_>| {
-            let actions = engine.handle(event);
-            total_mem.send_replace(engine.total_mem());
-            applier
-                .apply(actions, &mut |message| outbound.send(message))
-                .await
-                .expect("the actions land");
-        };
-
-        drive(
-            Event::Tick {
+        agent
+            .handle(Event::Tick {
                 now: clock.now(),
-                snapshot: Snapshot {
-                    total_mem: BOOT,
-                    workload_usage: 1200 * MIB,
-                    free: 0,
-                    available: BOOT - 1200 * MIB,
-                    swap_used: 0,
-                    high_events: 0,
-                    max_events: 0,
-                    psi_some10: 0.0,
-                    psi_full10: 0.0,
-                },
-            },
-            &mut engine,
-            &mut applier,
-        )
-        .await;
+                snapshot: snap(BOOT, BUSY, 0),
+            })
+            .await
+            .expect("the tick lands");
 
         let connected = timeout(PATIENCE, session.event())
             .await
@@ -416,7 +385,7 @@ mod tests {
             .expect("the session is still running");
 
         assert!(matches!(connected, Event::Connected { .. }));
-        drive(connected, &mut engine, &mut applier).await;
+        agent.handle(connected).await.expect("the connect lands");
 
         assert!(
             matches!(
@@ -429,19 +398,17 @@ mod tests {
             "the engine did not greet the host with its state"
         );
 
-        drive(
-            Event::ThrottleWake {
+        agent
+            .handle(Event::ThrottleWake {
                 now: clock.now(),
                 high_events: 1,
                 max_events: 0,
-            },
-            &mut engine,
-            &mut applier,
-        )
-        .await;
+            })
+            .await
+            .expect("the wake lands");
 
         assert_eq!(
-            read(dir.path(), "memory.high"),
+            read(dir.path(), MEMORY_HIGH),
             (BOOT - SERVICE - BURST).to_string(),
             "the brake moved when the workload was throttled"
         );
@@ -461,6 +428,6 @@ mod tests {
         );
 
         drop(host);
-        session.shutdown(outbound).await;
+        session.shutdown(agent.outbound).await;
     }
 }

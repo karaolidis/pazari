@@ -14,7 +14,7 @@ prints a complete file with every key at its default.
 .Pp
 How the agent uses these settings is described in
 .Xr pazari-agent 1 .
-.Ss Sizes and durations
+.Ss Sizes, durations and counts
 A
 .Ar size
 is an integer number of bytes, or a number followed by a unit.
@@ -42,6 +42,10 @@ to
 .Cm y .
 Unless stated otherwise, a duration must be greater than zero and at most 24
 hours.
+.Pp
+A
+.Ar count
+is an integer greater than zero.
 .Sh SETTINGS
 .Ss [tick]\&
 .Bl -tag -width Ds
@@ -208,7 +212,6 @@ Default
 .Cm 10s .
 .It Cm cap No = Ar count
 The most steps one request asks for.
-Must be greater than 0.
 Default
 .Cm 64 .
 .El
@@ -278,11 +281,13 @@ with a
 timeout.
 .Bl -tag -width Ds
 .It Cm kind No = Qq Cm stall
-Keep the workload throttled.
+Keep the brake on until
+.Cm timeout ,
+then release it.
 .Bl -tag -width Ds
 .It Cm timeout No = Ar duration
-How long to keep the workload throttled before releasing the brake and letting
-it reach
+How long to keep the brake on before releasing it and letting the workload
+reach
 .Va memory.max .
 Default
 .Cm 60s .
@@ -294,12 +299,12 @@ it reaches
 .El
 .Ss [preflight]\&
 .Bl -tag -width Ds
-.It Cm thp_always_fatal No = Ar boolean
-Whether
-.Va transparent_hugepage=always
-fails preflight rather than warning.
+.It Cm thp_always No = Qq Cm fail | Qq Cm warn
+What preflight does when
+.Va transparent_hugepage=always :
+fail, or only warn.
 Default
-.Cm true .
+.Cm fail .
 .El
 .Ss [metrics]\&
 Optional.

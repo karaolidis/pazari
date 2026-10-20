@@ -121,17 +121,16 @@ fn engine_config() -> EngineConfig {
         grow: GrowConfig::Exponential(ExponentialConfig {
             step: bytes(512 * MIB),
             escalate_within: patient(),
-            cap: bytes(64),
+            cap: count(64),
         }),
         release: ReleaseConfig::Titrate(TitrateConfig {
             step: bytes(RELEASE),
             after: count(3),
             cooldown: Delay::ZERO,
         }),
-        deny_backoff: brief(),
         settle_grace: patient(),
+        deny_backoff: brief(),
         recover_after: count(3),
-        reclaim_swappiness: None,
         exhaustion: ExhaustionMode::Kill,
     }
 }
@@ -951,10 +950,7 @@ async fn an_idle_guest_offers_memory_back_and_is_shrunk() {
     assert_eq!(
         harness.acted(mark),
         vec![
-            GuestAction::StartReclaim {
-                bytes: RELEASE,
-                swappiness: None,
-            },
+            GuestAction::StartReclaim { bytes: RELEASE },
             GuestAction::SetHigh(SHRUNK - SERVICE - BURST),
             GuestAction::SetMax(SHRUNK - SERVICE),
         ]

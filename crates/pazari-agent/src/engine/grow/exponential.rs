@@ -14,10 +14,10 @@ pub struct Exponential {
 }
 
 impl Exponential {
-    pub const fn new(config: ExponentialConfig) -> Self {
+    pub fn new(config: ExponentialConfig) -> Self {
         Self {
             config,
-            scale: Scale::new(config.cap),
+            scale: Scale::new(NonZeroU64::from(config.cap)),
             escalate_until: None,
         }
     }
@@ -48,7 +48,7 @@ impl Grow for Exponential {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::testing::{MIB, at, bytes, interval};
+    use crate::engine::testing::{MIB, at, bytes, count, interval};
 
     const START: Timestamp = at(0);
     const INSIDE: Timestamp = at(5);
@@ -58,7 +58,7 @@ mod tests {
         Exponential::new(ExponentialConfig {
             step: bytes(512 * MIB),
             escalate_within: interval(10),
-            cap: bytes(64),
+            cap: count(64),
         })
     }
 
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn a_smaller_cap_stops_escalation_sooner() {
         let mut grow = Exponential::new(ExponentialConfig {
-            cap: bytes(4),
+            cap: count(4),
             ..exponential().config
         });
         grow.settled(START);

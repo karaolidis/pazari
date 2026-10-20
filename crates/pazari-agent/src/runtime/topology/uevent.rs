@@ -1,4 +1,4 @@
-use std::{io, os::fd::OwnedFd, str};
+use std::{io, os::fd::OwnedFd, str, time::Duration};
 
 use pazari_types::{Clock, Interval};
 use rustix::net::{
@@ -10,7 +10,10 @@ use tokio::{io::unix::AsyncFd, time::timeout};
 
 use crate::{
     engine::Event,
-    runtime::{error::RuntimeError, topology::Topology},
+    runtime::{
+        error::{NetlinkStep, RuntimeError},
+        topology::Topology,
+    },
 };
 
 /// The kernel's own uevent multicast group.
@@ -19,49 +22,40 @@ const KERNEL_GROUP: u32 = 1;
 /// `UEVENT_BUFFER_SIZE`: the kernel will not multicast a longer payload.
 const PAYLOAD: usize = 2048;
 
-/// What a `SUBSYSTEM=memory` uevent announces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Hotplug {
-    Add,
-    Remove,
-    Online,
-    Offline,
-}
+/// Whether a uevent adds, removes, onlines or offlines a memory block.
+fn is_memory_hotplug(payload: &[u8]) -> bool {
+    let mut subsystem = None;
+    let mut action = None;
 
-impl Hotplug {
-    #[must_use]
-    pub fn parse(payload: &[u8]) -> Option<Self> {
-        let mut subsystem = None;
-        let mut action = None;
+    for field in payload.split(|byte| *byte == 0).skip(1) {
+        let Ok(field) = str::from_utf8(field) else {
+            continue;
+        };
 
-        for field in payload.split(|byte| *byte == 0).skip(1) {
-            let Ok(field) = str::from_utf8(field) else {
-                continue;
-            };
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
 
-            let Some((key, value)) = field.split_once('=') else {
-                continue;
-            };
-
-            match key {
-                "SUBSYSTEM" => subsystem = Some(value),
-                "ACTION" => action = Some(value),
-                _ => {}
-            }
-        }
-
-        if subsystem? != "memory" {
-            return None;
-        }
-
-        match action? {
-            "add" => Some(Self::Add),
-            "remove" => Some(Self::Remove),
-            "online" => Some(Self::Online),
-            "offline" => Some(Self::Offline),
-            _ => None,
+        match key {
+            "SUBSYSTEM" => subsystem = Some(value),
+            "ACTION" => action = Some(value),
+            _ => {}
         }
     }
+
+    subsystem == Some("memory") && matches!(action, Some("add" | "remove" | "online" | "offline"))
+}
+
+/// Waits until `debounce` passes without another memory hotplug from `next`.
+async fn settle(
+    debounce: Duration,
+    mut next: impl AsyncFnMut() -> Result<(), RuntimeError>,
+) -> Result<(), RuntimeError> {
+    while let Ok(hotplug) = timeout(debounce, next()).await {
+        hotplug?;
+    }
+
+    Ok(())
 }
 
 /// Watches the kobject uevent socket for the guest's memory changing size.
@@ -86,19 +80,19 @@ impl HotplugListener {
             Some(KOBJECT_UEVENT),
         )
         .map_err(|source| RuntimeError::Netlink {
-            what: "open",
+            step: NetlinkStep::Open,
             source: source.into(),
         })?;
 
         bind(&socket, &SocketAddrNetlink::new(0, KERNEL_GROUP)).map_err(|source| {
             RuntimeError::Netlink {
-                what: "bind",
+                step: NetlinkStep::Bind,
                 source: source.into(),
             }
         })?;
 
         let socket = AsyncFd::new(socket).map_err(|source| RuntimeError::Netlink {
-            what: "watch",
+            step: NetlinkStep::Watch,
             source,
         })?;
 
@@ -113,22 +107,28 @@ impl HotplugListener {
     pub async fn changed(&self) -> Result<Event, RuntimeError> {
         let mut payload = [0_u8; PAYLOAD];
 
-        loop {
-            let len = self.recv(&mut payload).await?;
+        self.hotplug(&mut payload).await?;
 
-            if Hotplug::parse(&payload[..len]).is_some() {
-                break;
-            }
-        }
-
-        while let Ok(result) = timeout(self.debounce.get(), self.recv(&mut payload)).await {
-            result?;
-        }
+        settle(self.debounce.get(), async || {
+            self.hotplug(&mut payload).await
+        })
+        .await?;
 
         Ok(Event::TotalChanged {
             now: self.clock.now(),
             total_mem: self.topology.total_mem().await?,
         })
+    }
+
+    /// Reads uevents until one is a memory hotplug.
+    async fn hotplug(&self, payload: &mut [u8]) -> Result<(), RuntimeError> {
+        loop {
+            let len = self.recv(payload).await?;
+
+            if is_memory_hotplug(&payload[..len]) {
+                return Ok(());
+            }
+        }
     }
 
     async fn recv(&self, payload: &mut [u8]) -> Result<usize, RuntimeError> {
@@ -138,7 +138,7 @@ impl HotplugListener {
                     .readable()
                     .await
                     .map_err(|source| RuntimeError::Netlink {
-                        what: "wait on",
+                        step: NetlinkStep::Wait,
                         source,
                     })?;
 
@@ -150,7 +150,7 @@ impl HotplugListener {
 
             if let Ok(result) = read {
                 return result.map_err(|source| RuntimeError::Netlink {
-                    what: "read from",
+                    step: NetlinkStep::Read,
                     source,
                 });
             }
@@ -160,7 +160,9 @@ impl HotplugListener {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::future;
+
+    use tokio::time::{Instant, sleep};
 
     use super::*;
 
@@ -190,10 +192,9 @@ mod tests {
 
     #[test]
     fn every_memory_hotplug_is_recognised() {
-        assert_eq!(Hotplug::parse(&memory("add")), Some(Hotplug::Add));
-        assert_eq!(Hotplug::parse(&memory("remove")), Some(Hotplug::Remove));
-        assert_eq!(Hotplug::parse(&memory("online")), Some(Hotplug::Online));
-        assert_eq!(Hotplug::parse(&memory("offline")), Some(Hotplug::Offline));
+        for action in ["add", "remove", "online", "offline"] {
+            assert!(is_memory_hotplug(&memory(action)), "{action}");
+        }
     }
 
     #[test]
@@ -208,7 +209,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(Hotplug::parse(&block), None);
+        assert!(!is_memory_hotplug(&block));
     }
 
     #[test]
@@ -222,40 +223,58 @@ mod tests {
             ],
         );
 
-        assert_eq!(Hotplug::parse(&change), None);
+        assert!(!is_memory_hotplug(&change));
     }
 
     #[test]
     fn a_payload_without_the_properties_that_name_it_is_not_a_hotplug() {
-        assert_eq!(Hotplug::parse(b""), None);
-        assert_eq!(
-            Hotplug::parse(b"add@/devices/system/memory/memory42\0"),
-            None
-        );
-        assert_eq!(
-            Hotplug::parse(&payload(
-                "add@/devices/system/memory/memory42",
-                &["ACTION=add", "DEVPATH=/devices/system/memory/memory42"],
-            )),
-            None
-        );
-        assert_eq!(
-            Hotplug::parse(&payload(
-                "add@/devices/system/memory/memory42",
-                &["SUBSYSTEM=memory"],
-            )),
-            None
-        );
+        assert!(!is_memory_hotplug(b""));
+        assert!(!is_memory_hotplug(b"add@/devices/system/memory/memory42\0"));
+        assert!(!is_memory_hotplug(&payload(
+            "add@/devices/system/memory/memory42",
+            &["ACTION=add", "DEVPATH=/devices/system/memory/memory42"],
+        )));
+        assert!(!is_memory_hotplug(&payload(
+            "add@/devices/system/memory/memory42",
+            &["SUBSYSTEM=memory"],
+        )));
     }
 
-    #[tokio::test]
-    async fn the_kernel_uevent_group_binds_where_it_can_be_bound() {
-        let debounce = Interval::try_new(Duration::from_millis(10)).unwrap();
+    #[tokio::test(start_paused = true)]
+    async fn a_settle_ends_one_debounce_after_the_last_hotplug() {
+        let debounce = Duration::from_millis(100);
+        let start = Instant::now();
 
-        match HotplugListener::bind(Topology::default(), debounce, Clock::start()) {
-            Ok(listener) => assert_eq!(listener.debounce, debounce),
-            Err(error) => eprintln!("skipped: {error}"),
-        }
+        settle(debounce, async || future::pending().await)
+            .await
+            .expect("nothing fails");
+
+        assert_eq!(start.elapsed(), debounce);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_memory_hotplug_starts_the_settle_over() {
+        let mut heard = 0;
+        let start = Instant::now();
+
+        let hotplugs = async || {
+            heard += 1;
+
+            if heard > 3 {
+                future::pending::<()>().await;
+            }
+
+            sleep(Duration::from_millis(50)).await;
+
+            Ok(())
+        };
+
+        settle(Duration::from_millis(100), hotplugs)
+            .await
+            .expect("nothing fails");
+
+        assert_eq!(heard, 4, "the settle ended before the hotplugs did");
+        assert_eq!(start.elapsed(), Duration::from_millis(250));
     }
 
     #[test]
@@ -264,6 +283,6 @@ mod tests {
         bytes.extend_from_slice(&[0xff, 0xfe]);
         bytes.extend_from_slice(b"\0ACTION=online\0SUBSYSTEM=memory\0");
 
-        assert_eq!(Hotplug::parse(&bytes), Some(Hotplug::Online));
+        assert!(is_memory_hotplug(&bytes));
     }
 }

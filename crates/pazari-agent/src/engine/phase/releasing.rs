@@ -258,7 +258,6 @@ mod tests {
     use std::time::Duration;
 
     use pazari_proto::{DenyReason, GuestMessage, HostMessage};
-    use pazari_types::Swappiness;
 
     use crate::engine::{Action, EngineConfig, Event, Phase, ReleaseConfig, testing::*};
 
@@ -284,10 +283,7 @@ mod tests {
                     id: ReclaimId(7),
                     will_release: 512 * MIB,
                 }),
-                Action::StartReclaim {
-                    bytes: 512 * MIB,
-                    swappiness: Some(Swappiness::NONE),
-                },
+                reclaim(512 * MIB),
             ]
         );
 
@@ -469,10 +465,7 @@ mod tests {
                 at(143),
                 snap_free(2560 * MIB, CALM, 192 * MIB, 1)
             ),
-            vec![Action::StartReclaim {
-                bytes: 64 * MIB,
-                swappiness: Some(Swappiness::NONE),
-            }],
+            vec![reclaim(64 * MIB)],
         );
     }
 
@@ -497,10 +490,7 @@ mod tests {
 
         assert_eq!(
             tick(&mut engine, at(146), snap(2560 * MIB, CALM, 1)),
-            vec![Action::StartReclaim {
-                bytes: 512 * MIB,
-                swappiness: Some(Swappiness::NONE),
-            }],
+            vec![reclaim(512 * MIB)],
         );
     }
 

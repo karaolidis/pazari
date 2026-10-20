@@ -27,30 +27,26 @@ impl Settings for Config {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
     use std::{
         net::Ipv4Addr,
-        num::{NonZeroU32, NonZeroU64},
-        time::Duration,
+        path::{Path, PathBuf},
     };
 
     use pazari_transport::{
         AnyConnector, UnixConnector, VsockConnector,
         adapter::vsock::{DEFAULT_VSOCK_PORT, VMADDR_CID_HOST},
     };
-    use pazari_types::{Delay, Interval, Swappiness};
+    use pazari_types::{Delay, Swappiness};
 
     use super::*;
     use crate::{
         engine::{
             ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, SweepConfig,
             ThrottleMode, TitrateConfig,
+            testing::{MIB, bytes, count, delay, interval, interval_ms},
         },
-        runtime::Backend,
+        runtime::{Backend, Paths, ReclaimConfig, ThpAlways},
     };
-
-    const MIB: u64 = 1 << 20;
 
     const FIXTURE: &str = "agent.toml";
 
@@ -110,7 +106,7 @@ mod tests {
         kind = "kill"
 
         [preflight]
-        thp_always_fatal = false
+        thp_always = "warn"
     "#;
 
     const MINIMAL: &str = r#"
@@ -122,18 +118,6 @@ mod tests {
         [host.transport]
         kind = "vsock"
     "#;
-
-    fn bytes(value: u64) -> NonZeroU64 {
-        NonZeroU64::new(value).expect("a positive byte count")
-    }
-
-    fn count(value: u32) -> NonZeroU32 {
-        NonZeroU32::new(value).expect("a positive count")
-    }
-
-    fn interval(value: Duration) -> Interval {
-        Interval::try_new(value).expect("a positive interval under a day")
-    }
 
     fn parse(text: &str) -> Config {
         Config::parse(Path::new(FIXTURE), text).expect("the fixture is a workable configuration")
@@ -162,9 +146,12 @@ mod tests {
         assert_eq!(
             parse(EXAMPLE),
             Config {
-                engine: EngineConfig {
-                    reclaim_swappiness: Some(Swappiness::NONE),
-                    ..defaults.engine
+                runtime: RuntimeConfig {
+                    reclaim: ReclaimConfig {
+                        swappiness: Some(Swappiness::NONE),
+                        ..defaults.runtime.reclaim
+                    },
+                    ..defaults.runtime.clone()
                 },
                 metrics: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9651))),
                 ..defaults
@@ -221,18 +208,17 @@ mod tests {
                 },
                 grow: GrowConfig::Exponential(ExponentialConfig {
                     step: bytes(1024 * MIB),
-                    escalate_within: interval(Duration::from_secs(20)),
-                    cap: bytes(16),
+                    escalate_within: interval(20),
+                    cap: count(16),
                 }),
                 release: ReleaseConfig::Titrate(TitrateConfig {
                     step: bytes(128 * MIB),
                     after: count(5),
                     cooldown: Delay::ZERO,
                 }),
-                deny_backoff: interval(Duration::from_millis(2_500)),
-                settle_grace: interval(Duration::from_secs(15)),
+                settle_grace: interval(15),
+                deny_backoff: interval_ms(2_500),
                 recover_after: count(5),
-                reclaim_swappiness: Some(Swappiness::NONE),
                 exhaustion: ExhaustionMode::Kill,
             }
         );
@@ -240,24 +226,28 @@ mod tests {
         assert_eq!(
             config.runtime,
             RuntimeConfig {
+                tick_interval: interval_ms(500),
+                cgroup: PathBuf::from("/sys/fs/cgroup/system.slice/workload.service"),
                 backend: Backend::Systemd {
                     unit: "workload.service".to_owned(),
                 },
-                tick_interval: interval(Duration::from_millis(500)),
-                hotplug_debounce: interval(Duration::from_secs(1)),
-                reclaim_chunk: bytes(16 * MIB),
-                thp_always_fatal: false,
-                ..RuntimeConfig::new("/sys/fs/cgroup/system.slice/workload.service")
+                hotplug_debounce: interval(1),
+                reclaim: ReclaimConfig {
+                    chunk: bytes(16 * MIB),
+                    swappiness: Some(Swappiness::NONE),
+                },
+                thp_always: ThpAlways::Warn,
+                paths: Paths::default(),
             }
         );
 
         assert_eq!(
             config.session,
             SessionConfig {
+                handshake_timeout: interval(3),
+                reconnect_min: interval_ms(100),
+                reconnect_max: interval(2),
                 connector: AnyConnector::Unix(UnixConnector::new("/run/pazari/host.sock")),
-                handshake_timeout: interval(Duration::from_secs(3)),
-                reconnect_min: interval(Duration::from_millis(100)),
-                reconnect_max: interval(Duration::from_secs(2)),
             }
         );
     }
@@ -267,12 +257,6 @@ mod tests {
         let config = parse(MINIMAL);
 
         assert_eq!(
-            config.runtime,
-            RuntimeConfig::new("/sys/fs/cgroup/workload.slice"),
-            "the runtime defaults have drifted from RuntimeConfig::new"
-        );
-
-        assert_eq!(
             config.engine,
             EngineConfig {
                 service_reserve: 256 * MIB,
@@ -280,40 +264,66 @@ mod tests {
                 throttle: ThrottleMode::Grow,
                 grow: GrowConfig::Exponential(ExponentialConfig {
                     step: bytes(512 * MIB),
-                    escalate_within: interval(Duration::from_secs(10)),
-                    cap: bytes(64),
+                    escalate_within: interval(10),
+                    cap: count(64),
                 }),
                 release: ReleaseConfig::Titrate(TitrateConfig {
                     step: bytes(256 * MIB),
                     after: count(3),
-                    cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
+                    cooldown: delay(30),
                 }),
-                deny_backoff: interval(Duration::from_secs(5)),
-                settle_grace: interval(Duration::from_secs(10)),
+                settle_grace: interval(10),
+                deny_backoff: interval(5),
                 recover_after: count(3),
-                reclaim_swappiness: None,
                 exhaustion: ExhaustionMode::Stall {
-                    timeout: interval(Duration::from_secs(60)),
+                    timeout: interval(60),
                 },
+            }
+        );
+
+        assert_eq!(
+            config.runtime,
+            RuntimeConfig {
+                tick_interval: interval(1),
+                cgroup: PathBuf::from("/sys/fs/cgroup/workload.slice"),
+                backend: Backend::Cgroupfs,
+                hotplug_debounce: interval_ms(250),
+                reclaim: ReclaimConfig {
+                    chunk: bytes(64 * MIB),
+                    swappiness: None,
+                },
+                thp_always: ThpAlways::Fail,
+                paths: Paths::default(),
             }
         );
 
         assert_eq!(
             config.session,
             SessionConfig {
+                handshake_timeout: interval(10),
+                reconnect_min: interval_ms(500),
+                reconnect_max: interval(30),
                 connector: AnyConnector::Vsock(VsockConnector::new(
                     VMADDR_CID_HOST,
                     DEFAULT_VSOCK_PORT
                 )),
-                handshake_timeout: interval(Duration::from_secs(10)),
-                reconnect_min: interval(Duration::from_millis(500)),
-                reconnect_max: interval(Duration::from_secs(30)),
             }
         );
     }
 
     #[test]
-    fn the_vsock_address_is_whatever_the_file_leaves_out() {
+    fn an_unknown_hugepage_posture_is_refused() {
+        let error = rejects(&MINIMAL.replace(
+            "[host.transport]",
+            "[preflight]\nthp_always = \"shrug\"\n\n[host.transport]",
+        ));
+
+        assert!(error.contains("fail"), "unexpected error: {error}");
+        assert!(error.contains("warn"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_vsock_transport_takes_the_cid_and_port_the_file_names() {
         let config = parse(&MINIMAL.replace(
             r#"kind = "vsock""#,
             "kind = \"vsock\"\ncid = 7\nport = 9000",
@@ -480,7 +490,7 @@ mod tests {
             ReleaseConfig::Titrate(TitrateConfig {
                 step: bytes(64 * MIB),
                 after: count(3),
-                cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
+                cooldown: delay(30),
             })
         );
     }
@@ -496,8 +506,8 @@ mod tests {
             config.engine.release,
             ReleaseConfig::Sweep(SweepConfig {
                 min: bytes(256 * MIB),
-                hold: Delay::try_new(Duration::from_mins(2)).expect("a short delay"),
-                cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
+                hold: delay(120),
+                cooldown: delay(30),
             })
         );
     }
@@ -564,8 +574,8 @@ mod tests {
             config.engine.grow,
             GrowConfig::Exponential(ExponentialConfig {
                 step: bytes(1024 * MIB),
-                escalate_within: interval(Duration::from_secs(10)),
-                cap: bytes(64),
+                escalate_within: interval(10),
+                cap: count(64),
             })
         );
     }

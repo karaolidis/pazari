@@ -1,19 +1,19 @@
 use std::{
     future,
-    num::NonZeroU64,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-use pazari_types::{Clock, Swappiness};
+use pazari_types::Clock;
 use tokio::task::JoinHandle;
 
 use crate::{
     engine::Event,
     runtime::{
         cgroup::{Cgroup, Reclaimed},
+        config::ReclaimConfig,
         error::RuntimeError,
     },
 };
@@ -46,17 +46,17 @@ struct Run {
 #[derive(Debug)]
 pub struct Reclaimer<C> {
     cgroup: Arc<C>,
-    chunk: NonZeroU64,
+    config: ReclaimConfig,
     clock: Clock,
     run: Option<Run>,
 }
 
 impl<C: Cgroup + 'static> Reclaimer<C> {
     #[must_use]
-    pub const fn new(cgroup: Arc<C>, chunk: NonZeroU64, clock: Clock) -> Self {
+    pub const fn new(cgroup: Arc<C>, config: ReclaimConfig, clock: Clock) -> Self {
         Self {
             cgroup,
-            chunk,
+            config,
             clock,
             run: None,
         }
@@ -72,11 +72,7 @@ impl<C: Cgroup + 'static> Reclaimer<C> {
         self.run.as_ref().map(|run| run.handle.clone())
     }
 
-    pub fn start(
-        &mut self,
-        bytes: u64,
-        swappiness: Option<Swappiness>,
-    ) -> Result<ReclaimHandle, RuntimeError> {
+    pub fn start(&mut self, bytes: u64) -> Result<ReclaimHandle, RuntimeError> {
         if let Some(run) = &self.run {
             return Err(RuntimeError::ReclaimInFlight {
                 bytes,
@@ -90,10 +86,9 @@ impl<C: Cgroup + 'static> Reclaimer<C> {
 
         let cgroup = Arc::clone(&self.cgroup);
         let cancelled = Arc::clone(&handle.cancelled);
-        let chunk = self.chunk;
+        let config = self.config;
 
-        let task =
-            tokio::spawn(async move { run(&*cgroup, bytes, swappiness, chunk, &cancelled).await });
+        let task = tokio::spawn(async move { run(&*cgroup, bytes, config, &cancelled).await });
 
         self.run = Some(Run {
             bytes,
@@ -121,21 +116,20 @@ impl<C: Cgroup + 'static> Reclaimer<C> {
     }
 }
 
-/// Walks `bytes` in requests of at most `chunk`.
+/// Walks `bytes` in requests of at most one chunk.
 async fn run<C: Cgroup>(
     cgroup: &C,
     bytes: u64,
-    swappiness: Option<Swappiness>,
-    chunk: NonZeroU64,
+    config: ReclaimConfig,
     cancelled: &AtomicBool,
 ) -> Result<u64, RuntimeError> {
     let mut reclaimed = 0_u64;
     let mut left = bytes;
 
     while left > 0 && !cancelled.load(Ordering::Relaxed) {
-        let ask = left.min(chunk.get());
+        let ask = left.min(config.chunk.get());
 
-        if cgroup.reclaim(ask, swappiness).await? == Reclaimed::Partial {
+        if cgroup.reclaim(ask, config.swappiness).await? == Reclaimed::Partial {
             break;
         }
 
@@ -148,13 +142,19 @@ async fn run<C: Cgroup>(
 
 #[cfg(test)]
 mod tests {
+    use pazari_types::Swappiness;
     use tokio::task;
 
     use super::*;
     use crate::runtime::testing::{Answer, Call, FakeCgroup, MIB, bytes};
 
+    const CHUNKS: ReclaimConfig = ReclaimConfig {
+        chunk: bytes(64 * MIB),
+        swappiness: None,
+    };
+
     fn reclaimer(cgroup: &Arc<FakeCgroup>) -> Reclaimer<FakeCgroup> {
-        Reclaimer::new(Arc::clone(cgroup), bytes(64 * MIB), Clock::start())
+        Reclaimer::new(Arc::clone(cgroup), CHUNKS, Clock::start())
     }
 
     fn reclaimed(event: &Event) -> u64 {
@@ -193,7 +193,7 @@ mod tests {
         let cgroup = Arc::new(FakeCgroup::default());
         let mut reclaimer = reclaimer(&cgroup);
 
-        reclaimer.start(200 * MIB, None).unwrap();
+        reclaimer.start(200 * MIB).unwrap();
 
         assert_eq!(reclaimed(&reclaimer.finished().await.unwrap()), 200 * MIB);
         assert_eq!(asked(&cgroup), vec![64 * MIB, 64 * MIB, 64 * MIB, 8 * MIB]);
@@ -204,7 +204,7 @@ mod tests {
         let cgroup = Arc::new(FakeCgroup::default());
         let mut reclaimer = reclaimer(&cgroup);
 
-        reclaimer.start(0, None).unwrap();
+        reclaimer.start(0).unwrap();
 
         assert_eq!(reclaimed(&reclaimer.finished().await.unwrap()), 0);
         assert_eq!(asked(&cgroup), Vec::<u64>::new());
@@ -213,9 +213,16 @@ mod tests {
     #[tokio::test]
     async fn the_swappiness_the_policy_wants_reaches_every_chunk() {
         let cgroup = Arc::new(FakeCgroup::default());
-        let mut reclaimer = reclaimer(&cgroup);
+        let mut reclaimer = Reclaimer::new(
+            Arc::clone(&cgroup),
+            ReclaimConfig {
+                swappiness: Some(Swappiness::NONE),
+                ..CHUNKS
+            },
+            Clock::start(),
+        );
 
-        reclaimer.start(128 * MIB, Some(Swappiness::NONE)).unwrap();
+        reclaimer.start(128 * MIB).unwrap();
         reclaimer.finished().await.unwrap();
 
         assert_eq!(
@@ -242,7 +249,7 @@ mod tests {
         ]));
         let mut reclaimer = reclaimer(&cgroup);
 
-        reclaimer.start(256 * MIB, None).unwrap();
+        reclaimer.start(256 * MIB).unwrap();
 
         assert_eq!(reclaimed(&reclaimer.finished().await.unwrap()), 128 * MIB);
         assert_eq!(asked(&cgroup), vec![64 * MIB, 64 * MIB, 64 * MIB]);
@@ -253,7 +260,7 @@ mod tests {
         let cgroup = Arc::new(FakeCgroup::default());
         let mut reclaimer = reclaimer(&cgroup);
 
-        let handle = reclaimer.start(512 * MIB, None).unwrap();
+        let handle = reclaimer.start(512 * MIB).unwrap();
 
         step(&cgroup, 2).await;
         handle.cancel();
@@ -268,11 +275,11 @@ mod tests {
         let cgroup = Arc::new(FakeCgroup::default());
         let mut reclaimer = reclaimer(&cgroup);
 
-        reclaimer.start(512 * MIB, None).unwrap();
+        reclaimer.start(512 * MIB).unwrap();
         assert!(reclaimer.is_running());
 
         let error = reclaimer
-            .start(64 * MIB, None)
+            .start(64 * MIB)
             .expect_err("one release at a time");
 
         assert_eq!(
@@ -284,7 +291,7 @@ mod tests {
 
         assert!(!reclaimer.is_running());
         assert!(reclaimer.handle().is_none());
-        reclaimer.start(64 * MIB, None).expect("the first is done");
+        reclaimer.start(64 * MIB).expect("the first is done");
     }
 
     #[tokio::test]
@@ -292,7 +299,7 @@ mod tests {
         let cgroup = Arc::new(FakeCgroup::scripted([Answer::Whole, Answer::Gone]));
         let mut reclaimer = reclaimer(&cgroup);
 
-        reclaimer.start(256 * MIB, None).unwrap();
+        reclaimer.start(256 * MIB).unwrap();
 
         let error = reclaimer
             .finished()

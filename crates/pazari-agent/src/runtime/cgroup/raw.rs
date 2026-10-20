@@ -1,18 +1,18 @@
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use std::{io, path::PathBuf};
 
 use pazari_types::{Pressure, Swappiness};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 
-use crate::runtime::{
-    cgroup::{
-        Cgroup, MEMORY_CURRENT, MEMORY_EVENTS, MEMORY_HIGH, MEMORY_MAX, MEMORY_OOM_GROUP,
-        MEMORY_PRESSURE, MEMORY_RECLAIM, MEMORY_SWAP_CURRENT, Reclaimed,
-        parse::{self, Limit, MemoryEvents},
+use crate::{
+    engine::OomGroup,
+    runtime::{
+        cgroup::{
+            Cgroup, MEMORY_CURRENT, MEMORY_EVENTS, MEMORY_HIGH, MEMORY_MAX, MEMORY_OOM_GROUP,
+            MEMORY_PRESSURE, MEMORY_RECLAIM, MEMORY_SWAP_CURRENT, Reclaimed,
+            parse::{self, Limit, MemoryEvents},
+        },
+        error::RuntimeError,
     },
-    error::RuntimeError,
 };
 
 /// Reads and writes a cgroup's `memory.*` files.
@@ -25,11 +25,6 @@ impl RawCgroup {
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
-    }
-
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     #[must_use]
@@ -48,26 +43,18 @@ impl RawCgroup {
     pub async fn write(&self, name: &str, value: &str) -> Result<(), RuntimeError> {
         let path = self.path.join(name);
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .await
-            .map_err(|source| RuntimeError::Write {
-                path: path.clone(),
-                value: value.to_owned(),
-                source,
-            })?;
+        let written = async {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .await?;
 
-        file.write_all(value.as_bytes())
-            .await
-            .map_err(|source| RuntimeError::Write {
-                path: path.clone(),
-                value: value.to_owned(),
-                source,
-            })?;
+            file.write_all(value.as_bytes()).await?;
+            file.flush().await
+        };
 
-        file.flush().await.map_err(|source| RuntimeError::Write {
+        written.await.map_err(|source| RuntimeError::Write {
             path,
             value: value.to_owned(),
             source,
@@ -90,9 +77,13 @@ impl Cgroup for RawCgroup {
         self.write(MEMORY_MAX, &limit.to_string()).await
     }
 
-    async fn set_oom_group(&self, group: bool) -> Result<(), RuntimeError> {
-        self.write(MEMORY_OOM_GROUP, if group { "1" } else { "0" })
-            .await
+    async fn set_oom_group(&self, group: OomGroup) -> Result<(), RuntimeError> {
+        let value = match group {
+            OomGroup::Whole => "1",
+            OomGroup::PerProcess => "0",
+        };
+
+        self.write(MEMORY_OOM_GROUP, value).await
     }
 
     async fn events(&self) -> Result<MemoryEvents, RuntimeError> {
@@ -153,8 +144,8 @@ mod tests {
         (dir, cgroup)
     }
 
-    fn read(cgroup: &RawCgroup, name: &str) -> String {
-        fs::read_to_string(cgroup.path().join(name)).expect("the fixture file is there")
+    fn read(dir: &TempDir, name: &str) -> String {
+        fs::read_to_string(dir.path().join(name)).expect("the fixture file is there")
     }
 
     #[tokio::test]
@@ -195,26 +186,26 @@ mod tests {
 
     #[tokio::test]
     async fn the_limits_land_byte_exact() {
-        let (_dir, cgroup) = raw();
+        let (dir, cgroup) = raw();
 
         cgroup.set_max(Limit::Bytes(2_147_483_648)).await.unwrap();
         cgroup.set_high(Limit::Bytes(1_879_048_192)).await.unwrap();
-        cgroup.set_oom_group(true).await.unwrap();
+        cgroup.set_oom_group(OomGroup::Whole).await.unwrap();
 
-        assert_eq!(read(&cgroup, MEMORY_MAX), "2147483648");
-        assert_eq!(read(&cgroup, MEMORY_HIGH), "1879048192");
-        assert_eq!(read(&cgroup, MEMORY_OOM_GROUP), "1");
+        assert_eq!(read(&dir, MEMORY_MAX), "2147483648");
+        assert_eq!(read(&dir, MEMORY_HIGH), "1879048192");
+        assert_eq!(read(&dir, MEMORY_OOM_GROUP), "1");
 
         cgroup.set_high(Limit::Max).await.unwrap();
-        cgroup.set_oom_group(false).await.unwrap();
+        cgroup.set_oom_group(OomGroup::PerProcess).await.unwrap();
 
-        assert_eq!(read(&cgroup, MEMORY_HIGH), "max");
-        assert_eq!(read(&cgroup, MEMORY_OOM_GROUP), "0");
+        assert_eq!(read(&dir, MEMORY_HIGH), "max");
+        assert_eq!(read(&dir, MEMORY_OOM_GROUP), "0");
     }
 
     #[tokio::test]
     async fn a_reclaim_carries_the_swappiness_the_kernel_expects() {
-        let (_dir, cgroup) = raw();
+        let (dir, cgroup) = raw();
 
         assert_eq!(
             cgroup
@@ -223,13 +214,13 @@ mod tests {
                 .unwrap(),
             Reclaimed::Whole
         );
-        assert_eq!(read(&cgroup, MEMORY_RECLAIM), "67108864 swappiness=0");
+        assert_eq!(read(&dir, MEMORY_RECLAIM), "67108864 swappiness=0");
 
         cgroup.reclaim(1_048_576, None).await.unwrap();
-        assert_eq!(read(&cgroup, MEMORY_RECLAIM), "1048576");
+        assert_eq!(read(&dir, MEMORY_RECLAIM), "1048576");
 
         let swappiness = Swappiness::try_new(60).expect("60 is a swappiness");
         cgroup.reclaim(4096, Some(swappiness)).await.unwrap();
-        assert_eq!(read(&cgroup, MEMORY_RECLAIM), "4096 swappiness=60");
+        assert_eq!(read(&dir, MEMORY_RECLAIM), "4096 swappiness=60");
     }
 }

@@ -5,7 +5,7 @@ use std::{
 
 use pazari_proto::{DenyReason, GuestMessage, HostMessage};
 pub use pazari_proto::{ReclaimId, RequestId};
-use pazari_types::{Delay, Interval, Swappiness, Timestamp};
+use pazari_types::{Delay, Interval, Timestamp};
 
 use crate::engine::{
     Action, BootInfo, Engine, EngineConfig, Event, ExhaustionMode, ExponentialConfig, GrowConfig,
@@ -53,7 +53,11 @@ pub const fn count(value: u32) -> NonZeroU32 {
 }
 
 pub fn interval(secs: u64) -> Interval {
-    Interval::try_new(Duration::from_secs(secs)).expect("a positive interval under a day")
+    interval_ms(secs.saturating_mul(1_000))
+}
+
+pub fn interval_ms(millis: u64) -> Interval {
+    Interval::try_new(Duration::from_millis(millis)).expect("a positive interval under a day")
 }
 
 pub fn delay(secs: u64) -> Delay {
@@ -84,13 +88,12 @@ pub fn config() -> EngineConfig {
         grow: GrowConfig::Exponential(ExponentialConfig {
             step: bytes(512 * MIB),
             escalate_within: interval(10),
-            cap: bytes(64),
+            cap: count(64),
         }),
         release: ReleaseConfig::Titrate(titrate()),
-        deny_backoff: interval(5),
         settle_grace: interval(10),
+        deny_backoff: interval(5),
         recover_after: count(3),
-        reclaim_swappiness: Some(Swappiness::NONE),
         exhaustion: ExhaustionMode::Stall {
             timeout: interval(12),
         },
@@ -177,10 +180,7 @@ pub const fn request(id: u64, current: u64, target: u64) -> Action {
 }
 
 pub const fn reclaim(bytes: u64) -> Action {
-    Action::StartReclaim {
-        bytes,
-        swappiness: Some(Swappiness::NONE),
-    }
+    Action::StartReclaim { bytes }
 }
 
 pub const fn deny(id: RequestId) -> HostMessage {

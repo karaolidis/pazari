@@ -3,26 +3,29 @@ use std::{
     fs,
     future::{self, Future},
     io,
-    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
+use pazari_config::Settings;
 use pazari_types::{Pressure, Swappiness};
 use tempfile::TempDir;
 use tokio::task;
 
-use crate::runtime::{
-    cgroup::{
-        Cgroup, Limit, MEMORY_CURRENT, MEMORY_EVENTS, MEMORY_HIGH, MEMORY_MAX, MEMORY_OOM_GROUP,
-        MEMORY_PRESSURE, MEMORY_RECLAIM, MEMORY_SWAP_CURRENT, MEMORY_SWAP_MAX, MemoryEvents,
-        Reclaimed,
+pub use crate::engine::testing::{MIB, bytes};
+use crate::{
+    config::Config,
+    engine::OomGroup,
+    runtime::{
+        cgroup::{
+            Cgroup, Limit, MEMORY_CURRENT, MEMORY_EVENTS, MEMORY_HIGH, MEMORY_MAX,
+            MEMORY_OOM_GROUP, MEMORY_PRESSURE, MEMORY_RECLAIM, MEMORY_SWAP_CURRENT,
+            MEMORY_SWAP_MAX, MemoryEvents, Reclaimed,
+        },
+        config::{Paths, RuntimeConfig},
+        error::RuntimeError,
     },
-    config::{Paths, RuntimeConfig},
-    error::RuntimeError,
 };
-
-pub const MIB: u64 = 1 << 20;
 
 pub const EVENTS: &str = "low 0\nhigh 37\nmax 2\noom 0\noom_kill 0\noom_group_kill 0\n";
 
@@ -55,8 +58,22 @@ const FILES: [&str; 9] = [
     MEMORY_SWAP_MAX,
 ];
 
-pub fn bytes(value: u64) -> NonZeroU64 {
-    NonZeroU64::new(value).expect("a positive byte count")
+/// The runtime settings a file naming only `cgroup` resolves to.
+pub fn runtime_config(cgroup: &Path) -> RuntimeConfig {
+    let text = format!(
+        "[workload]\n\
+         cgroup = {:?}\n\
+         service_reserve = \"256MiB\"\n\
+         burst_reserve = \"256MiB\"\n\
+         \n\
+         [host.transport]\n\
+         kind = \"vsock\"\n",
+        cgroup.display().to_string(),
+    );
+
+    Config::parse(Path::new("agent.toml"), &text)
+        .expect("a workable configuration")
+        .runtime
 }
 
 pub fn cgroup_dir() -> TempDir {
@@ -86,7 +103,7 @@ impl Guest {
         let guest = Self {
             config: RuntimeConfig {
                 paths,
-                ..RuntimeConfig::new(cgroup)
+                ..runtime_config(&cgroup)
             },
             dir,
         };
@@ -146,7 +163,7 @@ impl Guest {
 pub enum Call {
     High(Limit),
     Max(Limit),
-    OomGroup(bool),
+    OomGroup(OomGroup),
     Reclaim {
         bytes: u64,
         swappiness: Option<Swappiness>,
@@ -255,7 +272,10 @@ impl Cgroup for FakeCgroup {
         future::ready(self.record(Call::Max(limit)))
     }
 
-    fn set_oom_group(&self, group: bool) -> impl Future<Output = Result<(), RuntimeError>> + Send {
+    fn set_oom_group(
+        &self,
+        group: OomGroup,
+    ) -> impl Future<Output = Result<(), RuntimeError>> + Send {
         future::ready(self.record(Call::OomGroup(group)))
     }
 

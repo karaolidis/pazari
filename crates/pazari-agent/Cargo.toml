@@ -36,4 +36,4 @@ zbus = { workspace = true, features = ["tokio"] }
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt", "time", "sync", "net", "fs", "io-util", "macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt", "time", "sync", "net", "fs", "io-util", "macros", "rt-multi-thread", "test-util"] }

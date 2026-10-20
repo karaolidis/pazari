@@ -24,7 +24,7 @@ use pazari_types::Timestamp;
 use tracing::debug;
 
 pub use crate::engine::{
-    action::Action,
+    action::{Action, OomGroup},
     config::{
         EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, SweepConfig,
         ThrottleMode, TitrateConfig,
@@ -77,7 +77,10 @@ impl Engine {
         let actions = vec![
             Action::SetMax(limits.max()),
             Action::SetHigh(limits.high()),
-            Action::SetOomGroup(matches!(config.exhaustion, ExhaustionMode::Kill)),
+            Action::SetOomGroup(match config.exhaustion {
+                ExhaustionMode::Stall { .. } => OomGroup::PerProcess,
+                ExhaustionMode::Kill => OomGroup::Whole,
+            }),
         ];
 
         Ok((engine, actions))
@@ -218,7 +221,7 @@ mod tests {
             vec![
                 Action::SetMax(MAX0),
                 Action::SetHigh(HIGH0),
-                Action::SetOomGroup(false),
+                Action::SetOomGroup(OomGroup::PerProcess),
             ]
         );
         assert!(matches!(engine.phase(), Phase::Steady(_)));
@@ -234,7 +237,7 @@ mod tests {
         };
         let (_, actions) = Engine::try_new(config, boot()).expect("a workable boot");
 
-        assert_eq!(actions[2], Action::SetOomGroup(true));
+        assert_eq!(actions[2], Action::SetOomGroup(OomGroup::Whole));
     }
 
     #[test]

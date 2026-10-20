@@ -47,11 +47,6 @@ impl ThrottleWatcher {
         })
     }
 
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub async fn wake(&mut self) -> Result<Event, RuntimeError> {
         let mut ready = self
             .events

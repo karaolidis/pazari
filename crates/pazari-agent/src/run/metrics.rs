@@ -332,7 +332,6 @@ mod tests {
 
     use pazari_metrics::Encoded;
     use pazari_proto::DenyReason;
-    use pazari_types::Swappiness;
 
     use super::*;
     use crate::engine::{EngineConfig, ThrottleMode, testing::*};
@@ -479,10 +478,7 @@ mod tests {
         observer.observe_actions(&[
             Action::SetHigh(HIGH0),
             request(1, BOOT, 2560 * MIB),
-            Action::StartReclaim {
-                bytes: 256 * MIB,
-                swappiness: Some(Swappiness::NONE),
-            },
+            Action::StartReclaim { bytes: 256 * MIB },
         ]);
         observer.observe_actions(&[Action::Send(GuestMessage::OfferRelease {
             id: RequestId(2),

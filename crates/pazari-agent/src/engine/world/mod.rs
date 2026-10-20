@@ -233,9 +233,7 @@ impl World {
         let slack = self.slack();
 
         self.calm = self.calm.then(
-            !pressure.throttled
-                && !pressure.breached
-                && slack.is_some_and(|slack| slack >= self.guest.block_size.get()),
+            pressure.calm() && slack.is_some_and(|slack| slack >= self.guest.block_size.get()),
         );
 
         self.release.observe(now, slack, pressure);

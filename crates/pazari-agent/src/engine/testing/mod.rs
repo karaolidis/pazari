@@ -8,7 +8,7 @@ use pazari_types::{Delay, Interval, Swappiness, Timestamp};
 
 use crate::engine::{
     Action, BootInfo, Engine, EngineConfig, Event, ExhaustionMode, ExponentialConfig, GrowConfig,
-    Phase, ReleaseConfig, Snapshot, TitrateConfig,
+    Phase, ReleaseConfig, Snapshot, SweepConfig, TitrateConfig,
 };
 
 pub const MIB: u64 = 1 << 20;
@@ -48,6 +48,14 @@ pub fn titrate() -> TitrateConfig {
     TitrateConfig {
         step: bytes(256 * MIB),
         intervals: count(3),
+        cooldown: delay(30),
+    }
+}
+
+pub fn sweep() -> SweepConfig {
+    SweepConfig {
+        min: bytes(256 * MIB),
+        hold: delay(5),
         cooldown: delay(30),
     }
 }

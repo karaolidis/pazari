@@ -1,3 +1,4 @@
+mod sweep;
 mod titrate;
 
 use std::num::NonZeroU64;
@@ -5,7 +6,7 @@ use std::num::NonZeroU64;
 use enum_dispatch::enum_dispatch;
 use pazari_types::Timestamp;
 
-pub use crate::engine::release::titrate::Titrate;
+pub use crate::engine::release::{sweep::Sweep, titrate::Titrate};
 use crate::engine::{config::ReleaseConfig, counters::Pressure};
 
 /// When the guest gives memory back to the host, and how much.
@@ -28,12 +29,14 @@ pub trait Release {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseStrategy {
     Titrate(Titrate),
+    Sweep(Sweep),
 }
 
 impl From<ReleaseConfig> for ReleaseStrategy {
     fn from(config: ReleaseConfig) -> Self {
         match config {
             ReleaseConfig::Titrate(config) => Self::Titrate(Titrate::new(config)),
+            ReleaseConfig::Sweep(config) => Self::Sweep(Sweep::new(config)),
         }
     }
 }

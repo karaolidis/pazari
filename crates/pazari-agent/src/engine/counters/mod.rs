@@ -31,6 +31,13 @@ pub struct Pressure {
     pub breached: bool,
 }
 
+impl Pressure {
+    /// Whether the workload ran into neither limit.
+    pub const fn calm(self) -> bool {
+        !self.throttled && !self.breached
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CounterTracker {
     seen: Option<Counters>,

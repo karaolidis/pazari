@@ -43,7 +43,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        engine::{ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, TitrateConfig},
+        engine::{
+            ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, SweepConfig,
+            TitrateConfig,
+        },
         runtime::Backend,
     };
 
@@ -460,6 +463,46 @@ mod tests {
                 cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
             })
         );
+    }
+
+    #[test]
+    fn a_sweep_table_takes_the_defaults_it_does_not_override() {
+        let config = parse(&MINIMAL.replace(
+            "[runtime]",
+            "[engine.release]\nkind = \"sweep\"\nhold = \"2m\"\n\n[runtime]",
+        ));
+
+        assert_eq!(
+            config.engine.release,
+            ReleaseConfig::Sweep(SweepConfig {
+                min: bytes(256 * MIB),
+                hold: Delay::try_new(Duration::from_mins(2)).expect("a short delay"),
+                cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
+            })
+        );
+    }
+
+    #[test]
+    fn a_zero_sweep_minimum_names_the_table_that_carries_it() {
+        let error = rejects(&MINIMAL.replace(
+            "[runtime]",
+            "[engine.release]\nkind = \"sweep\"\nmin = \"0B\"\n\n[runtime]",
+        ));
+
+        assert_eq!(
+            error,
+            "engine.release.min rejects 0: expected a positive byte count"
+        );
+    }
+
+    #[test]
+    fn a_titrate_key_on_a_sweep_is_refused() {
+        let error = rejects(&MINIMAL.replace(
+            "[runtime]",
+            "[engine.release]\nkind = \"sweep\"\nintervals = 3\n\n[runtime]",
+        ));
+
+        assert!(error.contains("intervals"), "unexpected error: {error}");
     }
 
     #[test]

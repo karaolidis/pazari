@@ -63,6 +63,16 @@ kind = "exponential"
 #     
 #     # How long after a resize before a release is allowed.
 #     cooldown = "30s"
+# - All the spare at once, once it has held for `hold`.
+#     kind = "sweep"
+#     # The least spare that counts towards the hold.
+#     min = "256MiB"
+#     
+#     # How long the spare must hold before a release.
+#     hold = "5m"
+#     
+#     # How long after a resize before a release is allowed.
+#     cooldown = "30s"
 kind = "titrate"
 
 [runtime]

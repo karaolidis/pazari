@@ -23,12 +23,20 @@ pub struct ExponentialConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseConfig {
     Titrate(TitrateConfig),
+    Sweep(SweepConfig),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TitrateConfig {
     pub step: NonZeroU64,
     pub intervals: NonZeroU32,
+    pub cooldown: Delay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepConfig {
+    pub min: NonZeroU64,
+    pub hold: Delay,
     pub cooldown: Delay,
 }
 

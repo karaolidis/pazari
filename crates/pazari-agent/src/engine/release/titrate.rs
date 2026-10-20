@@ -1,8 +1,10 @@
 use std::num::NonZeroU64;
 
-use pazari_types::{Deadline, Timestamp};
+use pazari_types::Timestamp;
 
-use crate::engine::{config::TitrateConfig, counters::Pressure, release::Release, streak::Streak};
+use crate::engine::{
+    config::TitrateConfig, cooldown::Cooldown, counters::Pressure, release::Release, streak::Streak,
+};
 
 /// One fixed step at a time, once the guest has held it spare for a run of
 /// calm intervals and the last resize has cooled off.
@@ -10,7 +12,7 @@ use crate::engine::{config::TitrateConfig, counters::Pressure, release::Release,
 pub struct Titrate {
     config: TitrateConfig,
     spare: Streak,
-    cooldown: Option<Deadline>,
+    cooldown: Cooldown,
 }
 
 impl Titrate {
@@ -18,48 +20,38 @@ impl Titrate {
         Self {
             config,
             spare: Streak::BROKEN,
-            cooldown: None,
+            cooldown: Cooldown::new(config.cooldown),
         }
-    }
-
-    fn cooled(&self, now: Timestamp) -> Deadline {
-        Deadline::after(now, self.config.cooldown.get())
     }
 
     const fn spared(&self) -> bool {
         self.spare.reached(self.config.intervals)
     }
-
-    fn cooling(&self, now: Timestamp) -> bool {
-        self.cooldown.is_some_and(|until| !until.reached(now))
-    }
 }
 
 impl Release for Titrate {
     fn observe(&mut self, _now: Timestamp, slack: Option<u64>, pressure: Pressure) {
-        let sparing = !pressure.throttled
-            && !pressure.breached
-            && slack.is_some_and(|slack| slack >= self.config.step.get());
+        let sparing = pressure.calm() && slack.is_some_and(|slack| slack >= self.config.step.get());
 
         self.spare = self.spare.then(sparing);
     }
 
     fn due(&mut self, now: Timestamp, pressure: Pressure) -> Option<NonZeroU64> {
         if pressure.breached {
-            self.cooldown = Some(self.cooled(now).furthest(self.cooldown));
+            self.cooldown.extend(now);
         }
 
-        (self.spared() && !self.cooling(now)).then_some(self.config.step)
+        (self.spared() && !self.cooldown.active(now)).then_some(self.config.step)
     }
 
     fn rested(&mut self, now: Timestamp) {
         self.spare = Streak::BROKEN;
-        self.cooldown = Some(self.cooled(now));
+        self.cooldown.restart(now);
     }
 
     fn recovered(&mut self) {
         self.spare = Streak::BROKEN;
-        self.cooldown = None;
+        self.cooldown.lift();
     }
 }
 

@@ -3,6 +3,7 @@ pub mod config;
 pub mod error;
 pub mod event;
 
+mod cooldown;
 mod counters;
 mod handle;
 
@@ -23,7 +24,8 @@ use tracing::debug;
 pub use crate::engine::{
     action::Action,
     config::{
-        EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, TitrateConfig,
+        EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, SweepConfig,
+        TitrateConfig,
     },
     error::EngineError,
     event::{BootInfo, Event, Snapshot},
@@ -192,11 +194,12 @@ mod tests {
     use super::*;
     use crate::engine::testing::*;
 
-    fn properties_config() -> EngineConfig {
+    fn properties_config(release: ReleaseConfig) -> EngineConfig {
         EngineConfig {
             exhaustion: ExhaustionMode::Stall {
                 timeout: interval(60),
             },
+            release,
             ..config()
         }
     }
@@ -649,6 +652,13 @@ mod tests {
         ]
     }
 
+    fn release() -> impl Strategy<Value = ReleaseConfig> {
+        prop_oneof![
+            Just(ReleaseConfig::Titrate(titrate())),
+            Just(ReleaseConfig::Sweep(sweep())),
+        ]
+    }
+
     fn deny_reason() -> impl Strategy<Value = DenyReason> {
         prop_oneof![
             Just(DenyReason::Ceiling),
@@ -756,9 +766,9 @@ mod tests {
         Ok(())
     }
 
-    fn drive(timeline: &[(u64, Move)]) -> Result<(), TestCaseError> {
+    fn drive(release: ReleaseConfig, timeline: &[(u64, Move)]) -> Result<(), TestCaseError> {
         let (mut engine, actions) =
-            Engine::try_new(properties_config(), boot()).expect("a workable boot");
+            Engine::try_new(properties_config(release), boot()).expect("a workable boot");
         let mut now = Timestamp::START;
         let mut model = Model {
             connected: false,
@@ -855,8 +865,11 @@ mod tests {
 
     proptest! {
         #[test]
-        fn the_engine_holds_its_invariants_over_arbitrary_event_streams(timeline in timeline()) {
-            drive(&timeline)?;
+        fn the_engine_holds_its_invariants_over_arbitrary_event_streams(
+            release in release(),
+            timeline in timeline(),
+        ) {
+            drive(release, &timeline)?;
         }
     }
 }

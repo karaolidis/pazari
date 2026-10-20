@@ -24,7 +24,8 @@ use serde_inline_default::serde_inline_default;
 use crate::{
     config::Config,
     engine::{
-        EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, TitrateConfig,
+        EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, SweepConfig,
+        TitrateConfig,
     },
     runtime::{Backend, RuntimeConfig},
     session::SessionConfig,
@@ -39,6 +40,9 @@ const ESCALATE_WITHIN: Duration = Duration::from_secs(10);
 const RELEASE_STEP: ByteSize = ByteSize::mib(256);
 const RELEASE_INTERVALS: u32 = 3;
 const RELEASE_COOLDOWN: Duration = Duration::from_secs(30);
+
+const SWEEP_MIN: ByteSize = ByteSize::mib(256);
+const SWEEP_HOLD: Duration = Duration::from_mins(5);
 
 /// pazari-agent configuration.
 #[serde_inline_default]
@@ -261,6 +265,26 @@ pub enum ReleaseSection {
         #[doku(as = "String", example = "30s")]
         cooldown: Duration,
     },
+
+    /// All the spare at once, once it has held for `hold`.
+    Sweep {
+        /// The least spare that counts towards the hold.
+        #[serde_inline_default(SWEEP_MIN)]
+        #[doku(as = "String", example = "256MiB")]
+        min: ByteSize,
+
+        /// How long the spare must hold before a release.
+        #[serde_inline_default(SWEEP_HOLD)]
+        #[serde(deserialize_with = "humantime_serde::deserialize")]
+        #[doku(as = "String", example = "5m")]
+        hold: Duration,
+
+        /// How long after a resize before a release is allowed.
+        #[serde_inline_default(RELEASE_COOLDOWN)]
+        #[serde(deserialize_with = "humantime_serde::deserialize")]
+        #[doku(as = "String", example = "30s")]
+        cooldown: Duration,
+    },
 }
 
 impl ReleaseSection {
@@ -274,6 +298,15 @@ impl ReleaseSection {
                 step: NonZeroU64::new(step.as_u64()).bytes("engine.release.step")?,
                 intervals: NonZeroU32::new(intervals)
                     .positive("engine.release.intervals", "count of intervals")?,
+                cooldown: Delay::try_new(cooldown).at("engine.release.cooldown")?,
+            })),
+            Self::Sweep {
+                min,
+                hold,
+                cooldown,
+            } => Ok(ReleaseConfig::Sweep(SweepConfig {
+                min: NonZeroU64::new(min.as_u64()).bytes("engine.release.min")?,
+                hold: Delay::try_new(hold).at("engine.release.hold")?,
                 cooldown: Delay::try_new(cooldown).at("engine.release.cooldown")?,
             })),
         }

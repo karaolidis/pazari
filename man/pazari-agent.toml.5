@@ -156,6 +156,28 @@ May be 0.
 Default
 .Cm 30s .
 .El
+.It Cm kind No = Qq Cm sweep
+Release all spare memory at once, once it has held for
+.Cm hold .
+A throttle, a breach, or less than
+.Cm min
+to spare starts the hold over.
+.Bl -tag -width Ds
+.It Cm min No = Ar size
+The least spare memory that counts towards the hold.
+Default
+.Cm 256MiB .
+.It Cm hold No = Ar duration
+How long the spare must hold before a release.
+May be 0.
+Default
+.Cm 5m .
+.It Cm cooldown No = Ar duration
+Minimum time after a resize before a release.
+May be 0.
+Default
+.Cm 30s .
+.El
 .El
 .Ss [runtime]\&
 .Bl -tag -width Ds

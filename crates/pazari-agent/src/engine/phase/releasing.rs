@@ -256,7 +256,7 @@ mod tests {
     use pazari_proto::{DenyReason, GuestMessage, HostMessage};
     use pazari_types::Swappiness;
 
-    use crate::engine::{Action, Event, Phase, testing::*};
+    use crate::engine::{Action, EngineConfig, Event, Phase, ReleaseConfig, testing::*};
 
     #[test]
     fn an_offer_that_collapses_tells_the_host_rather_than_going_quiet() {
@@ -413,6 +413,34 @@ mod tests {
             ),
             vec![Action::StartReclaim {
                 bytes: 64 * MIB,
+                swappiness: Some(Swappiness::NONE),
+            }],
+        );
+    }
+
+    #[test]
+    fn a_sweep_reclaims_everything_spare_in_one_release() {
+        let mut engine = started_with(
+            EngineConfig {
+                release: ReleaseConfig::Sweep(sweep()),
+                ..config()
+            },
+            CEILING,
+        );
+        grown(&mut engine);
+
+        for second in 140..=145 {
+            assert_eq!(
+                tick(&mut engine, at(second), snap(2560 * MIB, CALM, 1)),
+                vec![],
+                "released before the spare held at t+{second}"
+            );
+        }
+
+        assert_eq!(
+            tick(&mut engine, at(146), snap(2560 * MIB, CALM, 1)),
+            vec![Action::StartReclaim {
+                bytes: 512 * MIB,
                 swappiness: Some(Swappiness::NONE),
             }],
         );

@@ -16,7 +16,15 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::runtime::qmp::{CAPABILITIES, QOM_GET, QUERY_DEVICES, QUERY_SUMMARY, qom_path};
+use crate::runtime::qmp::{QmpCommand, qom_path};
+
+const COMMANDS: [QmpCommand; 5] = [
+    QmpCommand::Capabilities,
+    QmpCommand::QueryMemoryDevices,
+    QmpCommand::QueryMemorySizeSummary,
+    QmpCommand::QomGet,
+    QmpCommand::QomSet,
+];
 
 pub const GREETING: &str = r#"{"QMP":{"version":{"qemu":{"major":10,"minor":1,"micro":0},"package":"pazari"},"capabilities":["oob"]}}"#;
 
@@ -31,10 +39,7 @@ pub enum Answer {
 
 #[derive(Debug, Clone)]
 pub enum Step {
-    Reply {
-        command: &'static str,
-        answer: Answer,
-    },
+    Reply { command: QmpCommand, answer: Answer },
 
     Emit(String),
 
@@ -45,7 +50,7 @@ pub enum Step {
 
 impl Step {
     #[must_use]
-    pub fn returns(command: &'static str, value: Value) -> Self {
+    pub fn returns(command: QmpCommand, value: Value) -> Self {
         Self::Reply {
             command,
             answer: Answer::Return(value),
@@ -53,7 +58,7 @@ impl Step {
     }
 
     #[must_use]
-    pub fn refuses(command: &'static str, desc: &str) -> Self {
+    pub fn refuses(command: QmpCommand, desc: &str) -> Self {
         Self::Reply {
             command,
             answer: Answer::Refuse(desc.to_owned()),
@@ -61,7 +66,7 @@ impl Step {
     }
 
     #[must_use]
-    pub fn raw(command: &'static str, line: String) -> Self {
+    pub fn raw(command: QmpCommand, line: String) -> Self {
         Self::Reply {
             command,
             answer: Answer::Raw(line),
@@ -112,15 +117,27 @@ pub fn resized_anonymously(qom: &str, size: u64) -> String {
 #[must_use]
 pub fn verified(device: &str, boot: u64) -> Vec<Step> {
     vec![
-        Step::returns(QUERY_DEVICES, devices(&[(device, "virtio-mem")])),
-        Step::returns(QUERY_SUMMARY, summary(boot)),
+        Step::returns(
+            QmpCommand::QueryMemoryDevices,
+            devices(&[(device, "virtio-mem")]),
+        ),
+        Step::returns(QmpCommand::QueryMemorySizeSummary, summary(boot)),
     ]
 }
 
 #[must_use]
 pub fn startup(device: &str, boot: u64, size: u64) -> Vec<Step> {
     let mut steps = verified(device, boot);
-    steps.push(Step::returns(QOM_GET, json!(size)));
+    steps.push(Step::returns(QmpCommand::QomGet, json!(size)));
+
+    steps
+}
+
+/// [`startup`] for a socket shared with other tools, which reads the request too.
+#[must_use]
+pub fn shared(device: &str, boot: u64, size: u64, requested: u64) -> Vec<Step> {
+    let mut steps = startup(device, boot, size);
+    steps.push(Step::returns(QmpCommand::QomGet, json!(requested)));
 
     steps
 }
@@ -167,19 +184,24 @@ impl FakeQmp {
         &self.path
     }
 
-    pub fn commands(&self) -> Vec<String> {
+    pub fn commands(&self) -> Vec<QmpCommand> {
         self.locked()
             .asks
             .iter()
-            .map(|ask| ask.execute.clone())
+            .map(|ask| {
+                COMMANDS
+                    .into_iter()
+                    .find(|command| command.as_str() == ask.execute)
+                    .expect("a command the daemon sends")
+            })
             .collect()
     }
 
-    pub fn arguments(&self, command: &str) -> Vec<Value> {
+    pub fn arguments(&self, command: QmpCommand) -> Vec<Value> {
         self.locked()
             .asks
             .iter()
-            .filter(|ask| ask.execute == command)
+            .filter(|ask| ask.execute == command.as_str())
             .map(|ask| ask.arguments.clone())
             .collect()
     }
@@ -228,7 +250,7 @@ async fn serve(stream: UnixStream, steps: Vec<Step>, log: &Mutex<Log>) -> io::Re
 
     let scripted = matches!(
         steps.first(),
-        Some(Step::Reply { command, .. }) if *command == CAPABILITIES
+        Some(Step::Reply { command, .. }) if *command == QmpCommand::Capabilities
     );
 
     if !scripted {
@@ -236,11 +258,11 @@ async fn serve(stream: UnixStream, steps: Vec<Step>, log: &Mutex<Log>) -> io::Re
             return Ok(());
         };
 
-        let answer = if ask.execute == CAPABILITIES {
+        let answer = if ask.execute == QmpCommand::Capabilities.as_str() {
             json!({ "return": {}, "id": ask.id })
         } else {
             refusal(
-                &format!("expected {CAPABILITIES}, got {}", ask.execute),
+                &format!("expected {}, got {}", QmpCommand::Capabilities, ask.execute),
                 ask.id,
             )
         };
@@ -255,7 +277,7 @@ async fn serve(stream: UnixStream, steps: Vec<Step>, log: &Mutex<Log>) -> io::Re
                     return Ok(());
                 };
 
-                let line = if ask.execute == command {
+                let line = if ask.execute == command.as_str() {
                     match answer {
                         Answer::Return(value) => {
                             json!({ "return": value, "id": ask.id }).to_string()

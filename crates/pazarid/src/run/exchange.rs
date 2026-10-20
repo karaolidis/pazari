@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use tokio::sync::watch;
 
 use crate::{
-    broker::{Action, Broker, Event},
+    broker::{Action, Broker, Event, GuestId},
     run::{metrics::Observer, peers::Peers},
 };
 
@@ -10,7 +12,10 @@ pub type Target = watch::Sender<Option<u64>>;
 pub struct Exchange {
     pub broker: Broker,
     pub peers: Peers,
-    pub targets: Vec<Target>,
+
+    /// Every registered guest's device.
+    pub targets: HashMap<GuestId, Target>,
+
     pub observer: Observer,
 }
 
@@ -34,9 +39,10 @@ impl Exchange {
                 Action::Send { peer, message } => self.peers.send(peer, message.clone()),
                 Action::Close { peer } => self.peers.close(peer),
                 Action::SetRequested { guest, bytes } => {
-                    if let Some(target) = self.targets.get(guest.index()) {
-                        target.send_replace(Some(*bytes));
-                    }
+                    self.targets
+                        .get(guest)
+                        .expect("every registered guest has a device")
+                        .send_replace(Some(*bytes));
                 }
             }
         }
@@ -48,12 +54,9 @@ mod tests {
     use pazari_proto::HostMessage;
 
     use super::*;
-    use crate::broker::{
-        GuestId,
-        testing::{BOOT, MIB, ONE, policy, registry, vsock},
-    };
+    use crate::broker::testing::{BOOT, MIB, ONE, TWO, id, policy, registry, vsock};
 
-    fn exchange(targets: Vec<Target>) -> Exchange {
+    fn exchange(targets: HashMap<GuestId, Target>) -> Exchange {
         let (peers, _reports) = Peers::new();
 
         Exchange {
@@ -71,9 +74,9 @@ mod tests {
 
         drop(deaf);
 
-        exchange(vec![one, two]).dispatch(&[
+        exchange(HashMap::from([(id(ONE), one), (id(TWO), two)])).dispatch(&[
             Action::SetRequested {
-                guest: GuestId::from_index(0),
+                guest: id(ONE),
                 bytes: BOOT,
             },
             Action::Send {
@@ -81,7 +84,7 @@ mod tests {
                 message: HostMessage::Ceiling { ceiling: BOOT },
             },
             Action::SetRequested {
-                guest: GuestId::from_index(1),
+                guest: id(TWO),
                 bytes: 3072 * MIB,
             },
             Action::Close { peer: vsock(ONE) },
@@ -91,10 +94,13 @@ mod tests {
     }
 
     #[test]
-    fn a_size_for_a_guest_with_no_device_is_let_go_of() {
-        exchange(Vec::new()).dispatch(&[Action::SetRequested {
-            guest: GuestId::from_index(7),
-            bytes: BOOT,
-        }]);
+    #[should_panic(expected = "every registered guest has a device")]
+    fn a_size_for_a_guest_with_no_device_is_an_invariant_breach() {
+        exchange(HashMap::from([(id(ONE), watch::channel(None).0)])).dispatch(&[
+            Action::SetRequested {
+                guest: id(TWO),
+                bytes: BOOT,
+            },
+        ]);
     }
 }

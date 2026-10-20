@@ -1,20 +1,20 @@
 pub mod qmp;
 
 use std::{
-    collections::VecDeque,
     future::{self, Future},
     io,
     path::PathBuf,
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use pazari_types::{MemInfo, Pressure};
-use tokio::task;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::runtime::{
     actuator::{Actuator, Reading},
-    error::RuntimeError,
+    error::{ResizeError, RuntimeError},
     memory::{self, HostMemory},
+    qmp::{QmpError, SocketOp},
 };
 
 pub const MEMINFO: &str = "MemTotal:        2096756 kB\n\
@@ -33,6 +33,9 @@ pub const SWAPS: &str = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n\
                          /dev/zram0                              partition\t1048572\t\t0\t\t100\n\
                          /swap/swapfile                          file\t\t2097148\t\t0\t\t-2\n";
 
+/// Where the mock device claims to live.
+const DEVICE: &str = "/run/pazari/mock.qmp";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Completion {
     #[default]
@@ -48,29 +51,52 @@ struct State {
     size: u64,
     requested: u64,
     calls: Vec<u64>,
+    refuse: bool,
+    write_failures: usize,
 
-    completed: VecDeque<u64>,
+    opens: usize,
+    open_refusals: usize,
+    read_refusals: usize,
+}
+
+/// What the device does next, as [`Actuator::changed`] sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Change {
+    Resized(u64),
+    Lost,
 }
 
 #[derive(Debug)]
+struct Shared {
+    state: Mutex<State>,
+    changes: mpsc::UnboundedSender<Change>,
+    pending: AsyncMutex<mpsc::UnboundedReceiver<Change>>,
+}
+
+/// A memory device; clones are the same device.
+#[derive(Debug, Clone)]
 pub struct MockActuator {
     base: u64,
     completion: Completion,
-    refuse: bool,
-    state: Mutex<State>,
+    shared: Arc<Shared>,
 }
 
 impl MockActuator {
     #[must_use]
     pub fn new(size: u64) -> Self {
+        let (changes, pending) = mpsc::unbounded_channel();
+
         Self {
             base: size,
             completion: Completion::Immediate,
-            refuse: false,
-            state: Mutex::new(State {
-                size,
-                requested: size,
-                ..State::default()
+            shared: Arc::new(Shared {
+                state: Mutex::new(State {
+                    size,
+                    requested: size,
+                    ..State::default()
+                }),
+                changes,
+                pending: AsyncMutex::new(pending),
             }),
         }
     }
@@ -82,31 +108,124 @@ impl MockActuator {
     }
 
     #[must_use]
-    pub const fn refusing(mut self) -> Self {
-        self.refuse = true;
+    pub fn refusing(self) -> Self {
+        self.locked().refuse = true;
         self
     }
 
+    /// The next writes are lost on the wire rather than refused.
+    #[must_use]
+    pub fn failing_writes(self, times: usize) -> Self {
+        self.locked().write_failures = times;
+        self
+    }
+
+    #[must_use]
+    pub fn refusing_to_open(self, times: usize) -> Self {
+        self.locked().open_refusals = times;
+        self
+    }
+
+    #[must_use]
+    pub fn refusing_to_be_read(self, times: usize) -> Self {
+        self.locked().read_refusals = times;
+        self
+    }
+
+    /// Every size asked for, taken or not.
     #[must_use]
     pub fn calls(&self) -> Vec<u64> {
         self.locked().calls.clone()
     }
 
+    #[must_use]
+    pub fn opens(&self) -> usize {
+        self.locked().opens
+    }
+
+    /// Opens the device, unless it is still refusing to be opened.
+    pub fn open(&self) -> Result<Self, RuntimeError> {
+        let mut state = self.locked();
+
+        state.opens = state.opens.saturating_add(1);
+
+        if state.open_refusals > 0 {
+            state.open_refusals -= 1;
+            drop(state);
+
+            return Err(socket(SocketOp::Connect, io::ErrorKind::ConnectionRefused));
+        }
+
+        drop(state);
+
+        Ok(self.clone())
+    }
+
+    /// The device moves to `size` of its own accord.
+    pub fn plug(&self, size: u64) {
+        self.locked().size = size;
+        self.change(Change::Resized(size));
+    }
+
+    /// The device's connection drops.
+    pub fn kill(&self) {
+        self.change(Change::Lost);
+    }
+
+    /// The device comes back at `size` the next time it is read.
+    pub fn rebooted(&self, size: u64) {
+        self.locked().size = size;
+    }
+
+    fn change(&self, change: Change) {
+        self.shared
+            .changes
+            .send(change)
+            .expect("the mock holds its own receiver");
+    }
+
     fn locked(&self) -> MutexGuard<'_, State> {
-        self.state.lock().expect("no test poisons the mock")
+        self.shared.state.lock().expect("no test poisons the mock")
+    }
+
+    fn read(&self) -> Result<Reading, RuntimeError> {
+        let mut state = self.locked();
+
+        if state.read_refusals > 0 {
+            state.read_refusals -= 1;
+            drop(state);
+
+            return Err(socket(SocketOp::Read, io::ErrorKind::ConnectionReset));
+        }
+
+        let size = state.size;
+        drop(state);
+
+        Ok(Reading::sized(size, self.base))
     }
 
     fn write(&self, bytes: u64) -> Result<(), RuntimeError> {
-        if self.refuse {
-            return Err(RuntimeError::Device {
-                bytes,
-                reason: "the mock refuses every size".to_owned(),
-            });
-        }
-
         let mut state = self.locked();
 
         state.calls.push(bytes);
+
+        if state.write_failures > 0 {
+            state.write_failures -= 1;
+            drop(state);
+
+            return Err(socket(SocketOp::Write, io::ErrorKind::BrokenPipe));
+        }
+
+        if state.refuse {
+            drop(state);
+
+            return Err(ResizeError::Refused {
+                bytes,
+                reason: "the mock refuses every size".to_owned(),
+            }
+            .into());
+        }
+
         state.requested = bytes;
 
         let completed = match self.completion {
@@ -115,28 +234,25 @@ impl MockActuator {
             Completion::Stuck => None,
         };
 
-        if let Some(size) = completed
-            && size != state.size
-        {
+        let moved = completed.filter(|size| *size != state.size);
+
+        if let Some(size) = moved {
             state.size = size;
-            state.completed.push_back(size);
         }
 
         drop(state);
 
-        Ok(())
-    }
+        if let Some(size) = moved {
+            self.change(Change::Resized(size));
+        }
 
-    fn take(&self) -> Option<u64> {
-        self.locked().completed.pop_front()
+        Ok(())
     }
 }
 
 impl Actuator for MockActuator {
     fn reading(&self) -> impl Future<Output = Result<Reading, RuntimeError>> + Send {
-        let size = self.locked().size;
-
-        future::ready(Ok(Reading::sized(size, self.base)))
+        future::ready(self.read())
     }
 
     fn requested(&self) -> impl Future<Output = Result<u64, RuntimeError>> + Send {
@@ -148,16 +264,26 @@ impl Actuator for MockActuator {
     }
 
     async fn changed(&self) -> Result<Reading, RuntimeError> {
-        loop {
-            if let Some(size) = self.take() {
-                task::yield_now().await;
+        let mut pending = self.shared.pending.lock().await;
 
-                return Ok(Reading::sized(size, self.base));
+        match pending.recv().await {
+            Some(Change::Resized(size)) => Ok(Reading::sized(size, self.base)),
+            Some(Change::Lost) => Err(QmpError::Closed {
+                path: PathBuf::from(DEVICE),
             }
-
-            future::pending::<()>().await;
+            .into()),
+            None => future::pending().await,
         }
     }
+}
+
+fn socket(op: SocketOp, kind: io::ErrorKind) -> RuntimeError {
+    QmpError::Socket {
+        op,
+        path: PathBuf::from(DEVICE),
+        source: io::Error::from(kind),
+    }
+    .into()
 }
 
 #[must_use]

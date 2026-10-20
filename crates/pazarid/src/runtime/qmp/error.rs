@@ -1,13 +1,49 @@
-use std::{io, path::PathBuf, sync::Arc};
+use std::{fmt, io, path::PathBuf, sync::Arc};
 
 use pazari_types::Interval;
 use thiserror::Error;
 
+use crate::runtime::qmp::wire::QmpCommand;
+
+/// What the daemon was doing with a QMP socket when it failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketOp {
+    Connect,
+    Read,
+    Write,
+}
+
+impl fmt::Display for SocketOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Connect => "connect to",
+            Self::Read => "read from",
+            Self::Write => "write to",
+        })
+    }
+}
+
+/// What a QMP deadline was spent waiting on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    Handshake,
+    Command(QmpCommand),
+}
+
+impl fmt::Display for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Handshake => f.write_str("the handshake"),
+            Self::Command(command) => command.fmt(f),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum QmpError {
-    #[error("failed to {what} the QMP socket {}: {source}", .path.display())]
+    #[error("failed to {op} the QMP socket {}: {source}", .path.display())]
     Socket {
-        what: &'static str,
+        op: SocketOp,
         path: PathBuf,
         source: io::Error,
     },
@@ -22,14 +58,11 @@ pub enum QmpError {
     Fatal(Arc<Self>),
 
     #[error("qemu refused {command}: {reason}")]
-    Refused {
-        command: &'static str,
-        reason: String,
-    },
+    Refused { command: QmpCommand, reason: String },
 
-    #[error("{what} on the QMP socket {} did not finish within {deadline}", .path.display())]
+    #[error("{during} on the QMP socket {} did not finish within {deadline}", .path.display())]
     Timeout {
-        what: &'static str,
+        during: Operation,
         path: PathBuf,
         deadline: Interval,
     },
@@ -39,9 +72,6 @@ pub enum QmpError {
 
     #[error("the memory device {device} is a {kind}, not a virtio-mem")]
     NotVirtioMem { device: String, kind: String },
-
-    #[error("asked the device for {bytes}, under the guest's boot memory of {boot}")]
-    BelowBoot { bytes: u64, boot: u64 },
 }
 
 #[cfg(test)]
@@ -53,7 +83,7 @@ mod tests {
     #[test]
     fn a_socket_failure_names_the_socket_and_the_step() {
         let error = QmpError::Socket {
-            what: "connect to",
+            op: SocketOp::Connect,
             path: PathBuf::from("/run/pazari/vm0.qmp"),
             source: io::Error::from(io::ErrorKind::ConnectionRefused),
         };
@@ -102,7 +132,7 @@ mod tests {
     #[test]
     fn a_deadline_names_what_ran_out_of_time() {
         let error = QmpError::Timeout {
-            what: "qom-get",
+            during: Operation::Command(QmpCommand::QomGet),
             path: PathBuf::from("/run/pazari/vm0.qmp"),
             deadline: Interval::try_new(Duration::from_secs(5)).expect("five seconds"),
         };
@@ -114,9 +144,23 @@ mod tests {
     }
 
     #[test]
+    fn a_handshake_that_ran_out_of_time_says_so() {
+        let error = QmpError::Timeout {
+            during: Operation::Handshake,
+            path: PathBuf::from("/run/pazari/vm0.qmp"),
+            deadline: Interval::try_new(Duration::from_secs(5)).expect("five seconds"),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "the handshake on the QMP socket /run/pazari/vm0.qmp did not finish within 5s"
+        );
+    }
+
+    #[test]
     fn a_refused_command_names_itself() {
         let error = QmpError::Refused {
-            command: "qom-set",
+            command: QmpCommand::QomSet,
             reason: "Property 'requested-size' doesn't take value '1'".to_owned(),
         };
 
@@ -145,19 +189,6 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "the memory device vm0 is a pc-dimm, not a virtio-mem"
-        );
-    }
-
-    #[test]
-    fn an_ask_under_the_boot_memory_names_both_sizes() {
-        let error = QmpError::BelowBoot {
-            bytes: 1 << 30,
-            boot: 1 << 31,
-        };
-
-        assert_eq!(
-            error.to_string(),
-            "asked the device for 1073741824, under the guest's boot memory of 2147483648"
         );
     }
 }

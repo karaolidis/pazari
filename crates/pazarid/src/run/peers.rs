@@ -176,6 +176,17 @@ mod tests {
         }
     }
 
+    /// A listening socket and a way to dial it, alive while the directory is.
+    fn socket() -> (TempDir, UnixListener, AnyConnector) {
+        let dir = TempDir::new().expect("a temporary directory");
+        let path = dir.path().join("host.sock");
+
+        let listener = UnixListener::bind(&path).expect("a bound listener");
+        let connector = AnyConnector::Unix(UnixConnector::new(&path));
+
+        (dir, listener, connector)
+    }
+
     async fn join(
         listener: &UnixListener,
         connector: &AnyConnector,
@@ -202,11 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn what_a_guest_says_becomes_a_message_event() {
-        let dir = TempDir::new().expect("a temporary directory");
-        let path = dir.path().join("host.sock");
-
-        let listener = UnixListener::bind(&path).expect("a bound listener");
-        let connector = AnyConnector::Unix(UnixConnector::new(&path));
+        let (_dir, listener, connector) = socket();
 
         let (mut peers, mut reports) = Peers::new();
         let (connection, peer, mut guest) = join(&listener, &connector).await;
@@ -237,11 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_guest_that_hangs_up_disconnects_once() {
-        let dir = TempDir::new().expect("a temporary directory");
-        let path = dir.path().join("host.sock");
-
-        let listener = UnixListener::bind(&path).expect("a bound listener");
-        let connector = AnyConnector::Unix(UnixConnector::new(&path));
+        let (_dir, listener, connector) = socket();
 
         let (mut peers, mut reports) = Peers::new();
         let (connection, peer, guest) = join(&listener, &connector).await;
@@ -249,9 +252,24 @@ mod tests {
         peers.accept(connection, peer.clone());
         drop(guest);
 
+        let gone = next(&mut reports).await;
+        let link = gone.link;
+
         assert_eq!(
-            peers.digest(next(&mut reports).await, at(2)),
+            peers.digest(gone, at(2)),
             Some(Event::Disconnected { peer: peer.clone() })
+        );
+
+        let again = Report {
+            link,
+            peer: peer.clone(),
+            said: Said::Gone,
+        };
+
+        assert_eq!(
+            peers.digest(again, at(3)),
+            None,
+            "one hang-up was reported twice"
         );
 
         peers.send(&peer, HostMessage::Ceiling { ceiling: 42 });
@@ -259,11 +277,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_connection_that_arrives_over_a_live_one_buries_its_word() {
-        let dir = TempDir::new().expect("a temporary directory");
-        let path = dir.path().join("host.sock");
-
-        let listener = UnixListener::bind(&path).expect("a bound listener");
-        let connector = AnyConnector::Unix(UnixConnector::new(&path));
+        let (_dir, listener, connector) = socket();
 
         let (mut peers, mut reports) = Peers::new();
 
@@ -300,11 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_closed_connection_is_let_go_of() {
-        let dir = TempDir::new().expect("a temporary directory");
-        let path = dir.path().join("host.sock");
-
-        let listener = UnixListener::bind(&path).expect("a bound listener");
-        let connector = AnyConnector::Unix(UnixConnector::new(&path));
+        let (_dir, listener, connector) = socket();
 
         let (mut peers, _reports) = Peers::new();
         let (connection, peer, mut guest) = join(&listener, &connector).await;

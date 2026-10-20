@@ -187,14 +187,6 @@ in
       '';
     };
 
-    vsockPort = lib.mkOption {
-      type = lib.types.port;
-      default = 4650;
-      description = ''
-        The port the agent dials the host daemon on.
-      '';
-    };
-
     qmp = {
       socket = lib.mkOption {
         type = lib.types.str;
@@ -366,7 +358,6 @@ in
         host.transport = {
           kind = "vsock";
           cid = 2;
-          port = cfg.vsockPort;
         };
 
         resize = {

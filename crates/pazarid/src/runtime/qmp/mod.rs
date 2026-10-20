@@ -26,21 +26,16 @@ use tracing::{debug, warn};
 
 use crate::runtime::qmp::wire::MEMORY_DEVICE_SIZE_CHANGE;
 pub use crate::runtime::qmp::{
-    error::QmpError,
+    error::{Operation, QmpError, SocketOp},
     wire::{
-        CAPABILITIES, Command, DeviceData, Event, Failure, Fault, Greeting, Handshake, Incoming,
-        MemoryDevice, MemorySummary, Outcome, QOM_GET, QOM_SET, QUERY_DEVICES, QUERY_SUMMARY,
-        Reply, SizeChange,
+        Command, DeviceData, Event, Failure, Fault, Greeting, Handshake, Incoming, MemoryDevice,
+        MemorySummary, Outcome, QmpCommand, Reply, SizeChange,
     },
 };
 
 pub const MAX_LINE_BYTES: usize = 1 << 20;
 
 const OUTBOX: usize = 32;
-
-const CONNECT: &str = "connect to";
-const READ: &str = "read from";
-const WRITE: &str = "write to";
 
 /// Where QEMU hangs a device given an id on the command line.
 #[must_use]
@@ -54,7 +49,9 @@ pub struct Lines<R> {
     reader: BufReader<R>,
     path: PathBuf,
     buf: Vec<u8>,
-    poisoned: bool,
+
+    /// Why an earlier frame broke the protocol.
+    broken: Option<String>,
 }
 
 impl<R: AsyncRead + Unpin> Lines<R> {
@@ -64,7 +61,7 @@ impl<R: AsyncRead + Unpin> Lines<R> {
             reader: BufReader::new(reader),
             path: path.into(),
             buf: Vec::new(),
-            poisoned: false,
+            broken: None,
         }
     }
 
@@ -74,8 +71,11 @@ impl<R: AsyncRead + Unpin> Lines<R> {
     }
 
     pub async fn recv(&mut self) -> Result<Option<Incoming>, QmpError> {
-        if self.poisoned {
-            return Err(self.broke("an earlier frame broke the protocol"));
+        if let Some(reason) = &self.broken {
+            return Err(QmpError::Protocol {
+                path: self.path.clone(),
+                reason: reason.clone(),
+            });
         }
 
         if !self.fill().await? {
@@ -97,7 +97,7 @@ impl<R: AsyncRead + Unpin> Lines<R> {
                 .fill_buf()
                 .await
                 .map_err(|source| QmpError::Socket {
-                    what: READ,
+                    op: SocketOp::Read,
                     path: self.path.clone(),
                     source,
                 })?;
@@ -133,7 +133,7 @@ impl<R: AsyncRead + Unpin> Lines<R> {
     }
 
     fn broke(&mut self, reason: &str) -> QmpError {
-        self.poisoned = true;
+        self.broken = Some(reason.to_owned());
 
         QmpError::Protocol {
             path: self.path.clone(),
@@ -148,7 +148,7 @@ pub trait Endpoint: Send {
 
     fn execute(
         &mut self,
-        command: &'static str,
+        command: QmpCommand,
         arguments: Value,
     ) -> impl Future<Output = Result<Value, QmpError>> + Send;
 }
@@ -165,7 +165,7 @@ impl Session {
         let stream = UnixStream::connect(path)
             .await
             .map_err(|source| QmpError::Socket {
-                what: CONNECT,
+                op: SocketOp::Connect,
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -182,7 +182,9 @@ impl Session {
             return Err(session.broke("the server spoke before it greeted"));
         }
 
-        session.execute(CAPABILITIES, Value::Null).await?;
+        session
+            .execute(QmpCommand::Capabilities, Value::Null)
+            .await?;
 
         Ok(session)
     }
@@ -194,7 +196,7 @@ impl Session {
 
     pub async fn execute(
         &mut self,
-        command: &'static str,
+        command: QmpCommand,
         arguments: Value,
     ) -> Result<Value, QmpError> {
         let id = self.next;
@@ -240,7 +242,7 @@ impl Session {
             .write_all(line)
             .await
             .map_err(|source| QmpError::Socket {
-                what: WRITE,
+                op: SocketOp::Write,
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -249,7 +251,7 @@ impl Session {
             .flush()
             .await
             .map_err(|source| QmpError::Socket {
-                what: WRITE,
+                op: SocketOp::Write,
                 path: path.to_path_buf(),
                 source,
             })
@@ -270,7 +272,7 @@ impl Endpoint for Session {
 
     fn execute(
         &mut self,
-        command: &'static str,
+        command: QmpCommand,
         arguments: Value,
     ) -> impl Future<Output = Result<Value, QmpError>> + Send {
         Self::execute(self, command, arguments)
@@ -336,11 +338,7 @@ impl Held {
         sizes
     }
 
-    pub async fn execute(
-        &self,
-        command: &'static str,
-        arguments: Value,
-    ) -> Result<Value, QmpError> {
+    pub async fn execute(&self, command: QmpCommand, arguments: Value) -> Result<Value, QmpError> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
 
         let mut registered = Registered::new(&self.pending, id).ok_or_else(|| self.fatal())?;
@@ -386,7 +384,7 @@ impl Endpoint for Arc<Held> {
 
     fn execute(
         &mut self,
-        command: &'static str,
+        command: QmpCommand,
         arguments: Value,
     ) -> impl Future<Output = Result<Value, QmpError>> + Send {
         Held::execute(self, command, arguments)
@@ -469,6 +467,7 @@ impl Pending {
         drop(state);
     }
 
+    /// A reply nothing waits for answers a command given up on.
     fn resolve(&self, id: u64, outcome: Outcome) {
         let mut state = self.locked();
 
@@ -482,7 +481,7 @@ impl Pending {
         if let Some(waiter) = waiter {
             let _ = waiter.send(outcome);
         } else {
-            warn!(id, "QMP reply with no matching request");
+            debug!(id, "QMP reply to a command given up on");
         }
     }
 
@@ -605,7 +604,7 @@ async fn feed(
         warn!(%source, "QMP connection refused a command");
 
         pending.close(Some(Arc::new(QmpError::Socket {
-            what: WRITE,
+            op: SocketOp::Write,
             path,
             source,
         })));
@@ -614,7 +613,7 @@ async fn feed(
     }
 }
 
-fn encode(command: &str, id: u64, arguments: Value) -> Vec<u8> {
+fn encode(command: QmpCommand, id: u64, arguments: Value) -> Vec<u8> {
     let Ok(mut line) = serde_json::to_vec(&Command {
         execute: command,
         id,
@@ -698,14 +697,15 @@ mod tests {
 
         lines.recv().await.expect_err("the frame is over the cap");
 
-        let error = lines.recv().await.expect_err("the reader is poisoned");
+        let error = lines.recv().await.expect_err("the reader is broken");
 
         assert_eq!(
             error.to_string(),
             format!(
                 "the QMP server at {PATH} broke the protocol: \
-                 an earlier frame broke the protocol"
-            )
+                 a frame grew past the {MAX_LINE_BYTES} byte cap"
+            ),
+            "a later read lost what broke the reader",
         );
     }
 

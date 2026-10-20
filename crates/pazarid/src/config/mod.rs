@@ -7,9 +7,12 @@ use std::{net::SocketAddr, path::PathBuf};
 use pazari_transport::{AnyListener, TransportError, UnixListener, VsockListener};
 use pazari_types::Interval;
 
-pub use crate::config::error::ConfigError;
+pub use crate::config::{
+    error::ConfigError,
+    file::{RECONNECT_MAX, RECONNECT_MIN},
+};
 use crate::{
-    broker::{Policy, Registry},
+    broker::{GuestId, Policy, Registry},
     config::file::File,
     runtime::Mode,
 };
@@ -27,7 +30,8 @@ pub struct Config {
 
     pub registry: Registry,
 
-    pub devices: Vec<Qmp>,
+    /// Each registered guest's device.
+    pub devices: Vec<(GuestId, Qmp)>,
 }
 
 impl Settings for Config {
@@ -61,12 +65,12 @@ pub struct Qmp {
 
     pub device: String,
 
-    pub mode: Mode,
-
     pub deadline: Interval,
 
-    pub retry_min: Interval,
-    pub retry_max: Interval,
+    pub reconnect_min: Interval,
+    pub reconnect_max: Interval,
+
+    pub mode: Mode,
 }
 
 #[cfg(test)]
@@ -130,8 +134,8 @@ mod tests {
         path = "/run/pazari/example.qmp"
         device = "vm0"
         deadline = "2s 500ms"
-        retry_min = "2s"
-        retry_max = "60s"
+        reconnect_min = "2s"
+        reconnect_max = "60s"
 
         [guests.example.qmp.mode]
         kind = "per_operation"
@@ -238,25 +242,27 @@ mod tests {
                 }),
             }
         );
-        assert_eq!(
-            config.devices,
-            vec![Qmp {
-                path: PathBuf::from("/run/pazari/example.qmp"),
-                device: "vm0".to_owned(),
-                mode: Mode::PerOperation {
-                    poll: interval(Duration::from_millis(250)),
-                },
-                deadline: interval(Duration::from_millis(2_500)),
-                retry_min: interval(Duration::from_secs(2)),
-                retry_max: interval(Duration::from_secs(60)),
-            }]
-        );
-
         let peer = PeerId::Unix {
             path: PathBuf::from("/run/pazari/example.sock"),
         };
         let guest = config.registry.lookup(&peer).expect("a registered guest");
 
+        assert_eq!(
+            config.devices,
+            vec![(
+                guest,
+                Qmp {
+                    path: PathBuf::from("/run/pazari/example.qmp"),
+                    device: "vm0".to_owned(),
+                    deadline: interval(Duration::from_millis(2_500)),
+                    reconnect_min: interval(Duration::from_secs(2)),
+                    reconnect_max: interval(Duration::from_secs(60)),
+                    mode: Mode::PerOperation {
+                        poll: interval(Duration::from_millis(250)),
+                    },
+                }
+            )]
+        );
         assert_eq!(
             config.registry.spec(guest),
             Some(&GuestSpec {
@@ -292,18 +298,26 @@ mod tests {
                 revocation: None,
             }
         );
+
+        let guest = config
+            .registry
+            .lookup(&PeerId::Vsock { cid: 3 })
+            .expect("a registered guest");
+
         assert_eq!(
             config.devices,
-            vec![Qmp {
-                path: PathBuf::from("/run/pazari/example.qmp"),
-                device: "vm0".to_owned(),
-                mode: Mode::Held,
-                deadline: interval(Duration::from_secs(5)),
-                retry_min: interval(Duration::from_millis(500)),
-                retry_max: interval(Duration::from_secs(30)),
-            }]
+            vec![(
+                guest,
+                Qmp {
+                    path: PathBuf::from("/run/pazari/example.qmp"),
+                    device: "vm0".to_owned(),
+                    deadline: interval(Duration::from_secs(5)),
+                    reconnect_min: interval(Duration::from_millis(500)),
+                    reconnect_max: interval(Duration::from_secs(30)),
+                    mode: Mode::Held,
+                }
+            )]
         );
-        assert!(config.registry.lookup(&PeerId::Vsock { cid: 3 }).is_some());
     }
 
     #[test]
@@ -322,9 +336,12 @@ mod tests {
             config
                 .devices
                 .iter()
-                .map(|qmp| qmp.device.as_str())
+                .map(|(guest, qmp)| (*guest, qmp.device.as_str()))
                 .collect::<Vec<_>>(),
-            ["vm0", "vm1"]
+            [
+                (GuestId::from_index(0), "vm0"),
+                (GuestId::from_index(1), "vm1")
+            ]
         );
     }
 
@@ -355,15 +372,58 @@ mod tests {
     }
 
     #[test]
-    fn guests_sharing_a_port_are_answered_by_one_listener() {
-        let config = parse(&MINIMAL.replace("[guests.example]", SECOND));
+    fn every_vsock_guest_is_answered_by_one_listener_on_the_daemon_s_port() {
+        let config = parse(
+            &MINIMAL
+                .replace("[guests.example]", SECOND)
+                .replace("[grant]", "[vsock]\nport = 5000\n\n[grant]"),
+        );
 
         assert_eq!(
             config.listeners,
             [Transport::Vsock {
                 cid: VMADDR_CID_ANY,
-                port: DEFAULT_VSOCK_PORT,
+                port: 5000,
             }]
+        );
+    }
+
+    #[test]
+    fn a_vsock_port_no_listener_can_take_is_refused() {
+        for port in [0, u32::MAX] {
+            let error =
+                rejects(&MINIMAL.replace("[grant]", &format!("[vsock]\nport = {port}\n\n[grant]")));
+
+            assert!(
+                error.contains(&format!("vsock port {port} cannot be listened on")),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_port_on_one_guest_is_refused() {
+        let error = rejects(&MINIMAL.replace("cid = 3\n", "cid = 3\nport = 5000\n"));
+
+        assert!(error.contains("port"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_context_id_vsock_keeps_for_itself_is_refused() {
+        for cid in [0, 1, 2, u32::MAX] {
+            let error = rejects(&MINIMAL.replace("cid = 3\n", &format!("cid = {cid}\n")));
+
+            assert!(
+                error.contains(&format!("context ID {cid} is reserved")),
+                "unexpected error: {error}"
+            );
+        }
+
+        assert!(
+            parse(&MINIMAL.replace("cid = 3\n", "cid = 4294967294\n"))
+                .registry
+                .lookup(&PeerId::Vsock { cid: u32::MAX - 1 })
+                .is_some()
         );
     }
 
@@ -586,10 +646,10 @@ mod tests {
     }
 
     #[test]
-    fn a_retry_floor_over_its_own_cap_is_refused() {
+    fn a_reconnect_floor_over_its_own_cap_is_refused() {
         assert_eq!(
-            rejects(&FULL.replace(r#"retry_min = "2s""#, r#"retry_min = "90s""#)),
-            "guests.example.qmp.retry_min is 90s, over guests.example.qmp.retry_max of 60s"
+            rejects(&FULL.replace(r#"reconnect_min = "2s""#, r#"reconnect_min = "90s""#)),
+            "guests.example.qmp.reconnect_min is 90s, over guests.example.qmp.reconnect_max of 60s"
         );
     }
 

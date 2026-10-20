@@ -91,7 +91,6 @@ rec {
           transport = {
             kind = "vsock";
             inherit (built.${name}.config.services.pazari-agent.harness) cid;
-            port = built.${name}.config.services.pazari-agent.harness.vsockPort;
           };
 
           qmp = {

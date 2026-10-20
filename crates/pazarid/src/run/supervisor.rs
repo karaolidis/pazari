@@ -1,4 +1,4 @@
-use std::future::Future;
+use std::{future::Future, ops::ControlFlow};
 
 use pazari_types::{Backoff, Clock};
 use tokio::{
@@ -11,7 +11,7 @@ use crate::{
     broker::{Event, GuestId},
     config::Qmp,
     run::metrics::DeviceMetrics,
-    runtime::{Actuator, Driver, QmpActuator, RuntimeError},
+    runtime::{Actuator, Driver, QmpActuator, ResizeError, RuntimeError},
 };
 
 pub trait Connect: Send + Sync {
@@ -43,6 +43,13 @@ enum Step {
     Gone,
 }
 
+/// Whether a device has answered before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seeded {
+    Never,
+    Before,
+}
+
 #[derive(Debug)]
 pub struct Supervisor<C> {
     guest: GuestId,
@@ -53,6 +60,7 @@ pub struct Supervisor<C> {
     targets: watch::Receiver<Option<u64>>,
     backoff: Backoff,
     metrics: DeviceMetrics,
+    seeded: Seeded,
 }
 
 impl<C: Connect> Supervisor<C> {
@@ -76,21 +84,18 @@ impl<C: Connect> Supervisor<C> {
             targets,
             backoff,
             metrics,
+            seeded: Seeded::Never,
         }
     }
 
     pub async fn run(mut self) {
-        while self.attach().await {
-            self.metrics.reconnected();
-        }
+        while self.attach().await.is_continue() {}
     }
 
-    async fn attach(&mut self) -> bool {
+    async fn attach(&mut self) -> ControlFlow<()> {
         let device = match self.connect.connect().await {
             Ok(device) => device,
-            Err(error) => {
-                return self.retry("failed to open the memory device", &error).await;
-            }
+            Err(error) => return self.retry("failed to open the memory device", &error).await,
         };
 
         let driver = Driver::new(self.guest, device, self.clock);
@@ -98,7 +103,7 @@ impl<C: Connect> Supervisor<C> {
         match driver.seed().await {
             Ok(event) => {
                 if self.sizes.send(event).await.is_err() {
-                    return false;
+                    return ControlFlow::Break(());
                 }
             }
             Err(error) => {
@@ -108,6 +113,11 @@ impl<C: Connect> Supervisor<C> {
             }
         }
 
+        if self.seeded == Seeded::Before {
+            self.metrics.reconnected();
+        }
+
+        self.seeded = Seeded::Before;
         self.backoff.reset();
 
         info!(guest = %self.name, "memory device responded");
@@ -115,7 +125,7 @@ impl<C: Connect> Supervisor<C> {
         self.serve(&driver).await
     }
 
-    async fn serve(&mut self, driver: &Driver<C::Device>) -> bool {
+    async fn serve(&mut self, driver: &Driver<C::Device>) -> ControlFlow<()> {
         loop {
             let step = tokio::select! {
                 changed = driver.changed() => Step::Sized(changed),
@@ -127,7 +137,7 @@ impl<C: Connect> Supervisor<C> {
             match step {
                 Step::Sized(Ok(event)) => {
                     if self.sizes.send(event).await.is_err() {
-                        return false;
+                        return ControlFlow::Break(());
                     }
                 }
                 Step::Sized(Err(error)) => {
@@ -140,40 +150,47 @@ impl<C: Connect> Supervisor<C> {
 
                     debug!(guest = %self.name, bytes, "resizing the memory device");
 
-                    if let Err(error) = driver.actuator().set_requested(bytes).await {
-                        self.metrics.refused();
+                    match driver.actuator().set_requested(bytes).await {
+                        Ok(()) => {}
+                        Err(RuntimeError::Resize(error)) => {
+                            if matches!(error, ResizeError::Refused { .. }) {
+                                self.metrics.refused();
+                            }
 
-                        warn!(
-                            guest = %self.name,
-                            bytes,
-                            %error,
-                            "resize failed; deferring to reconciliation",
-                        );
+                            warn!(
+                                guest = %self.name,
+                                bytes,
+                                %error,
+                                "resize failed; deferring to reconciliation",
+                            );
+                        }
+                        Err(error) => {
+                            // The reopened device is asked again.
+                            self.targets.mark_changed();
+
+                            return self.retry("memory device stopped responding", &error).await;
+                        }
                     }
                 }
-                Step::Gone => return false,
+                Step::Gone => return ControlFlow::Break(()),
             }
         }
     }
 
-    async fn retry(&mut self, what: &'static str, error: &RuntimeError) -> bool {
+    async fn retry(&mut self, what: &'static str, error: &RuntimeError) -> ControlFlow<()> {
         let delay = self.backoff.delay();
 
         warn!(guest = %self.name, %error, ?delay, "{what}; retrying");
 
         sleep(delay).await;
 
-        true
+        ControlFlow::Continue(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        future,
-        sync::{Arc, Mutex, MutexGuard},
-        time::Duration,
-    };
+    use std::{future, time::Duration};
 
     use pazari_metrics::{Encoded, Registry};
     use tokio::{
@@ -184,184 +201,27 @@ mod tests {
     use super::*;
     use crate::{
         broker::testing::{BOOT, GIB, MIB, ONE, id},
+        config::{RECONNECT_MAX, RECONNECT_MIN},
         run::metrics::Observer,
-        runtime::Reading,
+        runtime::testing::MockActuator,
     };
 
     const GROWN: u64 = 3072 * MIB;
 
     const PATIENCE: Duration = Duration::from_secs(5);
 
-    const RETRY_MIN: Duration = Duration::from_millis(500);
-
-    const RETRY_MAX: Duration = Duration::from_secs(30);
-
     const DEPTH: usize = 8;
 
-    #[derive(Debug, Default)]
-    struct State {
-        opens: usize,
-        refusals: usize,
-        blindness: usize,
-        size: u64,
-        calls: Vec<u64>,
-        refuse: bool,
-    }
-
-    #[derive(Debug, Clone)]
-    struct Socket {
-        state: Arc<Mutex<State>>,
-        changes: mpsc::UnboundedSender<Result<u64, ()>>,
-        pending: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Result<u64, ()>>>>,
-    }
-
-    impl Socket {
-        fn new(size: u64) -> Self {
-            let (changes, pending) = mpsc::unbounded_channel();
-
-            Self {
-                state: Arc::new(Mutex::new(State {
-                    size,
-                    ..State::default()
-                })),
-                changes,
-                pending: Arc::new(tokio::sync::Mutex::new(pending)),
-            }
-        }
-
-        fn refusing_to_open(self, refusals: usize) -> Self {
-            self.locked().refusals = refusals;
-            self
-        }
-
-        fn refusing_to_be_read(self, blindness: usize) -> Self {
-            self.locked().blindness = blindness;
-            self
-        }
-
-        fn refusing_sizes(self) -> Self {
-            self.locked().refuse = true;
-            self
-        }
-
-        fn locked(&self) -> MutexGuard<'_, State> {
-            self.state.lock().expect("no test poisons the socket")
-        }
-
-        fn plug(&self, size: u64) {
-            self.changes
-                .send(Ok(size))
-                .expect("the socket holds its own receiver");
-        }
-
-        fn kill(&self) {
-            self.changes
-                .send(Err(()))
-                .expect("the socket holds its own receiver");
-        }
-
-        fn rebooted(&self, size: u64) {
-            self.locked().size = size;
-        }
-
-        fn opens(&self) -> usize {
-            self.locked().opens
-        }
-
-        fn calls(&self) -> Vec<u64> {
-            self.locked().calls.clone()
-        }
-    }
-
-    fn failed(reason: &str) -> RuntimeError {
-        RuntimeError::Device {
-            bytes: 0,
-            reason: reason.to_owned(),
-        }
-    }
-
-    impl Connect for Socket {
+    impl Connect for MockActuator {
         type Device = Self;
 
         fn connect(&self) -> impl Future<Output = Result<Self, RuntimeError>> + Send {
-            let mut state = self.locked();
-
-            state.opens = state.opens.saturating_add(1);
-
-            let refused = state.refusals > 0;
-
-            if refused {
-                state.refusals -= 1;
-            }
-
-            drop(state);
-
-            future::ready(if refused {
-                Err(failed("the socket is not there"))
-            } else {
-                Ok(self.clone())
-            })
-        }
-    }
-
-    impl Actuator for Socket {
-        fn reading(&self) -> impl Future<Output = Result<Reading, RuntimeError>> + Send {
-            let mut state = self.locked();
-
-            let blind = state.blindness > 0;
-
-            if blind {
-                state.blindness -= 1;
-            }
-
-            let size = state.size;
-            drop(state);
-
-            future::ready(if blind {
-                Err(failed("the socket will not say what size it is"))
-            } else {
-                Ok(Reading::sized(size, BOOT))
-            })
-        }
-
-        fn requested(&self) -> impl Future<Output = Result<u64, RuntimeError>> + Send {
-            future::ready(Ok(self.locked().size))
-        }
-
-        fn set_requested(
-            &self,
-            bytes: u64,
-        ) -> impl Future<Output = Result<(), RuntimeError>> + Send {
-            let mut state = self.locked();
-
-            state.calls.push(bytes);
-            let refuse = state.refuse;
-            drop(state);
-
-            future::ready(if refuse {
-                Err(failed("the device refuses every size"))
-            } else {
-                Ok(())
-            })
-        }
-
-        async fn changed(&self) -> Result<Reading, RuntimeError> {
-            let mut pending = self.pending.lock().await;
-
-            match pending.recv().await {
-                Some(Ok(size)) => {
-                    self.locked().size = size;
-
-                    Ok(Reading::sized(size, BOOT))
-                }
-                Some(Err(())) => Err(failed("the socket closed")),
-                None => future::pending().await,
-            }
+            future::ready(self.open())
         }
     }
 
     struct Watched {
-        socket: Socket,
+        device: MockActuator,
         sizes: mpsc::Receiver<Event>,
         target: watch::Sender<Option<u64>>,
         supervisor: task::JoinHandle<()>,
@@ -369,7 +229,7 @@ mod tests {
     }
 
     impl Watched {
-        fn start(socket: Socket) -> Self {
+        fn start(device: MockActuator) -> Self {
             let (sizes, queue) = mpsc::channel(DEPTH);
             let (target, targets) = watch::channel(None);
             let (observer, metrics) = Observer::new();
@@ -378,18 +238,18 @@ mod tests {
                 Supervisor::new(
                     id(ONE),
                     "one",
-                    socket.clone(),
+                    device.clone(),
                     Clock::start(),
                     sizes,
                     targets,
-                    Backoff::new(RETRY_MIN, RETRY_MAX),
+                    Backoff::new(RECONNECT_MIN, RECONNECT_MAX),
                     observer.device("one"),
                 )
                 .run(),
             );
 
             Self {
-                socket,
+                device,
                 sizes: queue,
                 target,
                 supervisor,
@@ -419,9 +279,9 @@ mod tests {
             size
         }
 
-        async fn settles(&self, what: &str, ready: impl Fn(&Socket) -> bool) {
+        async fn settles(&self, what: &str, ready: impl Fn(&MockActuator) -> bool) {
             let waiting = async {
-                while !ready(&self.socket) {
+                while !ready(&self.device) {
                     task::yield_now().await;
                 }
             };
@@ -442,99 +302,104 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_device_that_will_not_open_is_tried_again_on_a_climbing_delay() {
         let started = Instant::now();
-        let mut watched = Watched::start(Socket::new(BOOT).refusing_to_open(2));
+        let mut watched = Watched::start(MockActuator::new(BOOT).refusing_to_open(2));
 
         assert_eq!(watched.sized().await, BOOT);
-        assert_eq!(watched.socket.opens(), 3);
+        assert_eq!(watched.device.opens(), 3);
         assert_eq!(
             Instant::now().duration_since(started),
-            RETRY_MIN + RETRY_MIN * 2,
+            RECONNECT_MIN + RECONNECT_MIN * 2,
             "the delays between attempts did not double",
+        );
+        assert!(
+            watched.counted("pazarid_device_reconnects_total{guest=\"one\"} 0"),
+            "an attempt that never opened the device was counted as a reconnect",
         );
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_device_that_opens_but_will_not_be_read_climbs_the_delay_too() {
         let started = Instant::now();
-        let mut watched = Watched::start(Socket::new(BOOT).refusing_to_be_read(2));
+        let mut watched = Watched::start(MockActuator::new(BOOT).refusing_to_be_read(2));
 
         assert_eq!(watched.sized().await, BOOT);
-        assert_eq!(watched.socket.opens(), 3);
+        assert_eq!(watched.device.opens(), 3);
         assert_eq!(
             Instant::now().duration_since(started),
-            RETRY_MIN + RETRY_MIN * 2,
+            RECONNECT_MIN + RECONNECT_MIN * 2,
             "a device that opens and says nothing was hammered at the floor",
         );
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_device_that_dies_is_reopened_and_reseeded() {
-        let mut watched = Watched::start(Socket::new(BOOT));
+        let mut watched = Watched::start(MockActuator::new(BOOT));
 
         assert_eq!(watched.sized().await, BOOT);
 
-        watched.socket.plug(GROWN);
+        watched.device.plug(GROWN);
 
         assert_eq!(watched.sized().await, GROWN);
 
-        watched.socket.kill();
-        watched.socket.rebooted(BOOT);
+        watched.device.kill();
+        watched.device.rebooted(BOOT);
 
         assert_eq!(
             watched.sized().await,
             BOOT,
             "the reopened device never reseeded the broker",
         );
-        assert_eq!(watched.socket.opens(), 2);
+        assert_eq!(watched.device.opens(), 2);
+        assert!(watched.counted("pazarid_device_reconnects_total{guest=\"one\"} 1"));
 
-        watched.socket.plug(GROWN);
+        watched.device.plug(GROWN);
 
         assert_eq!(watched.sized().await, GROWN);
     }
 
     #[tokio::test]
     async fn a_target_reaches_the_device_it_names() {
-        let mut watched = Watched::start(Socket::new(BOOT));
+        let mut watched = Watched::start(MockActuator::new(BOOT));
 
         assert_eq!(watched.sized().await, BOOT);
 
         watched.target.send_replace(Some(GROWN));
         watched
-            .settles("the resize", |socket| !socket.calls().is_empty())
+            .settles("the resize", |device| !device.calls().is_empty())
             .await;
 
-        assert_eq!(watched.socket.calls(), vec![GROWN]);
+        assert_eq!(watched.device.calls(), vec![GROWN]);
     }
 
     #[tokio::test]
     async fn a_size_the_device_refuses_leaves_the_guest_served() {
-        let mut watched = Watched::start(Socket::new(BOOT).refusing_sizes());
+        let mut watched = Watched::start(MockActuator::new(BOOT).refusing());
 
         assert_eq!(watched.sized().await, BOOT);
 
         watched.target.send_replace(Some(GROWN));
         watched
-            .settles("the refused resize", |socket| !socket.calls().is_empty())
+            .settles("the refused resize", |device| !device.calls().is_empty())
             .await;
 
-        watched.socket.plug(GIB);
+        watched.device.plug(GIB);
 
         assert_eq!(
             watched.sized().await,
             GIB,
             "a refused resize took the guest's device down with it",
         );
-        assert_eq!(watched.socket.opens(), 1);
+        assert_eq!(watched.device.opens(), 1);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_device_that_misbehaves_is_counted_against_its_guest() {
-        let mut watched = Watched::start(Socket::new(BOOT).refusing_to_be_read(1).refusing_sizes());
+        let mut watched = Watched::start(MockActuator::new(BOOT).refusing_to_be_read(1).refusing());
 
         assert_eq!(watched.sized().await, BOOT);
 
         assert!(watched.counted("pazarid_device_seed_failures_total{guest=\"one\"} 1"));
-        assert!(watched.counted("pazarid_device_reconnects_total{guest=\"one\"} 1"));
+        assert!(watched.counted("pazarid_device_reconnects_total{guest=\"one\"} 0"));
 
         watched.target.send_replace(Some(GROWN));
         watched
@@ -544,9 +409,25 @@ mod tests {
             .await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_resize_lost_on_the_wire_reopens_the_device_and_is_asked_again() {
+        let mut watched = Watched::start(MockActuator::new(BOOT).failing_writes(1));
+
+        assert_eq!(watched.sized().await, BOOT);
+
+        watched.target.send_replace(Some(GROWN));
+
+        assert_eq!(watched.sized().await, BOOT, "the device was not reseeded");
+        assert_eq!(watched.sized().await, GROWN);
+        assert_eq!(watched.device.calls(), vec![GROWN, GROWN]);
+        assert_eq!(watched.device.opens(), 2);
+        assert!(watched.counted("pazarid_device_refused_actuations_total{guest=\"one\"} 0"));
+        assert!(watched.counted("pazarid_device_reconnects_total{guest=\"one\"} 1"));
+    }
+
     #[tokio::test]
     async fn a_supervisor_stops_once_the_daemon_has() {
-        let socket = Socket::new(BOOT);
+        let device = MockActuator::new(BOOT);
         let (sizes, queue) = mpsc::channel(DEPTH);
         let (target, targets) = watch::channel(None);
 
@@ -554,11 +435,11 @@ mod tests {
             Supervisor::new(
                 id(ONE),
                 "one",
-                socket,
+                device,
                 Clock::start(),
                 sizes,
                 targets,
-                Backoff::new(RETRY_MIN, RETRY_MAX),
+                Backoff::new(RECONNECT_MIN, RECONNECT_MAX),
                 DeviceMetrics::default(),
             )
             .run(),

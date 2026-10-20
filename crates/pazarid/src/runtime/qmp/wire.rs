@@ -1,19 +1,50 @@
-use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::runtime::qmp::error::QmpError;
 
-pub const CAPABILITIES: &str = "qmp_capabilities";
-pub const QUERY_DEVICES: &str = "query-memory-devices";
-pub const QUERY_SUMMARY: &str = "query-memory-size-summary";
-pub const QOM_GET: &str = "qom-get";
-pub const QOM_SET: &str = "qom-set";
-
 pub const MEMORY_DEVICE_SIZE_CHANGE: &str = "MEMORY_DEVICE_SIZE_CHANGE";
 
+/// The commands the daemon sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QmpCommand {
+    Capabilities,
+    QueryMemoryDevices,
+    QueryMemorySizeSummary,
+    QomGet,
+    QomSet,
+}
+
+impl QmpCommand {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Capabilities => "qmp_capabilities",
+            Self::QueryMemoryDevices => "query-memory-devices",
+            Self::QueryMemorySizeSummary => "query-memory-size-summary",
+            Self::QomGet => "qom-get",
+            Self::QomSet => "qom-set",
+        }
+    }
+}
+
+impl fmt::Display for QmpCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for QmpCommand {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Serialize)]
-pub struct Command<'a> {
-    pub execute: &'a str,
+pub struct Command {
+    pub execute: QmpCommand,
     pub id: u64,
 
     #[serde(skip_serializing_if = "Value::is_null")]
@@ -58,7 +89,7 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    pub fn into_result(self, command: &'static str) -> Result<Value, QmpError> {
+    pub fn into_result(self, command: QmpCommand) -> Result<Value, QmpError> {
         match self {
             Self::Return(value) => Ok(value),
             Self::Error(failure) => Err(QmpError::Refused {
@@ -177,7 +208,7 @@ mod tests {
     #[test]
     fn a_command_without_arguments_carries_none() {
         let command = Command {
-            execute: "qmp_capabilities",
+            execute: QmpCommand::Capabilities,
             id: 0,
             arguments: Value::Null,
         };
@@ -188,7 +219,7 @@ mod tests {
         );
 
         let command = Command {
-            execute: "qom-get",
+            execute: QmpCommand::QomGet,
             id: 1,
             arguments: serde_json::json!({ "property": "size" }),
         };
@@ -207,7 +238,7 @@ mod tests {
         });
 
         let error = outcome
-            .into_result("qom-set")
+            .into_result(QmpCommand::QomSet)
             .expect_err("qemu refused the command");
 
         assert_eq!(

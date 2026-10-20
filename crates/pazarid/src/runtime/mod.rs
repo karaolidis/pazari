@@ -10,6 +10,6 @@ pub(crate) mod testing;
 pub use crate::runtime::{
     actuator::{Actuator, Mode, QmpActuator, Reading},
     driver::Driver,
-    error::RuntimeError,
+    error::{ResizeError, RuntimeError},
     memory::{HostMemory, ProcMemory},
 };

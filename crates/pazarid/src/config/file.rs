@@ -4,7 +4,7 @@
 )]
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     net::SocketAddr,
     num::{NonZeroU32, NonZeroU64},
     path::PathBuf,
@@ -16,7 +16,7 @@ use doku::Document;
 use pazari_config::{Positive, Ranged, ordered};
 use pazari_transport::{
     PeerId,
-    adapter::vsock::{DEFAULT_VSOCK_PORT, VMADDR_CID_ANY},
+    adapter::vsock::{DEFAULT_VSOCK_PORT, VMADDR_CID_ANY, VMADDR_CID_HOST, VMADDR_CID_LOCAL},
 };
 use pazari_types::{Interval, Psi};
 use serde::Deserialize;
@@ -24,12 +24,37 @@ use serde_inline_default::serde_inline_default;
 
 use crate::{
     broker::{Grantable, GuestSpec, Policy, Registry, Revocation, StalledShrinks},
-    config::{Config, Qmp, Transport, error::ConfigError},
+    config::{
+        Config, Qmp, Transport,
+        error::{ConfigError, ReservedCid, UnusablePort},
+    },
     runtime::Mode,
 };
 
-const RETRY_MIN: Duration = Duration::from_millis(500);
-const RETRY_MAX: Duration = Duration::from_secs(30);
+const TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+const STATUS_INTERVAL: Duration = Duration::from_secs(1);
+const STALE_AFTER: u32 = 3;
+
+const GRANT_MIN_INTERVAL: Duration = Duration::from_secs(5);
+const GRANT_SWAP: bool = false;
+
+const ACTUATION_DEADLINE: Duration = Duration::from_secs(30);
+const REVERT_SHRINKS: bool = true;
+
+const RECLAIM_DEADLINE: Duration = Duration::from_secs(30);
+const REVOCATION_STEP: ByteSize = ByteSize::mib(256);
+
+const QMP_DEADLINE: Duration = Duration::from_secs(5);
+pub const RECONNECT_MIN: Duration = Duration::from_millis(500);
+pub const RECONNECT_MAX: Duration = Duration::from_secs(30);
+const POLL: Duration = Duration::from_secs(1);
+
+/// The context ID vsock gives the hypervisor.
+const VMADDR_CID_HYPERVISOR: u32 = 0;
+
+/// The port vsock reads as any port.
+const VMADDR_PORT_ANY: u32 = u32::MAX;
 
 #[derive(Debug, Deserialize, Document)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +75,9 @@ pub struct File {
 
     #[serde(default)]
     metrics: Option<MetricsSection>,
+
+    #[serde(default)]
+    vsock: VsockSection,
 
     #[serde(default)]
     #[doku(as = "GuestsTemplate")]
@@ -93,7 +121,7 @@ impl File {
 
         let mut registry = Registry::new();
         let mut devices = Vec::with_capacity(self.guests.len());
-        let mut ports = BTreeSet::new();
+        let mut vsock = None;
         let mut sockets = Vec::new();
 
         for (name, guest) in self.guests {
@@ -106,35 +134,30 @@ impl File {
             } = guest;
 
             let peer = match transport {
-                TransportSection::Vsock { cid, port } => {
-                    ports.insert(port);
-                    PeerId::Vsock { cid }
+                TransportSection::Vsock { cid } => {
+                    vsock.get_or_insert_with(|| Transport::Vsock {
+                        cid: VMADDR_CID_ANY,
+                        port: self.vsock.port.get(),
+                    });
+
+                    PeerId::Vsock { cid: cid.get() }
                 }
                 TransportSection::Unix { path } => {
                     sockets.push(Transport::Unix { path: path.clone() });
+
                     PeerId::Unix { path }
                 }
             };
 
             let ceiling = NonZeroU64::new(ceiling.as_u64()).bytes(format!("{prefix}.ceiling"))?;
+            let qmp = qmp.resolve(&prefix)?;
 
-            registry.insert(peer, GuestSpec { name, ceiling })?;
-
-            devices.push(qmp.resolve(&prefix)?);
+            devices.push((registry.insert(peer, GuestSpec { name, ceiling })?, qmp));
         }
-
-        let listeners = ports
-            .into_iter()
-            .map(|port| Transport::Vsock {
-                cid: VMADDR_CID_ANY,
-                port,
-            })
-            .chain(sockets)
-            .collect();
 
         Ok(Config {
             tick_interval,
-            listeners,
+            listeners: vsock.into_iter().chain(sockets).collect(),
             metrics: self.metrics.map(|metrics| metrics.listen),
             policy,
             registry,
@@ -144,18 +167,9 @@ impl File {
 }
 
 #[derive(Debug, Deserialize, Document)]
-#[serde(deny_unknown_fields)]
-pub struct MetricsSection {
-    /// The address the Prometheus endpoint answers scrapes on.
-    #[doku(as = "String", example = "127.0.0.1:9650")]
-    listen: SocketAddr,
-}
-
-#[derive(Debug, Deserialize, Document)]
 #[serde(default, deny_unknown_fields)]
 pub struct TickSection {
-    /// How often the daemon reads the host's memory and updates what it knows
-    /// about its guests.
+    /// How often the daemon checks on the host and its guests.
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "1s")]
     interval: Duration,
@@ -164,7 +178,7 @@ pub struct TickSection {
 impl Default for TickSection {
     fn default() -> Self {
         Self {
-            interval: Duration::from_secs(1),
+            interval: TICK_INTERVAL,
         }
     }
 }
@@ -185,8 +199,8 @@ pub struct StatusSection {
 impl Default for StatusSection {
     fn default() -> Self {
         Self {
-            interval: Duration::from_secs(1),
-            stale_after: 3,
+            interval: STATUS_INTERVAL,
+            stale_after: STALE_AFTER,
         }
     }
 }
@@ -201,14 +215,13 @@ pub struct GrantSection {
     floor: ByteSize,
 
     /// How long a guest waits after a grant before another one.
-    #[serde_inline_default(Duration::from_secs(5))]
+    #[serde_inline_default(GRANT_MIN_INTERVAL)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "5s")]
     min_interval: Duration,
 
-    /// Whether free host swap counts towards what a grow may be granted out
-    /// of.
-    #[serde_inline_default(false)]
+    /// Whether free host swap counts as available memory.
+    #[serde_inline_default(GRANT_SWAP)]
     #[doku(example = "false")]
     swap: bool,
 }
@@ -216,14 +229,13 @@ pub struct GrantSection {
 #[derive(Debug, Deserialize, Document)]
 #[serde(default, deny_unknown_fields)]
 pub struct ActuationSection {
-    /// How long an actuation is given to apply before the host stops waiting
-    /// for it.
+    /// How long a resize may take before the daemon stops waiting for it.
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "30s")]
     deadline: Duration,
 
-    /// Whether a shrink that did not apply is taken back to the size the guest
-    /// still has.
+    /// Whether a shrink that did not finish is taken back to the size the
+    /// guest still has.
     #[doku(example = "true")]
     revert_shrinks: bool,
 }
@@ -231,8 +243,8 @@ pub struct ActuationSection {
 impl Default for ActuationSection {
     fn default() -> Self {
         Self {
-            deadline: Duration::from_secs(30),
-            revert_shrinks: true,
+            deadline: ACTUATION_DEADLINE,
+            revert_shrinks: REVERT_SHRINKS,
         }
     }
 }
@@ -240,7 +252,8 @@ impl Default for ActuationSection {
 #[derive(Debug, Deserialize, Document)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReclaimSection {
-    /// How long a guest has to answer a `reclaim_request`.
+    /// How long a guest has to answer a `reclaim_request` and release what it
+    /// promised.
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "30s")]
     deadline: Duration,
@@ -252,13 +265,12 @@ pub struct ReclaimSection {
 impl Default for ReclaimSection {
     fn default() -> Self {
         Self {
-            deadline: Duration::from_secs(30),
+            deadline: RECLAIM_DEADLINE,
             revocation: None,
         }
     }
 }
 
-/// How the host takes memory back when it comes under pressure itself.
 #[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
 #[serde(deny_unknown_fields)]
@@ -269,7 +281,7 @@ pub struct RevocationSection {
     psi: f64,
 
     /// How much memory one such request asks a guest for.
-    #[serde_inline_default(ByteSize::mib(256))]
+    #[serde_inline_default(REVOCATION_STEP)]
     #[doku(as = "String", example = "256MiB")]
     step: ByteSize,
 }
@@ -283,6 +295,53 @@ impl RevocationSection {
     }
 }
 
+#[derive(Debug, Deserialize, Document)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsSection {
+    /// The address to serve metrics on.
+    #[doku(as = "String", example = "127.0.0.1:9650")]
+    listen: SocketAddr,
+}
+
+#[derive(Debug, Deserialize, Document)]
+#[serde(default, deny_unknown_fields)]
+pub struct VsockSection {
+    /// The port vsock guests dial.
+    #[doku(as = "u32", example = "4650")]
+    port: VsockPort,
+}
+
+impl Default for VsockSection {
+    fn default() -> Self {
+        Self {
+            port: VsockPort(DEFAULT_VSOCK_PORT),
+        }
+    }
+}
+
+/// A port the daemon can listen on over vsock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "u32")]
+pub struct VsockPort(u32);
+
+impl VsockPort {
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for VsockPort {
+    type Error = UnusablePort;
+
+    fn try_from(port: u32) -> Result<Self, UnusablePort> {
+        match port {
+            0 | VMADDR_PORT_ANY => Err(UnusablePort { port }),
+            _ => Ok(Self(port)),
+        }
+    }
+}
+
 /// Stands in for the guest tables which doku will not print off a map.
 #[derive(Deserialize, Document)]
 struct GuestsTemplate {
@@ -291,7 +350,6 @@ struct GuestsTemplate {
     example: GuestSection,
 }
 
-#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
 #[serde(deny_unknown_fields)]
 pub struct GuestSection {
@@ -308,20 +366,14 @@ pub struct GuestSection {
     qmp: QmpSection,
 }
 
-#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TransportSection {
     /// `AF_VSOCK`.
     Vsock {
         /// The context id the guest dials from. Set me.
-        #[doku(example = "3")]
-        cid: u32,
-
-        /// The port the guest dials.
-        #[serde_inline_default(DEFAULT_VSOCK_PORT)]
-        #[doku(example = "4650")]
-        port: u32,
+        #[doku(as = "u32", example = "3")]
+        cid: GuestCid,
     },
 
     /// An `AF_UNIX` socket.
@@ -330,6 +382,31 @@ pub enum TransportSection {
         #[doku(example = "/run/pazari/example.sock")]
         path: PathBuf,
     },
+}
+
+/// A context ID vsock leaves free for a guest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "u32")]
+pub struct GuestCid(u32);
+
+impl GuestCid {
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for GuestCid {
+    type Error = ReservedCid;
+
+    fn try_from(cid: u32) -> Result<Self, ReservedCid> {
+        match cid {
+            VMADDR_CID_HYPERVISOR | VMADDR_CID_LOCAL | VMADDR_CID_HOST | VMADDR_CID_ANY => {
+                Err(ReservedCid { cid })
+            }
+            _ => Ok(Self(cid)),
+        }
+    }
 }
 
 #[serde_inline_default]
@@ -345,22 +422,22 @@ pub struct QmpSection {
     device: String,
 
     /// How long one QMP command is given to finish.
-    #[serde_inline_default(Duration::from_secs(5))]
+    #[serde_inline_default(QMP_DEADLINE)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "5s")]
     deadline: Duration,
 
     /// The first delay before a device that did not answer is opened again.
-    #[serde_inline_default(RETRY_MIN)]
+    #[serde_inline_default(RECONNECT_MIN)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "500ms")]
-    retry_min: Duration,
+    reconnect_min: Duration,
 
     /// The cap that delay doubles towards.
-    #[serde_inline_default(RETRY_MAX)]
+    #[serde_inline_default(RECONNECT_MAX)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "30s")]
-    retry_max: Duration,
+    reconnect_max: Duration,
 
     /// How the daemon uses the QMP socket.
     #[serde_inline_default(ModeSection::Held {})]
@@ -370,23 +447,25 @@ pub struct QmpSection {
 
 impl QmpSection {
     fn resolve(self, prefix: &str) -> Result<Qmp, ConfigError> {
-        let retry_min = Interval::try_new(self.retry_min).at(format!("{prefix}.qmp.retry_min"))?;
-        let retry_max = Interval::try_new(self.retry_max).at(format!("{prefix}.qmp.retry_max"))?;
+        let reconnect_min =
+            Interval::try_new(self.reconnect_min).at(format!("{prefix}.qmp.reconnect_min"))?;
+        let reconnect_max =
+            Interval::try_new(self.reconnect_max).at(format!("{prefix}.qmp.reconnect_max"))?;
 
         ordered(
-            format!("{prefix}.qmp.retry_min"),
-            retry_min,
-            format!("{prefix}.qmp.retry_max"),
-            retry_max,
+            format!("{prefix}.qmp.reconnect_min"),
+            reconnect_min,
+            format!("{prefix}.qmp.reconnect_max"),
+            reconnect_max,
         )?;
 
         Ok(Qmp {
             path: self.path,
             device: self.device,
-            mode: self.mode.resolve(prefix)?,
             deadline: Interval::try_new(self.deadline).at(format!("{prefix}.qmp.deadline"))?,
-            retry_min,
-            retry_max,
+            reconnect_min,
+            reconnect_max,
+            mode: self.mode.resolve(prefix)?,
         })
     }
 }
@@ -401,7 +480,7 @@ pub enum ModeSection {
     /// A fresh connection per command, for a socket shared with other tools.
     PerOperation {
         /// How often the size is resampled while a resize is being processed.
-        #[serde_inline_default(Duration::from_secs(1))]
+        #[serde_inline_default(POLL)]
         #[serde(deserialize_with = "humantime_serde::deserialize")]
         #[doku(as = "String", example = "1s")]
         poll: Duration,

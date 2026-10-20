@@ -10,21 +10,18 @@ use std::{
 use pazari_types::Interval;
 use serde_json::{Value, json};
 use tokio::{
-    sync::Mutex,
+    sync::watch,
     time::{sleep, timeout},
 };
-use tracing::debug;
 
 use crate::runtime::{
     actuator::{Actuator, Reading},
-    error::RuntimeError,
+    error::{ResizeError, RuntimeError},
     qmp::{
-        Endpoint, Held, MemoryDevice, MemorySummary, QOM_GET, QOM_SET, QUERY_DEVICES,
-        QUERY_SUMMARY, QmpError, Session, qom_path,
+        Endpoint, Held, MemoryDevice, MemorySummary, Operation, QmpCommand, QmpError, Session,
+        qom_path,
     },
 };
-
-const HANDSHAKE: &str = "the handshake";
 
 const SIZE: &str = "size";
 const REQUESTED_SIZE: &str = "requested-size";
@@ -37,17 +34,31 @@ pub enum Mode {
     PerOperation { poll: Interval },
 }
 
+/// How the actuator reaches the device.
+///
+/// A connection that fails stays failed; reopening it is the caller's to do.
+#[derive(Debug)]
+enum Link {
+    Held(Arc<Held>),
+
+    PerOperation {
+        poll: Interval,
+
+        /// The size a resize in flight is heading to, while one is.
+        resizing: watch::Sender<Option<u64>>,
+    },
+}
+
 /// One guest's virtio-mem device over QMP.
 #[derive(Debug)]
 pub struct QmpActuator {
     path: PathBuf,
     device: String,
     qom: String,
-    mode: Mode,
     deadline: Interval,
-    boot: AtomicU64,
+    boot: u64,
     last: AtomicU64,
-    held: Mutex<Option<Arc<Held>>>,
+    link: Link,
 }
 
 impl QmpActuator {
@@ -61,25 +72,36 @@ impl QmpActuator {
         let device = device.into();
         let qom = qom_path(&device);
 
-        let mut session = deadlined(Session::open(&path), deadline, HANDSHAKE, &path).await?;
+        let mut session =
+            deadlined(Session::open(&path), deadline, Operation::Handshake, &path).await?;
 
         let boot = verify(&mut session, &device, deadline).await?;
         let size = boot.saturating_add(read(&mut session, &qom, SIZE, deadline).await?);
 
-        let held = match mode {
-            Mode::Held => Some(Arc::new(Held::take(session, &device))),
-            Mode::PerOperation { .. } => None,
+        let link = match mode {
+            Mode::Held => Link::Held(Arc::new(Held::take(session, &device))),
+            Mode::PerOperation { poll } => {
+                let requested =
+                    boot.saturating_add(read(&mut session, &qom, REQUESTED_SIZE, deadline).await?);
+
+                // A resize asked for before this connection may still be on its way.
+                let converging = (requested != size).then_some(requested);
+
+                Link::PerOperation {
+                    poll,
+                    resizing: watch::Sender::new(converging),
+                }
+            }
         };
 
         Ok(Self {
             path,
             device,
             qom,
-            mode,
             deadline,
-            boot: AtomicU64::new(boot),
+            boot,
             last: AtomicU64::new(size),
-            held: Mutex::new(held),
+            link,
         })
     }
 
@@ -94,114 +116,88 @@ impl QmpActuator {
     }
 
     #[must_use]
-    pub fn boot(&self) -> u64 {
-        self.boot.load(Ordering::Relaxed)
-    }
-
-    async fn execute(&self, command: &'static str, arguments: Value) -> Result<Value, QmpError> {
-        let mut wire = self.wire().await?;
-
-        deadlined(
-            wire.execute(command, arguments),
-            self.deadline,
-            command,
-            &self.path,
-        )
-        .await
+    pub const fn boot(&self) -> u64 {
+        self.boot
     }
 
     async fn wire(&self) -> Result<Wire, QmpError> {
-        match self.mode {
-            Mode::Held => Ok(Wire::Held(self.client().await?)),
-            Mode::PerOperation { .. } => Ok(Wire::Fresh(self.open().await?)),
+        match &self.link {
+            Link::Held(held) => Ok(Wire::Held(Arc::clone(held))),
+            Link::PerOperation { .. } => Ok(Wire::Fresh(
+                deadlined(
+                    Session::open(&self.path),
+                    self.deadline,
+                    Operation::Handshake,
+                    &self.path,
+                )
+                .await?,
+            )),
         }
-    }
-
-    async fn open(&self) -> Result<Session, QmpError> {
-        deadlined(
-            Session::open(&self.path),
-            self.deadline,
-            HANDSHAKE,
-            &self.path,
-        )
-        .await
-    }
-
-    async fn client(&self) -> Result<Arc<Held>, QmpError> {
-        if let Some(live) = self.live().await {
-            return Ok(live);
-        }
-
-        debug!(path = %self.path.display(), "reopening the QMP connection");
-
-        let mut session = self.open().await?;
-        let boot = verify(&mut session, &self.device, self.deadline).await?;
-        let live = Arc::new(Held::take(session, &self.device));
-
-        let mut held = self.held.lock().await;
-
-        if let Some(other) = held.as_ref().filter(|other| !other.is_closed()) {
-            let other = Arc::clone(other);
-            drop(held);
-
-            return Ok(other);
-        }
-
-        self.boot.store(boot, Ordering::Relaxed);
-        *held = Some(Arc::clone(&live));
-        drop(held);
-
-        Ok(live)
-    }
-
-    async fn live(&self) -> Option<Arc<Held>> {
-        let held = self.held.lock().await;
-
-        let live = held
-            .as_ref()
-            .filter(|live| !live.is_closed())
-            .map(Arc::clone);
-
-        drop(held);
-
-        live
     }
 
     async fn property(&self, property: &'static str) -> Result<u64, QmpError> {
         read(&mut self.wire().await?, &self.qom, property, self.deadline).await
     }
 
-    fn report(&self, hotplugged: u64) -> Option<Reading> {
-        let reading = Reading::plugged(self.boot(), hotplugged);
-
+    fn report(&self, reading: Reading) -> Option<Reading> {
         (self.last.swap(reading.size, Ordering::Relaxed) != reading.size).then_some(reading)
     }
 
-    async fn resampled(&self, poll: Interval) -> Result<Reading, RuntimeError> {
+    async fn awaited(&self, held: &Arc<Held>) -> Result<Reading, RuntimeError> {
         loop {
-            if let Some(reading) = self.report(self.property(SIZE).await?) {
-                return Ok(reading);
-            }
-
-            sleep(poll.get()).await;
-        }
-    }
-
-    async fn awaited(&self) -> Result<Reading, RuntimeError> {
-        loop {
-            let mut client = self.client().await?;
+            let mut client = Arc::clone(held);
             let mut sizes = client.watch();
 
             let sampled = read(&mut client, &self.qom, SIZE, self.deadline).await?;
 
-            if let Some(reading) = self.report(sampled) {
+            if let Some(reading) = self.report(Reading::plugged(self.boot, sampled)) {
                 return Ok(reading);
             }
 
             let raised = client.changed(&mut sizes).await?;
 
-            if let Some(reading) = self.report(raised) {
+            if let Some(reading) = self.report(Reading::plugged(self.boot, raised)) {
                 return Ok(reading);
+            }
+        }
+    }
+
+    async fn resampled(
+        &self,
+        poll: Interval,
+        resizing: &watch::Sender<Option<u64>>,
+    ) -> Result<Reading, RuntimeError> {
+        let mut armed = resizing.subscribe();
+
+        loop {
+            let target = armed
+                .wait_for(Option::is_some)
+                .await
+                .ok()
+                .and_then(|target| *target)
+                .expect("the actuator holds the sender of an armed resize");
+
+            let reading = Reading::plugged(self.boot, self.property(SIZE).await?);
+            let landed = reading.size == target;
+
+            if landed {
+                resizing.send_if_modified(|resizing| {
+                    let current = *resizing == Some(target);
+
+                    if current {
+                        *resizing = None;
+                    }
+
+                    current
+                });
+            }
+
+            if let Some(reading) = self.report(reading) {
+                return Ok(reading);
+            }
+
+            if !landed {
+                sleep(poll.get()).await;
             }
         }
     }
@@ -211,21 +207,23 @@ impl Actuator for QmpActuator {
     async fn reading(&self) -> Result<Reading, RuntimeError> {
         let hotplugged = self.property(SIZE).await?;
 
-        Ok(Reading::plugged(self.boot(), hotplugged))
+        Ok(Reading::plugged(self.boot, hotplugged))
     }
 
     async fn requested(&self) -> Result<u64, RuntimeError> {
         let requested = self.property(REQUESTED_SIZE).await?;
 
-        Ok(self.boot().saturating_add(requested))
+        Ok(self.boot.saturating_add(requested))
     }
 
     async fn set_requested(&self, bytes: u64) -> Result<(), RuntimeError> {
-        let boot = self.boot();
+        let boot = self.boot;
 
         if bytes < boot {
-            return Err(QmpError::BelowBoot { bytes, boot }.into());
+            return Err(ResizeError::BelowBoot { bytes, boot }.into());
         }
+
+        let mut wire = self.wire().await?;
 
         let arguments = json!({
             "path": self.qom,
@@ -233,19 +231,33 @@ impl Actuator for QmpActuator {
             "value": bytes.saturating_sub(boot),
         });
 
-        match self.execute(QOM_SET, arguments).await {
-            Ok(_) => Ok(()),
-            Err(QmpError::Refused { command, reason }) if command == QOM_SET => {
-                Err(RuntimeError::Device { bytes, reason })
+        let set = deadlined(
+            wire.execute(QmpCommand::QomSet, arguments),
+            self.deadline,
+            Operation::Command(QmpCommand::QomSet),
+            &self.path,
+        )
+        .await;
+
+        match set {
+            Ok(_) => {}
+            Err(QmpError::Refused { reason, .. }) => {
+                return Err(ResizeError::Refused { bytes, reason }.into());
             }
-            Err(error) => Err(error.into()),
+            Err(error) => return Err(error.into()),
         }
+
+        if let Link::PerOperation { resizing, .. } = &self.link {
+            resizing.send_replace(Some(bytes));
+        }
+
+        Ok(())
     }
 
     async fn changed(&self) -> Result<Reading, RuntimeError> {
-        match self.mode {
-            Mode::Held => self.awaited().await,
-            Mode::PerOperation { poll } => self.resampled(poll).await,
+        match &self.link {
+            Link::Held(held) => self.awaited(held).await,
+            Link::PerOperation { poll, resizing, .. } => self.resampled(*poll, resizing).await,
         }
     }
 }
@@ -253,33 +265,45 @@ impl Actuator for QmpActuator {
 async fn deadlined<T>(
     operation: impl Future<Output = Result<T, QmpError>>,
     deadline: Interval,
-    what: &'static str,
+    during: Operation,
     path: &Path,
 ) -> Result<T, QmpError> {
     timeout(deadline.get(), operation)
         .await
         .map_err(|_| QmpError::Timeout {
-            what,
+            during,
             path: path.to_path_buf(),
             deadline,
         })?
 }
 
+/// Runs a command that takes no arguments on a fresh session.
+async fn query(
+    session: &mut Session,
+    command: QmpCommand,
+    deadline: Interval,
+) -> Result<Value, QmpError> {
+    let path = session.path().to_path_buf();
+
+    deadlined(
+        session.execute(command, Value::Null),
+        deadline,
+        Operation::Command(command),
+        &path,
+    )
+    .await
+}
+
 async fn verify(session: &mut Session, device: &str, deadline: Interval) -> Result<u64, QmpError> {
     let path = session.path().to_path_buf();
 
-    let value = deadlined(
-        session.execute(QUERY_DEVICES, Value::Null),
-        deadline,
-        QUERY_DEVICES,
-        &path,
-    )
-    .await?;
+    let command = QmpCommand::QueryMemoryDevices;
+    let value = query(session, command, deadline).await?;
 
     let devices: Vec<MemoryDevice> =
         serde_json::from_value(value).map_err(|source| QmpError::Protocol {
             path: path.clone(),
-            reason: format!("{QUERY_DEVICES} answered with {source}"),
+            reason: format!("{command} answered with {source}"),
         })?;
 
     let found = devices
@@ -296,18 +320,13 @@ async fn verify(session: &mut Session, device: &str, deadline: Interval) -> Resu
         });
     }
 
-    let value = deadlined(
-        session.execute(QUERY_SUMMARY, Value::Null),
-        deadline,
-        QUERY_SUMMARY,
-        &path,
-    )
-    .await?;
+    let command = QmpCommand::QueryMemorySizeSummary;
+    let value = query(session, command, deadline).await?;
 
     let summary: MemorySummary =
         serde_json::from_value(value).map_err(|source| QmpError::Protocol {
             path,
-            reason: format!("{QUERY_SUMMARY} answered with {source}"),
+            reason: format!("{command} answered with {source}"),
         })?;
 
     Ok(summary.base_memory)
@@ -327,11 +346,7 @@ impl Endpoint for Wire {
         }
     }
 
-    async fn execute(
-        &mut self,
-        command: &'static str,
-        arguments: Value,
-    ) -> Result<Value, QmpError> {
+    async fn execute(&mut self, command: QmpCommand, arguments: Value) -> Result<Value, QmpError> {
         match self {
             Self::Held(held) => held.execute(command, arguments).await,
             Self::Fresh(session) => session.execute(command, arguments).await,
@@ -349,9 +364,12 @@ async fn read(
     let path = endpoint.path().to_path_buf();
 
     let value = deadlined(
-        endpoint.execute(QOM_GET, json!({ "path": qom, "property": property })),
+        endpoint.execute(
+            QmpCommand::QomGet,
+            json!({ "path": qom, "property": property }),
+        ),
         deadline,
-        QOM_GET,
+        Operation::Command(QmpCommand::QomGet),
         &path,
     )
     .await?;
@@ -372,10 +390,13 @@ mod tests {
     use crate::{
         broker::testing::{BOOT, MIB},
         runtime::{
-            qmp::{CAPABILITIES, MAX_LINE_BYTES},
-            testing::qmp::{
-                FakeQmp, Step, devices, resized, resized_anonymously, startup, verified,
+            qmp::{
+                MAX_LINE_BYTES,
+                QmpCommand::{
+                    Capabilities, QomGet, QomSet, QueryMemoryDevices, QueryMemorySizeSummary,
+                },
             },
+            testing::qmp::{FakeQmp, Step, devices, resized, resized_anonymously, shared, startup},
         },
     };
 
@@ -384,7 +405,12 @@ mod tests {
 
     const QUIET: Duration = Duration::from_millis(50);
 
-    const STARTUP: [&str; 4] = [CAPABILITIES, QUERY_DEVICES, QUERY_SUMMARY, QOM_GET];
+    const STARTUP: [QmpCommand; 4] = [
+        Capabilities,
+        QueryMemoryDevices,
+        QueryMemorySizeSummary,
+        QomGet,
+    ];
 
     fn deadline() -> Interval {
         Interval::try_new(Duration::from_secs(5)).expect("five seconds")
@@ -444,8 +470,8 @@ mod tests {
     #[tokio::test]
     async fn the_sizes_it_reports_stand_on_the_boot_memory() {
         let (server, actuator) = held(vec![
-            Step::returns(QOM_GET, json!(1024 * MIB)),
-            Step::returns(QOM_GET, json!(1536 * MIB)),
+            Step::returns(QomGet, json!(1024 * MIB)),
+            Step::returns(QomGet, json!(1536 * MIB)),
         ])
         .await;
 
@@ -453,7 +479,7 @@ mod tests {
         assert_eq!(actuator.requested().await.unwrap(), BOOT + 1536 * MIB);
 
         assert_eq!(
-            server.arguments(QOM_GET),
+            server.arguments(QomGet),
             [
                 json!({ "path": qom_path(DEVICE), "property": "size" }),
                 json!({ "path": qom_path(DEVICE), "property": "size" }),
@@ -465,12 +491,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_ask_reaches_the_device_without_the_boot_memory() {
-        let (server, actuator) = held(vec![Step::returns(QOM_SET, json!({}))]).await;
+        let (server, actuator) = held(vec![Step::returns(QomSet, json!({}))]).await;
 
         actuator.set_requested(BOOT + 512 * MIB).await.unwrap();
 
         assert_eq!(
-            server.arguments(QOM_SET),
+            server.arguments(QomSet),
             [json!({
                 "path": qom_path(DEVICE),
                 "property": "requested-size",
@@ -482,7 +508,7 @@ mod tests {
     #[tokio::test]
     async fn a_size_the_device_will_not_take_comes_back_as_a_refusal() {
         let (_server, actuator) = held(vec![Step::refuses(
-            QOM_SET,
+            QomSet,
             "Property 'requested-size' doesn't take value '1048577'",
         )])
         .await;
@@ -505,8 +531,8 @@ mod tests {
     #[tokio::test]
     async fn a_refused_handshake_is_not_the_device_refusing() {
         let server = FakeQmp::start([
-            startup(DEVICE, BOOT, 0),
-            vec![Step::refuses(CAPABILITIES, "this socket is read-only")],
+            shared(DEVICE, BOOT, 0, 0),
+            vec![Step::refuses(Capabilities, "this socket is read-only")],
         ]);
 
         let actuator = open(&server, polling()).await;
@@ -544,7 +570,7 @@ mod tests {
     #[tokio::test]
     async fn a_device_the_guest_does_not_have_is_refused_at_startup() {
         let server = FakeQmp::start([vec![Step::returns(
-            QUERY_DEVICES,
+            QueryMemoryDevices,
             devices(&[(OTHER, "virtio-mem")]),
         )]]);
 
@@ -561,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn a_device_that_cannot_resize_is_refused_at_startup() {
         let server = FakeQmp::start([vec![Step::returns(
-            QUERY_DEVICES,
+            QueryMemoryDevices,
             devices(&[(DEVICE, "pc-dimm")]),
         )]]);
 
@@ -577,7 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_command_that_is_never_answered_gives_up_at_the_deadline() {
-        let server = FakeQmp::start([startup(DEVICE, BOOT, 0), vec![Step::Ignore]]);
+        let server = FakeQmp::start([shared(DEVICE, BOOT, 0, 0), vec![Step::Ignore]]);
 
         let actuator = QmpActuator::connect(server.path(), DEVICE, polling(), impatient())
             .await
@@ -600,7 +626,7 @@ mod tests {
     #[tokio::test]
     async fn a_command_that_ran_out_of_time_leaves_the_connection_in_frame() {
         let mut script = startup(DEVICE, BOOT, 0);
-        script.extend([Step::Ignore, Step::returns(QOM_GET, json!(256 * MIB))]);
+        script.extend([Step::Ignore, Step::returns(QomGet, json!(256 * MIB))]);
 
         let server = FakeQmp::start([script]);
 
@@ -621,9 +647,9 @@ mod tests {
     #[tokio::test]
     async fn a_size_change_event_wakes_the_waiter() {
         let (_server, actuator) = held(vec![
-            Step::returns(QOM_SET, json!({})),
+            Step::returns(QomSet, json!({})),
             Step::Emit(resized(DEVICE, 1024 * MIB)),
-            Step::returns(QOM_GET, json!(1024 * MIB)),
+            Step::returns(QomGet, json!(1024 * MIB)),
         ])
         .await;
 
@@ -636,7 +662,7 @@ mod tests {
     async fn an_event_that_only_carries_a_qom_path_still_wakes_the_waiter() {
         let (_server, actuator) = held(vec![
             Step::Emit(resized_anonymously(&qom_path(DEVICE), 2048 * MIB)),
-            Step::returns(QOM_GET, json!(2048 * MIB)),
+            Step::returns(QomGet, json!(2048 * MIB)),
         ])
         .await;
 
@@ -646,9 +672,9 @@ mod tests {
     #[tokio::test]
     async fn an_event_between_two_calls_is_reported_by_the_second() {
         let (_server, actuator) = held(vec![
-            Step::returns(QOM_GET, json!(256 * MIB)),
+            Step::returns(QomGet, json!(256 * MIB)),
             Step::Emit(resized(DEVICE, 512 * MIB)),
-            Step::returns(QOM_GET, json!(512 * MIB)),
+            Step::returns(QomGet, json!(512 * MIB)),
         ])
         .await;
 
@@ -662,8 +688,8 @@ mod tests {
             Step::Emit(resized(OTHER, 4096 * MIB)),
             Step::Emit(resized_anonymously(&qom_path(OTHER), 3072 * MIB)),
             Step::Emit(stopped()),
-            Step::returns(QOM_GET, json!(0)),
-            Step::returns(QOM_GET, json!(0)),
+            Step::returns(QomGet, json!(0)),
+            Step::returns(QomGet, json!(0)),
         ])
         .await;
 
@@ -676,75 +702,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_lost_connection_wakes_the_waiter_and_the_next_command_reconnects() {
+    async fn a_lost_connection_wakes_the_waiter_and_fails_every_later_command() {
         let mut first = startup(DEVICE, BOOT, 0);
         first.push(Step::Hangup);
 
-        let mut second = verified(DEVICE, BOOT);
-        second.push(Step::returns(QOM_GET, json!(256 * MIB)));
-
-        let server = FakeQmp::start([first, second]);
+        let server = FakeQmp::start([first, startup(DEVICE, BOOT, 0)]);
         let actuator = open(&server, Mode::Held).await;
+
+        let closed = format!("the QMP connection to {} closed", server.path().display());
 
         let error = actuator.changed().await.expect_err("the server hung up");
 
-        assert_eq!(
-            error.to_string(),
-            format!("the QMP connection to {} closed", server.path().display())
-        );
+        assert_eq!(error.to_string(), closed);
 
-        assert_eq!(actuator.reading().await.unwrap().size, BOOT + 256 * MIB);
-        assert_eq!(server.connections(), 2);
-        assert_eq!(
-            server.commands(),
-            [
-                CAPABILITIES,
-                QUERY_DEVICES,
-                QUERY_SUMMARY,
-                QOM_GET,
-                CAPABILITIES,
-                QUERY_DEVICES,
-                QUERY_SUMMARY,
-                QOM_GET,
-            ]
-        );
-    }
+        let error = actuator
+            .reading()
+            .await
+            .expect_err("the actuator reopened a connection on its own");
 
-    #[tokio::test]
-    async fn a_reconnect_stands_the_sizes_on_the_boot_memory_it_reads_again() {
-        let mut first = startup(DEVICE, BOOT, 0);
-        first.push(Step::Hangup);
-
-        let mut second = verified(DEVICE, BOOT + 512 * MIB);
-        second.push(Step::returns(QOM_GET, json!(256 * MIB)));
-
-        let server = FakeQmp::start([first, second]);
-        let actuator = open(&server, Mode::Held).await;
-
-        actuator.reading().await.expect_err("the server hung up");
-
-        assert_eq!(
-            actuator.reading().await.unwrap().size,
-            BOOT + 512 * MIB + 256 * MIB
-        );
-        assert_eq!(actuator.boot(), BOOT + 512 * MIB);
-    }
-
-    #[tokio::test]
-    async fn a_size_that_moved_during_an_outage_is_reported_after_the_reconnect() {
-        let mut first = startup(DEVICE, BOOT, 0);
-        first.push(Step::Hangup);
-
-        let mut second = verified(DEVICE, BOOT);
-        second.push(Step::returns(QOM_GET, json!(1024 * MIB)));
-
-        let server = FakeQmp::start([first, second]);
-        let actuator = open(&server, Mode::Held).await;
-
-        actuator.changed().await.expect_err("the server hung up");
-
-        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 1024 * MIB);
-        assert_eq!(server.connections(), 2);
+        assert_eq!(error.to_string(), closed);
+        assert_eq!(server.connections(), 1);
     }
 
     #[tokio::test]
@@ -752,8 +729,8 @@ mod tests {
         let line = format!(r#"{{"return":"{}","id":1}}"#, "x".repeat(MAX_LINE_BYTES));
 
         let (server, actuator) = held(vec![
-            Step::returns(QOM_GET, json!(0)),
-            Step::raw(QOM_GET, line),
+            Step::returns(QomGet, json!(0)),
+            Step::raw(QomGet, line),
         ])
         .await;
 
@@ -791,9 +768,9 @@ mod tests {
     #[tokio::test]
     async fn a_shared_socket_is_greeted_again_for_every_command() {
         let server = FakeQmp::start([
-            startup(DEVICE, BOOT, 0),
-            vec![Step::returns(QOM_GET, json!(256 * MIB))],
-            vec![Step::returns(QOM_SET, json!({}))],
+            shared(DEVICE, BOOT, 0, 0),
+            vec![Step::returns(QomGet, json!(256 * MIB))],
+            vec![Step::returns(QomSet, json!({}))],
         ]);
 
         let actuator = open(&server, polling()).await;
@@ -805,53 +782,101 @@ mod tests {
         assert_eq!(
             server.commands(),
             [
-                CAPABILITIES,
-                QUERY_DEVICES,
-                QUERY_SUMMARY,
-                QOM_GET,
-                CAPABILITIES,
-                QOM_GET,
-                CAPABILITIES,
-                QOM_SET,
+                Capabilities,
+                QueryMemoryDevices,
+                QueryMemorySizeSummary,
+                QomGet,
+                QomGet,
+                Capabilities,
+                QomGet,
+                Capabilities,
+                QomSet,
             ]
         );
     }
 
     #[tokio::test]
-    async fn a_shared_socket_resamples_the_size_until_it_moves() {
+    async fn a_shared_socket_resamples_the_size_until_a_resize_lands() {
         let server = FakeQmp::start([
-            startup(DEVICE, BOOT, 256 * MIB),
-            vec![Step::returns(QOM_GET, json!(256 * MIB))],
-            vec![Step::returns(QOM_GET, json!(256 * MIB))],
-            vec![Step::returns(QOM_GET, json!(768 * MIB))],
+            shared(DEVICE, BOOT, 256 * MIB, 256 * MIB),
+            vec![Step::returns(QomSet, json!({}))],
+            vec![Step::returns(QomGet, json!(256 * MIB))],
+            vec![Step::returns(QomGet, json!(256 * MIB))],
+            vec![Step::returns(QomGet, json!(768 * MIB))],
         ]);
 
         let actuator = open(&server, polling()).await;
 
+        actuator.set_requested(BOOT + 768 * MIB).await.unwrap();
+
         assert_eq!(actuator.changed().await.unwrap().size, BOOT + 768 * MIB);
+        assert_eq!(server.connections(), 5);
+    }
+
+    #[tokio::test]
+    async fn a_shared_socket_reports_every_size_a_resize_passes_through() {
+        let server = FakeQmp::start([
+            shared(DEVICE, BOOT, 0, 0),
+            vec![Step::returns(QomSet, json!({}))],
+            vec![Step::returns(QomGet, json!(256 * MIB))],
+            vec![Step::returns(QomGet, json!(512 * MIB))],
+        ]);
+
+        let actuator = open(&server, polling()).await;
+
+        actuator.set_requested(BOOT + 512 * MIB).await.unwrap();
+
+        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 256 * MIB);
+        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 512 * MIB);
         assert_eq!(server.connections(), 4);
     }
 
     #[tokio::test]
-    async fn a_size_that_moved_between_calls_is_reported_at_once() {
+    async fn a_shared_socket_is_left_alone_while_no_resize_is_in_flight() {
         let server = FakeQmp::start([
-            startup(DEVICE, BOOT, 0),
-            vec![Step::returns(QOM_GET, json!(256 * MIB))],
-            vec![Step::returns(QOM_GET, json!(512 * MIB))],
+            shared(DEVICE, BOOT, 0, 0),
+            vec![Step::returns(QomSet, json!({}))],
+            vec![Step::returns(QomGet, json!(512 * MIB))],
+        ]);
+
+        let actuator = open(&server, polling()).await;
+
+        assert!(
+            timeout(QUIET, actuator.changed()).await.is_err(),
+            "the size was polled with no resize asked for"
+        );
+        assert_eq!(server.connections(), 1);
+
+        actuator.set_requested(BOOT + 512 * MIB).await.unwrap();
+
+        assert_eq!(actuator.changed().await.unwrap().size, BOOT + 512 * MIB);
+
+        assert!(
+            timeout(QUIET, actuator.changed()).await.is_err(),
+            "the size was polled after the resize landed"
+        );
+        assert_eq!(server.connections(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_shared_socket_takes_up_a_resize_asked_for_before_it_connected() {
+        let server = FakeQmp::start([
+            shared(DEVICE, BOOT, 0, 512 * MIB),
+            vec![Step::returns(QomGet, json!(256 * MIB))],
+            vec![Step::returns(QomGet, json!(512 * MIB))],
         ]);
 
         let actuator = open(&server, polling()).await;
 
         assert_eq!(actuator.changed().await.unwrap().size, BOOT + 256 * MIB);
         assert_eq!(actuator.changed().await.unwrap().size, BOOT + 512 * MIB);
-        assert_eq!(server.connections(), 3);
     }
 
     #[tokio::test]
     async fn a_reply_over_the_line_cap_is_refused() {
         let line = format!(r#"{{"return":"{}","id":1}}"#, "x".repeat(MAX_LINE_BYTES));
 
-        let server = FakeQmp::start([startup(DEVICE, BOOT, 0), vec![Step::raw(QOM_GET, line)]]);
+        let server = FakeQmp::start([shared(DEVICE, BOOT, 0, 0), vec![Step::raw(QomGet, line)]]);
         let actuator = open(&server, polling()).await;
 
         let error = actuator

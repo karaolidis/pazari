@@ -347,8 +347,8 @@ mod tests {
     use crate::broker::{
         Broker,
         testing::{
-            BOOT, CEILING, GIB, HOST, MIB, ONE, TWO, at, closed, deny, grant, hello, pressured,
-            reclaim, report, requested, tick, vsock, welcomed,
+            BOOT, CEILING, GIB, HOST, MIB, ONE, TWO, at, closed, deny, grant, hello, policy,
+            pressured, reclaim, registry as guests, report, requested, tick, vsock, welcomed,
         },
     };
 
@@ -450,6 +450,21 @@ mod tests {
         carries(&registry, &format!("pazarid_host_available_bytes {HOST}"));
         carries(&registry, &format!("pazarid_host_swap_free_bytes {GIB}"));
         carries(&registry, "pazarid_host_psi 12.5");
+    }
+
+    #[test]
+    fn a_device_that_has_not_reported_publishes_no_size() {
+        let (observer, registry) = Observer::new();
+
+        observer.refresh(&Broker::new(policy(), guests()));
+
+        let text = scrape(&registry);
+
+        assert!(
+            !text.contains("pazarid_guest_size_bytes{"),
+            "a size was published unread:\n{text}"
+        );
+        carries(&registry, "pazarid_guest_connected{guest=\"one\"} 0");
     }
 
     #[test]

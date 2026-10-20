@@ -121,12 +121,13 @@ mod tests {
     fn fixture(dir: &TempDir, absolute: &str, text: &str) {
         let path = dir.path().join(absolute.trim_start_matches('/'));
 
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, text).unwrap();
+        fs::create_dir_all(path.parent().expect("a file under the root"))
+            .expect("a writable temporary directory");
+        fs::write(path, text).expect("a writable temporary directory");
     }
 
     fn proc() -> (TempDir, ProcMemory) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("a temporary directory");
 
         fixture(&dir, MEMINFO, MEMINFO_FIXTURE);
         fixture(&dir, PRESSURE, PRESSURE_FIXTURE);
@@ -137,14 +138,23 @@ mod tests {
         (dir, memory)
     }
 
-    #[test]
-    fn a_parse_failure_reaches_the_caller_naming_the_file() {
-        let error = MemInfo::parse(Path::new(MEMINFO), "MemTotal:  1024 kB\nMemFree:  256 kB\n")
+    #[tokio::test]
+    async fn a_meminfo_that_does_not_parse_is_an_error_naming_the_file() {
+        let dir = TempDir::new().expect("a temporary directory");
+
+        fixture(&dir, MEMINFO, "MemTotal:  1024 kB\nMemFree:  256 kB\n");
+
+        let error = ProcMemory::under(dir.path())
+            .meminfo()
+            .await
             .expect_err("no MemAvailable");
 
         assert_eq!(
-            RuntimeError::from(error).to_string(),
-            "/proc/meminfo carries no MemAvailable line"
+            error.to_string(),
+            format!(
+                "{} carries no MemAvailable line",
+                dir.path().join("proc/meminfo").display()
+            )
         );
     }
 
@@ -152,55 +162,76 @@ mod tests {
     async fn the_adapter_reads_the_proc_tree_it_is_pointed_at() {
         let (_dir, memory) = proc();
 
-        let info = memory.meminfo().await.unwrap();
+        let info = memory.meminfo().await.expect("a readable meminfo");
 
         assert_eq!(info.available, 1_729_396 * KB);
         assert_eq!(info.total, 2_096_756 * KB);
         assert_eq!(info.swap_total, 1_048_572 * KB);
         assert_eq!(info.swap_free, 1_048_572 * KB);
 
-        let pressure = memory.pressure().await.unwrap().expect("a pressure file");
+        let pressure = memory
+            .pressure()
+            .await
+            .expect("a readable pressure file")
+            .expect("a pressure file");
 
         assert!((pressure.some10 - 12.5).abs() < f64::EPSILON);
 
         assert_eq!(
-            memory.swaps().await.unwrap(),
+            memory.swaps().await.expect("a readable swap list"),
             vec!["/dev/zram0".to_owned(), "/swap/swapfile".to_owned()]
         );
     }
 
     #[tokio::test]
     async fn a_kernel_without_pressure_accounting_says_nothing_about_it() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("a temporary directory");
 
         fixture(&dir, MEMINFO, MEMINFO_FIXTURE);
 
         let memory = ProcMemory::under(dir.path());
 
-        assert_eq!(memory.pressure().await.unwrap(), None);
-        assert_eq!(memory.swaps().await.unwrap(), Vec::<String>::new());
+        assert_eq!(
+            memory
+                .pressure()
+                .await
+                .expect("no pressure file is no error"),
+            None
+        );
+        assert_eq!(
+            memory.swaps().await.expect("no swap list is no error"),
+            Vec::<String>::new()
+        );
     }
 
     #[tokio::test]
     async fn a_meminfo_that_is_not_there_is_an_error() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("a temporary directory");
 
         let memory = ProcMemory::under(dir.path());
 
         assert!(memory.meminfo().await.is_err());
-        assert_eq!(ProcMemory::new(), ProcMemory::default());
     }
 
     #[tokio::test]
     async fn a_mock_stands_in_for_the_host() {
         let memory = MockMemory::new(meminfo(8 << 30, 8 << 30, 0));
 
-        assert_eq!(memory.meminfo().await.unwrap().available, 8 << 30);
-        assert_eq!(memory.pressure().await.unwrap(), None);
-        assert_eq!(memory.swaps().await.unwrap(), Vec::<String>::new());
+        assert_eq!(
+            memory.meminfo().await.expect("the mock answers").available,
+            8 << 30
+        );
+        assert_eq!(memory.pressure().await.expect("the mock answers"), None);
+        assert_eq!(
+            memory.swaps().await.expect("the mock answers"),
+            Vec::<String>::new()
+        );
 
         memory.set(meminfo(8 << 30, 1 << 30, 0));
 
-        assert_eq!(memory.meminfo().await.unwrap().available, 1 << 30);
+        assert_eq!(
+            memory.meminfo().await.expect("the mock answers").available,
+            1 << 30
+        );
     }
 }

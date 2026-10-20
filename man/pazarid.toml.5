@@ -105,6 +105,14 @@ Address to serve OpenMetrics on, for example
 .Ql 127.0.0.1:9650 .
 Required.
 .El
+.Ss [vsock]\&
+.Bl -tag -width Ds
+.It Cm port No = Ar integer
+The port vsock guests connect to.
+Neither 0 nor 4294967295.
+Default
+.Cm 4650 .
+.El
 .Ss [guests.<name>]\&
 One table per guest.
 .Ar name
@@ -126,11 +134,8 @@ Two guests cannot share a context ID or socket path.
 .Bl -tag -width Ds
 .It Cm cid No = Ar integer
 The guest's context ID, which identifies it.
+vsock reserves 0, 1, 2 and 4294967295.
 Required.
-.It Cm port No = Ar integer
-The port the guest connects to.
-Default
-.Cm 4650 .
 .El
 .It Cm kind No = Qq Cm unix
 .Bl -tag -width Ds
@@ -156,14 +161,14 @@ Required.
 Timeout for a single QMP command.
 Default
 .Cm 5s .
-.It Cm retry_min No = Ar duration
+.It Cm reconnect_min No = Ar duration
 First delay before reconnecting to a device that stopped answering.
 Default
 .Cm 500ms .
-.It Cm retry_max No = Ar duration
+.It Cm reconnect_max No = Ar duration
 Maximum reconnect delay; the delay doubles up to this.
 Must be at least
-.Cm retry_min .
+.Cm reconnect_min .
 Default
 .Cm 30s .
 .El
@@ -175,7 +180,11 @@ Optional; defaults to
 Keep one connection open and learn of resizes from QMP events.
 .It Cm kind No = Qq Cm per_operation
 Open a connection per command, for a socket shared with other tools.
-Resizes are polled for.
+A resize is polled for until the device reaches it or another resize
+replaces it.
+Outside a resize the daemon does not poll.
+It sees a restarted virtual machine, or a resize made by another tool, at the
+next resize.
 .Bl -tag -width Ds
 .It Cm poll No = Ar duration
 Polling interval during a resize.
@@ -213,6 +222,7 @@ Labelled
 .Bl -tag -width "guest_reclaim_outstanding" -compact
 .It Va guest_size_bytes
 Current size of the guest's memory device.
+Absent until the device reports a size.
 .It Va guest_ceiling_bytes
 The guest's ceiling.
 .It Va guest_connected
@@ -253,7 +263,7 @@ Reclaim requests sent.
 Messages received, labelled
 .Va kind .
 .It Va device_reconnects_total
-Per guest: reconnections to the memory device.
+Per guest: reconnections to a memory device that had answered before.
 .It Va device_seed_failures_total
 Per guest: failures to read the device's size on connecting.
 .It Va device_refused_actuations_total

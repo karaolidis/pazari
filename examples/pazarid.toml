@@ -1,6 +1,5 @@
 [tick]
-# How often the daemon reads the host's memory and updates what it knows
-# about its guests.
+# How often the daemon checks on the host and its guests.
 interval = "1s"
 
 [status]
@@ -18,21 +17,20 @@ floor = "2GiB"
 # How long a guest waits after a grant before another one.
 min_interval = "5s"
 
-# Whether free host swap counts towards what a grow may be granted out
-# of.
+# Whether free host swap counts as available memory.
 swap = false
 
 [actuation]
-# How long an actuation is given to apply before the host stops waiting
-# for it.
+# How long a resize may take before the daemon stops waiting for it.
 deadline = "30s"
 
-# Whether a shrink that did not apply is taken back to the size the guest
-# still has.
+# Whether a shrink that did not finish is taken back to the size the
+# guest still has.
 revert_shrinks = true
 
 [reclaim]
-# How long a guest has to answer a `reclaim_request`.
+# How long a guest has to answer a `reclaim_request` and release what it
+# promised.
 deadline = "30s"
 
 # How the host takes memory back when it comes under pressure itself.
@@ -45,8 +43,12 @@ psi = 20.0
 step = "256MiB"
 
 [metrics]
-# The address the Prometheus endpoint answers scrapes on.
+# The address to serve metrics on.
 listen = "127.0.0.1:9650"
+
+[vsock]
+# The port vsock guests dial.
+port = 4650
 
 # The guests the daemon answers to, one table each.
 [guests.example]
@@ -60,9 +62,6 @@ ceiling = "8GiB"
 #     kind = "vsock"
 #     # The context id the guest dials from. Set me.
 #     cid = 3
-#
-#     # The port the guest dials.
-#     port = 4650
 # - An `AF_UNIX` socket.
 #     kind = "unix"
 #     # The socket this guest dials. Set me.
@@ -81,10 +80,10 @@ device = "vm0"
 deadline = "5s"
 
 # The first delay before a device that did not answer is opened again.
-retry_min = "500ms"
+reconnect_min = "500ms"
 
 # The cap that delay doubles towards.
-retry_max = "30s"
+reconnect_max = "30s"
 
 # How the daemon uses the QMP socket.
 [guests.example.qmp.mode]

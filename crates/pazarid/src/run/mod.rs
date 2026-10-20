@@ -5,6 +5,8 @@ pub mod metrics;
 pub mod peers;
 pub mod supervisor;
 
+use std::collections::HashMap;
+
 use pazari_metrics::Exposition;
 use pazari_systemd::Notifier;
 use pazari_transport::{AnyConnection, Listener, PeerId, TransportError};
@@ -17,7 +19,7 @@ use tokio::{
 use tracing::{info, warn};
 
 pub use crate::run::{
-    error::RunError,
+    error::{RunError, Signal},
     exchange::{Exchange, Target},
     host::Demand,
     metrics::{DeviceMetrics, Observer},
@@ -78,10 +80,13 @@ pub async fn run(config: Config) -> Result<(), RunError> {
     };
 
     let (sizes, mut resized) = mpsc::channel(SIZE_DEPTH);
-    let mut targets = Vec::with_capacity(devices.len());
+    let mut targets = HashMap::with_capacity(devices.len());
     let mut supervisors = Vec::with_capacity(devices.len());
 
-    for ((guest, spec), qmp) in registry.iter().zip(devices) {
+    for (guest, qmp) in devices {
+        let spec = registry
+            .spec(guest)
+            .expect("the configuration pairs each device with a registered guest");
         let (target, targeted) = watch::channel(None);
 
         info!(
@@ -91,7 +96,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
             "registering a guest",
         );
 
-        let backoff = Backoff::new(qmp.retry_min.get(), qmp.retry_max.get());
+        let backoff = Backoff::new(qmp.reconnect_min.get(), qmp.reconnect_max.get());
 
         supervisors.push(tokio::spawn(
             Supervisor::new(
@@ -107,7 +112,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
             .run(),
         ));
 
-        targets.push(target);
+        targets.insert(guest, target);
     }
 
     drop(sizes);
@@ -147,11 +152,11 @@ pub async fn run(config: Config) -> Result<(), RunError> {
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let mut terminate = signal(SignalKind::terminate()).map_err(|source| RunError::Signal {
-        signal: "SIGTERM",
+        signal: Signal::Terminate,
         source,
     })?;
     let mut interrupt = signal(SignalKind::interrupt()).map_err(|source| RunError::Signal {
-        signal: "SIGINT",
+        signal: Signal::Interrupt,
         source,
     })?;
 

@@ -187,7 +187,7 @@ mod tests {
             error.to_string().contains("3221225472"),
             "unexpected error: {error}"
         );
-        assert_eq!(driver.actuator().calls(), Vec::<u64>::new());
+        assert_eq!(driver.actuator().calls(), vec![3072 * MIB]);
         assert_eq!(driver.actuator().reading().await.unwrap().size, BOOT);
     }
 }

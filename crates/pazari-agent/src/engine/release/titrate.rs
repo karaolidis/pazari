@@ -6,8 +6,8 @@ use crate::engine::{
     config::TitrateConfig, cooldown::Cooldown, counters::Pressure, release::Release, streak::Streak,
 };
 
-/// One fixed step at a time, once the guest has held it spare for a run of
-/// calm intervals and the last resize has cooled off.
+/// One fixed step at a time. The guest must hold the step spare for a run of
+/// calm intervals. The last resize must have cooled off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Titrate {
     config: TitrateConfig,
@@ -25,7 +25,7 @@ impl Titrate {
     }
 
     const fn spared(&self) -> bool {
-        self.spare.reached(self.config.intervals)
+        self.spare.reached(self.config.after)
     }
 }
 
@@ -57,39 +57,16 @@ impl Release for Titrate {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroU32, time::Duration};
-
-    use pazari_types::Delay;
-
     use super::*;
-
-    const MIB: u64 = 1 << 20;
-
-    const CALM: Pressure = Pressure {
-        throttled: false,
-        breached: false,
-    };
-
-    const BREACHED: Pressure = Pressure {
-        throttled: false,
-        breached: true,
-    };
-
-    fn at(secs: u64) -> Timestamp {
-        Timestamp::from_millis(secs * 1_000)
-    }
+    use crate::engine::testing::{BREACHED, MIB, QUIET, THROTTLED, at, titrate as config};
 
     fn titrate() -> Titrate {
-        Titrate::new(TitrateConfig {
-            step: NonZeroU64::new(256 * MIB).expect("a positive step"),
-            intervals: NonZeroU32::new(3).expect("a positive count"),
-            cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
-        })
+        Titrate::new(config())
     }
 
     fn spare(release: &mut Titrate, intervals: u32) {
         for _ in 0..intervals {
-            release.observe(at(0), Some(256 * MIB), CALM);
+            release.observe(at(0), Some(256 * MIB), QUIET);
         }
     }
 
@@ -98,10 +75,10 @@ mod tests {
         let mut release = titrate();
 
         spare(&mut release, 2);
-        assert_eq!(release.due(at(0), CALM), None);
+        assert_eq!(release.due(at(0), QUIET), None);
 
         spare(&mut release, 1);
-        assert_eq!(release.due(at(0), CALM), NonZeroU64::new(256 * MIB));
+        assert_eq!(release.due(at(0), QUIET), NonZeroU64::new(256 * MIB));
     }
 
     #[test]
@@ -109,7 +86,7 @@ mod tests {
         let mut release = titrate();
 
         spare(&mut release, 2);
-        release.observe(at(0), Some(255 * MIB), CALM);
+        release.observe(at(0), Some(255 * MIB), QUIET);
 
         assert!(!release.spared());
     }
@@ -119,14 +96,7 @@ mod tests {
         let mut release = titrate();
 
         spare(&mut release, 2);
-        release.observe(
-            at(0),
-            Some(256 * MIB),
-            Pressure {
-                throttled: true,
-                breached: false,
-            },
-        );
+        release.observe(at(0), Some(256 * MIB), THROTTLED);
         spare(&mut release, 2);
 
         assert!(!release.spared());
@@ -141,8 +111,8 @@ mod tests {
         assert!(!release.spared());
 
         spare(&mut release, 3);
-        assert_eq!(release.due(at(129), CALM), None);
-        assert_eq!(release.due(at(130), CALM), NonZeroU64::new(256 * MIB));
+        assert_eq!(release.due(at(129), QUIET), None);
+        assert_eq!(release.due(at(130), QUIET), NonZeroU64::new(256 * MIB));
     }
 
     #[test]
@@ -153,8 +123,8 @@ mod tests {
         spare(&mut release, 3);
 
         assert_eq!(release.due(at(120), BREACHED), None);
-        assert_eq!(release.due(at(149), CALM), None);
-        assert_eq!(release.due(at(150), CALM), NonZeroU64::new(256 * MIB));
+        assert_eq!(release.due(at(149), QUIET), None);
+        assert_eq!(release.due(at(150), QUIET), NonZeroU64::new(256 * MIB));
     }
 
     #[test]
@@ -165,6 +135,6 @@ mod tests {
         release.recovered();
         spare(&mut release, 3);
 
-        assert_eq!(release.due(at(101), CALM), NonZeroU64::new(256 * MIB));
+        assert_eq!(release.due(at(101), QUIET), NonZeroU64::new(256 * MIB));
     }
 }

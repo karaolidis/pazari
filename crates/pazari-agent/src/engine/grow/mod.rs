@@ -14,7 +14,7 @@ pub trait Grow {
     /// How far over the current total the next request reaches.
     fn step(&self) -> NonZeroU64;
 
-    /// The workload hit the brake, and a request is on its way.
+    /// The workload hit the brake.
     fn braked(&mut self, now: Timestamp);
 
     /// A grow has landed.

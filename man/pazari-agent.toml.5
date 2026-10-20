@@ -184,7 +184,8 @@ Ask the host for more at once.
 Reclaim from the workload cgroup before asking the host.
 .Bl -tag -width Ds
 .It Cm amount No = Ar size
-How much one reclaim frees.
+How much one reclaim asks for.
+The agent asks the host at once when the guest has less than this to spare.
 Default
 .Cm 256MiB .
 .El
@@ -205,6 +206,11 @@ Default
 How soon after a grow a throttle still doubles the step.
 Default
 .Cm 10s .
+.It Cm cap No = Ar count
+The most steps one request asks for.
+Must be greater than 0.
+Default
+.Cm 64 .
 .El
 .El
 .Ss [release]\&

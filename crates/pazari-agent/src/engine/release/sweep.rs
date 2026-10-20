@@ -79,22 +79,7 @@ mod tests {
     use pazari_types::Delay;
 
     use super::*;
-    use crate::engine::testing::{MIB, at, bytes, delay};
-
-    const CALM: Pressure = Pressure {
-        throttled: false,
-        breached: false,
-    };
-
-    const THROTTLED: Pressure = Pressure {
-        throttled: true,
-        breached: false,
-    };
-
-    const BREACHED: Pressure = Pressure {
-        throttled: false,
-        breached: true,
-    };
+    use crate::engine::testing::{BREACHED, MIB, QUIET, THROTTLED, at, bytes, delay};
 
     fn sweep() -> Sweep {
         Sweep::new(SweepConfig {
@@ -106,7 +91,7 @@ mod tests {
 
     fn spare(release: &mut Sweep, from: u64, to: u64, bytes: u64) {
         for second in from..=to {
-            release.observe(at(second), Some(bytes), CALM);
+            release.observe(at(second), Some(bytes), QUIET);
         }
     }
 
@@ -115,10 +100,10 @@ mod tests {
         let mut release = sweep();
 
         spare(&mut release, 0, 299, 4096 * MIB);
-        assert_eq!(release.due(at(299), CALM), None);
+        assert_eq!(release.due(at(299), QUIET), None);
 
         spare(&mut release, 300, 300, 4096 * MIB);
-        assert_eq!(release.due(at(300), CALM), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(300), QUIET), NonZeroU64::new(4096 * MIB));
     }
 
     #[test]
@@ -128,7 +113,7 @@ mod tests {
         spare(&mut release, 0, 150, 8192 * MIB);
         spare(&mut release, 151, 300, 1024 * MIB);
 
-        assert_eq!(release.due(at(300), CALM), NonZeroU64::new(1024 * MIB));
+        assert_eq!(release.due(at(300), QUIET), NonZeroU64::new(1024 * MIB));
     }
 
     #[test]
@@ -136,11 +121,11 @@ mod tests {
         let mut release = sweep();
 
         spare(&mut release, 0, 200, 4096 * MIB);
-        release.observe(at(201), Some(255 * MIB), CALM);
+        release.observe(at(201), Some(255 * MIB), QUIET);
         spare(&mut release, 202, 400, 4096 * MIB);
 
-        assert_eq!(release.due(at(400), CALM), None);
-        assert_eq!(release.due(at(502), CALM), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(400), QUIET), None);
+        assert_eq!(release.due(at(502), QUIET), NonZeroU64::new(4096 * MIB));
     }
 
     #[test]
@@ -148,10 +133,10 @@ mod tests {
         let mut release = sweep();
 
         spare(&mut release, 0, 200, 4096 * MIB);
-        release.observe(at(201), None, CALM);
+        release.observe(at(201), None, QUIET);
         spare(&mut release, 202, 400, 4096 * MIB);
 
-        assert_eq!(release.due(at(400), CALM), None);
+        assert_eq!(release.due(at(400), QUIET), None);
     }
 
     #[test]
@@ -162,7 +147,7 @@ mod tests {
         release.observe(at(201), Some(4096 * MIB), THROTTLED);
         spare(&mut release, 202, 400, 4096 * MIB);
 
-        assert_eq!(release.due(at(400), CALM), None);
+        assert_eq!(release.due(at(400), QUIET), None);
     }
 
     #[test]
@@ -171,10 +156,10 @@ mod tests {
 
         spare(&mut release, 0, 300, 4096 * MIB);
         release.rested(at(300));
-        assert_eq!(release.due(at(300), CALM), None);
+        assert_eq!(release.due(at(300), QUIET), None);
 
         spare(&mut release, 301, 601, 4096 * MIB);
-        assert_eq!(release.due(at(601), CALM), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(601), QUIET), NonZeroU64::new(4096 * MIB));
     }
 
     #[test]
@@ -187,8 +172,8 @@ mod tests {
         release.rested(at(100));
         spare(&mut release, 101, 129, 4096 * MIB);
 
-        assert_eq!(release.due(at(129), CALM), None);
-        assert_eq!(release.due(at(130), CALM), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(129), QUIET), None);
+        assert_eq!(release.due(at(130), QUIET), NonZeroU64::new(4096 * MIB));
     }
 
     #[test]
@@ -202,8 +187,8 @@ mod tests {
         spare(&mut release, 101, 120, 4096 * MIB);
 
         assert_eq!(release.due(at(120), BREACHED), None);
-        assert_eq!(release.due(at(149), CALM), None);
-        assert_eq!(release.due(at(150), CALM), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(149), QUIET), None);
+        assert_eq!(release.due(at(150), QUIET), NonZeroU64::new(4096 * MIB));
     }
 
     #[test]
@@ -217,6 +202,6 @@ mod tests {
         release.recovered();
         spare(&mut release, 101, 101, 4096 * MIB);
 
-        assert_eq!(release.due(at(101), CALM), NonZeroU64::new(4096 * MIB));
+        assert_eq!(release.due(at(101), QUIET), NonZeroU64::new(4096 * MIB));
     }
 }

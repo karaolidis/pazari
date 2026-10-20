@@ -38,6 +38,7 @@ const THROTTLE_RECLAIM: ByteSize = ByteSize::mib(256);
 
 const GROW_STEP: ByteSize = ByteSize::mib(512);
 const ESCALATE_WITHIN: Duration = Duration::from_secs(10);
+const GROW_CAP: u64 = 64;
 
 const RELEASE_STEP: ByteSize = ByteSize::mib(256);
 const RELEASE_AFTER: u32 = 3;
@@ -73,6 +74,7 @@ pub struct File {
     #[serde_inline_default(GrowSection::Exponential {
         step: GROW_STEP,
         escalate_within: ESCALATE_WITHIN,
+        cap: GROW_CAP,
     })]
     #[doku(example = "kind = \"exponential\"")]
     grow: GrowSection,
@@ -116,7 +118,7 @@ impl File {
 
             deny_backoff: Interval::try_new(self.resize.deny_backoff).at("resize.deny_backoff")?,
             settle_grace: Interval::try_new(self.resize.settle_grace).at("resize.settle_grace")?,
-            recovery_intervals: NonZeroU32::new(recover_after)
+            recover_after: NonZeroU32::new(recover_after)
                 .positive("exhaustion.recover_after", "count of intervals")?,
 
             reclaim_swappiness: self
@@ -127,8 +129,6 @@ impl File {
                 .at("reclaim.swappiness")?,
 
             exhaustion: mode.resolve()?,
-
-            tick_interval: tick,
         };
 
         let runtime = RuntimeConfig {
@@ -416,7 +416,7 @@ pub enum ThrottleSection {
 
     /// Reclaim from the workload before asking the host.
     Reclaim {
-        /// How much one reclaim frees.
+        /// How much one reclaim asks for.
         #[serde_inline_default(THROTTLE_RECLAIM)]
         #[doku(as = "String", example = "256MiB")]
         amount: ByteSize,
@@ -439,8 +439,8 @@ impl ThrottleSection {
 #[derive(Debug, Deserialize, Document)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrowSection {
-    /// One step at first, doubled for each brake that follows soon after the
-    /// last grow.
+    /// One step at first. Each brake that follows soon after the last grow
+    /// doubles it, up to `cap` steps.
     Exponential {
         /// The first request, and the unit later ones are multiples of.
         #[serde_inline_default(GROW_STEP)]
@@ -452,6 +452,11 @@ pub enum GrowSection {
         #[serde(deserialize_with = "humantime_serde::deserialize")]
         #[doku(as = "String", example = "10s")]
         escalate_within: Duration,
+
+        /// The most steps one request asks for.
+        #[serde_inline_default(GROW_CAP)]
+        #[doku(example = "64")]
+        cap: u64,
     },
 }
 
@@ -461,9 +466,11 @@ impl GrowSection {
             Self::Exponential {
                 step,
                 escalate_within,
+                cap,
             } => Ok(GrowConfig::Exponential(ExponentialConfig {
                 step: NonZeroU64::new(step.as_u64()).bytes("grow.step")?,
                 escalate_within: Interval::try_new(escalate_within).at("grow.escalate_within")?,
+                cap: NonZeroU64::new(cap).positive("grow.cap", "count of steps")?,
             })),
         }
     }
@@ -474,8 +481,8 @@ impl GrowSection {
 #[derive(Debug, Deserialize, Document)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReleaseSection {
-    /// One fixed step at a time, once the guest has held it spare for a run of
-    /// calm intervals and the last resize has cooled off.
+    /// One fixed step at a time. The guest must hold the step spare for a run
+    /// of calm intervals. The last resize must have cooled off.
     Titrate {
         /// How much one release gives back.
         #[serde_inline_default(RELEASE_STEP)]
@@ -524,8 +531,7 @@ impl ReleaseSection {
                 cooldown,
             } => Ok(ReleaseConfig::Titrate(TitrateConfig {
                 step: NonZeroU64::new(step.as_u64()).bytes("release.step")?,
-                intervals: NonZeroU32::new(after)
-                    .positive("release.after", "count of intervals")?,
+                after: NonZeroU32::new(after).positive("release.after", "count of intervals")?,
                 cooldown: Delay::try_new(cooldown).at("release.cooldown")?,
             })),
             Self::Sweep {

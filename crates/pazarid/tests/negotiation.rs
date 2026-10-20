@@ -121,18 +121,18 @@ fn engine_config() -> EngineConfig {
         grow: GrowConfig::Exponential(ExponentialConfig {
             step: bytes(512 * MIB),
             escalate_within: patient(),
+            cap: bytes(64),
+        }),
+        release: ReleaseConfig::Titrate(TitrateConfig {
+            step: bytes(RELEASE),
+            after: count(3),
+            cooldown: Delay::ZERO,
         }),
         deny_backoff: brief(),
         settle_grace: patient(),
-        recovery_intervals: count(3),
-        release: ReleaseConfig::Titrate(TitrateConfig {
-            step: bytes(RELEASE),
-            intervals: count(3),
-            cooldown: Delay::ZERO,
-        }),
+        recover_after: count(3),
         reclaim_swappiness: None,
         exhaustion: ExhaustionMode::Kill,
-        tick_interval: seconds(1),
     }
 }
 
@@ -337,7 +337,7 @@ impl Harness {
             clock,
         );
 
-        Self {
+        let mut harness = Self {
             _dir: dir,
             now: Timestamp::START,
             listener,
@@ -360,7 +360,11 @@ impl Harness {
             taken: Vec::new(),
             emitted,
             heard: Vec::new(),
-        }
+        };
+
+        harness.tick(0);
+
+        harness
     }
 
     async fn seed(&mut self) {

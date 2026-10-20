@@ -244,18 +244,18 @@ mod tests {
             grow: GrowConfig::Exponential(ExponentialConfig {
                 step: bytes(512 * MIB),
                 escalate_within: interval(10),
+                cap: bytes(64),
+            }),
+            release: ReleaseConfig::Titrate(TitrateConfig {
+                step: bytes(256 * MIB),
+                after: NonZeroU32::new(3).expect("a positive count"),
+                cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
             }),
             deny_backoff: interval(5),
             settle_grace: interval(10),
-            recovery_intervals: NonZeroU32::new(3).expect("a positive count"),
-            release: ReleaseConfig::Titrate(TitrateConfig {
-                step: bytes(256 * MIB),
-                intervals: NonZeroU32::new(3).expect("a positive count"),
-                cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
-            }),
+            recover_after: NonZeroU32::new(3).expect("a positive count"),
             reclaim_swappiness: None,
             exhaustion: ExhaustionMode::Kill,
-            tick_interval: interval(1),
         }
     }
 
@@ -390,6 +390,26 @@ mod tests {
                 .expect("the actions land");
         };
 
+        drive(
+            Event::Tick {
+                now: clock.now(),
+                snapshot: Snapshot {
+                    total_mem: BOOT,
+                    workload_usage: 1200 * MIB,
+                    free: 0,
+                    available: BOOT - 1200 * MIB,
+                    swap_used: 0,
+                    high_events: 0,
+                    max_events: 0,
+                    psi_some10: 0.0,
+                    psi_full10: 0.0,
+                },
+            },
+            &mut engine,
+            &mut applier,
+        )
+        .await;
+
         let connected = timeout(PATIENCE, session.event())
             .await
             .expect("the session answered in time")
@@ -408,21 +428,6 @@ mod tests {
             ),
             "the engine did not greet the host with its state"
         );
-
-        drive(
-            Event::Tick {
-                now: clock.now(),
-                snapshot: Snapshot {
-                    total_mem: BOOT,
-                    workload_usage: 1200 * MIB,
-                    available: BOOT - 1200 * MIB,
-                    ..Snapshot::default()
-                },
-            },
-            &mut engine,
-            &mut applier,
-        )
-        .await;
 
         drive(
             Event::ThrottleWake {

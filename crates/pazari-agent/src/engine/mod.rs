@@ -11,6 +11,7 @@ mod effects;
 mod grow;
 mod limits;
 mod phase;
+mod refusal;
 mod release;
 mod streak;
 mod world;
@@ -30,7 +31,7 @@ pub use crate::engine::{
     },
     error::EngineError,
     event::{BootInfo, Event, Snapshot},
-    phase::Phase,
+    phase::{Phase, PhaseKind},
 };
 use crate::engine::{
     counters::CounterTracker,
@@ -88,7 +89,7 @@ impl Engine {
 
         self.dispatch(event, &mut fx);
 
-        if self.phase.name() != before.name() {
+        if self.phase.kind() != before.kind() {
             debug!(
                 phase = %self.phase,
                 from = %before,
@@ -98,7 +99,7 @@ impl Engine {
                 total_mem = self.world.limits().total_mem(),
                 available = ?self.world.guest().available(),
                 slack = ?self.world.slack(),
-                usage = self.world.guest().usage(),
+                usage = ?self.world.guest().usage(),
                 "the engine changed phase",
             );
         }
@@ -252,6 +253,8 @@ mod tests {
     fn status_follows_the_interval_learned_at_connect() {
         let (mut engine, _) = Engine::try_new(config(), boot()).expect("a workable boot");
 
+        tick(&mut engine, at(0), snap(BOOT, BUSY, 0));
+
         let actions = connect(&mut engine, at(0), CEILING, Duration::from_secs(5));
         assert!(matches!(
             actions.as_slice(),
@@ -273,6 +276,21 @@ mod tests {
                 workload_usage: 1234 * MIB,
             }))]
         );
+    }
+
+    #[test]
+    fn status_waits_for_the_first_reading() {
+        let (mut engine, _) = Engine::try_new(config(), boot()).expect("a workable boot");
+
+        assert_eq!(connect(&mut engine, at(0), CEILING, HOUR), vec![]);
+
+        assert!(matches!(
+            tick(&mut engine, at(1), snap(BOOT, BUSY, 0)).as_slice(),
+            [Action::Send(GuestMessage::Status(Status {
+                workload_usage: BUSY,
+                ..
+            }))]
+        ));
     }
 
     #[test]
@@ -493,12 +511,18 @@ mod tests {
         engine.world.observe(snap(BOOT - BLOCK, 0, 0));
 
         assert_eq!(engine.total_mem(), BOOT - BLOCK);
-        assert_eq!(engine.world.release_budget(u64::MAX), Some(0));
+        assert_eq!(engine.world.release_budget(u64::MAX), None);
     }
 
     #[test]
-    fn a_guest_that_has_not_been_read_yet_says_so_rather_than_nothing() {
-        let (mut engine, _) = Engine::try_new(config(), boot()).expect("a workable boot");
+    fn a_guest_that_has_not_been_read_yet_has_nothing_to_give() {
+        let boot = BootInfo {
+            block_size: bytes(BLOCK),
+            total_mem: BOOT + 4 * BLOCK,
+        };
+
+        let (mut engine, _) = Engine::try_new(config(), boot).expect("a workable boot");
+        reconnect(&mut engine, at(0), CEILING, 4 * BLOCK);
 
         assert_eq!(
             engine.world.release_budget(u64::MAX),
@@ -506,9 +530,12 @@ mod tests {
             "the agent answered for a guest it had not read",
         );
 
-        engine.world.observe(snap(BOOT, CALM, 0));
+        engine.world.observe(snap(BOOT + 4 * BLOCK, 0, 0));
 
-        assert!(engine.world.release_budget(u64::MAX).is_some());
+        assert_eq!(
+            engine.world.release_budget(u64::MAX),
+            Some(bytes(4 * BLOCK))
+        );
     }
 
     #[test]
@@ -521,11 +548,14 @@ mod tests {
         let (mut engine, _) = Engine::try_new(config(), boot).expect("a workable boot");
         engine.world.observe(snap(BOOT + 4 * BLOCK, 0, 0));
 
-        assert_eq!(engine.world.release_budget(u64::MAX), Some(0));
+        assert_eq!(engine.world.release_budget(u64::MAX), None);
 
         reconnect(&mut engine, at(0), CEILING, 4 * BLOCK);
 
-        assert_eq!(engine.world.release_budget(u64::MAX), Some(4 * BLOCK));
+        assert_eq!(
+            engine.world.release_budget(u64::MAX),
+            Some(bytes(4 * BLOCK))
+        );
     }
 
     #[test]
@@ -535,7 +565,7 @@ mod tests {
 
         connect(&mut engine, at(0), CEILING, HOUR);
 
-        assert_eq!(engine.world.release_budget(u64::MAX), Some(0));
+        assert_eq!(engine.world.release_budget(u64::MAX), None);
 
         host(
             &mut engine,
@@ -551,7 +581,12 @@ mod tests {
         });
 
         assert_eq!(
-            engine.total_mem() - engine.world.release_budget(u64::MAX).expect("a reading"),
+            engine.total_mem()
+                - engine
+                    .world
+                    .release_budget(u64::MAX)
+                    .expect("a block to give")
+                    .get(),
             BOOT,
             "the guest would have offered past the memory it booted with",
         );
@@ -569,7 +604,10 @@ mod tests {
 
         reconnect(&mut engine, at(0), CEILING, 4 * BLOCK);
 
-        assert_eq!(engine.world.release_budget(u64::MAX), Some(4 * BLOCK));
+        assert_eq!(
+            engine.world.release_budget(u64::MAX),
+            Some(bytes(4 * BLOCK))
+        );
 
         host(
             &mut engine,
@@ -579,14 +617,20 @@ mod tests {
             },
         );
 
-        assert_eq!(engine.world.release_budget(u64::MAX), Some(2 * BLOCK));
+        assert_eq!(
+            engine.world.release_budget(u64::MAX),
+            Some(bytes(2 * BLOCK))
+        );
 
         engine.handle(Event::TotalChanged {
             now: at(2),
             total_mem: BOOT + 2 * BLOCK,
         });
 
-        assert_eq!(engine.world.release_budget(u64::MAX), Some(2 * BLOCK));
+        assert_eq!(
+            engine.world.release_budget(u64::MAX),
+            Some(bytes(2 * BLOCK))
+        );
     }
 
     #[test]
@@ -608,7 +652,17 @@ mod tests {
         });
         reconnect(&mut engine, at(3), CEILING, 2 * BLOCK);
 
-        assert_eq!(engine.world.release_budget(u64::MAX), Some(2 * BLOCK));
+        assert_eq!(
+            engine.world.release_budget(u64::MAX),
+            Some(bytes(2 * BLOCK))
+        );
+    }
+
+    /// Which request an answer from the host names.
+    #[derive(Debug, Clone, Copy)]
+    enum Addressee {
+        Pending,
+        Stray(RequestId),
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -632,12 +686,17 @@ mod tests {
         },
         Connect {
             ceiling: u64,
+            hotplugged: u64,
         },
         Disconnect,
         Ceiling {
             ceiling: u64,
         },
+        Geometry {
+            hotplugged: u64,
+        },
         Answer {
+            to: Addressee,
             grant: bool,
             target: u64,
             reason: DenyReason,
@@ -681,6 +740,13 @@ mod tests {
         ]
     }
 
+    fn addressee() -> impl Strategy<Value = Addressee> {
+        prop_oneof![
+            3 => Just(Addressee::Pending),
+            1 => (0_u64..8).prop_map(|id| Addressee::Stray(RequestId(id))),
+        ]
+    }
+
     fn step() -> impl Strategy<Value = Move> {
         prop_oneof![
             8 => (
@@ -704,16 +770,19 @@ mod tests {
             4 => (0_u64..8).prop_map(|high_events| Move::Wake { high_events }),
             3 => byte_count().prop_map(|total_mem| Move::Plug { total_mem }),
             2 => byte_count().prop_map(|reclaimed| Move::Reclaimed { reclaimed }),
-            2 => byte_count().prop_map(|ceiling| Move::Connect { ceiling }),
+            2 => (byte_count(), byte_count())
+                .prop_map(|(ceiling, hotplugged)| Move::Connect { ceiling, hotplugged }),
             1 => Just(Move::Disconnect),
             2 => byte_count().prop_map(|ceiling| Move::Ceiling { ceiling }),
-            4 => (any::<bool>(), byte_count(), deny_reason()).prop_map(|(grant, target, reason)| {
-                Move::Answer {
+            2 => byte_count().prop_map(|hotplugged| Move::Geometry { hotplugged }),
+            4 => (addressee(), any::<bool>(), byte_count(), deny_reason()).prop_map(
+                |(to, grant, target, reason)| Move::Answer {
+                    to,
                     grant,
                     target,
                     reason,
                 }
-            }),
+            ),
             2 => (0_u64..4, byte_count()).prop_map(|(id, desired)| Move::Reclaim { id, desired }),
         ]
     }
@@ -785,11 +854,13 @@ mod tests {
         Ok(())
     }
 
+    /// Runs `timeline`, checking every step, and returns the phases it passed
+    /// through.
     fn drive(
         throttle: ThrottleMode,
         release: ReleaseConfig,
         timeline: &[(u64, Move)],
-    ) -> Result<(), TestCaseError> {
+    ) -> Result<Vec<PhaseKind>, TestCaseError> {
         let (mut engine, actions) =
             Engine::try_new(properties_config(throttle, release), boot()).expect("a workable boot");
         let mut now = Timestamp::START;
@@ -798,6 +869,7 @@ mod tests {
             last_id: RequestId(0),
             reclaiming: false,
         };
+        let mut visited = vec![engine.phase().kind()];
 
         check(&engine, &actions, &mut model)?;
 
@@ -836,7 +908,10 @@ mod tests {
                     model.reclaiming = false;
                     Event::ReclaimFinished { now, reclaimed }
                 }
-                Move::Connect { ceiling } => {
+                Move::Connect {
+                    ceiling,
+                    hotplugged,
+                } => {
                     model.connected = true;
                     model.last_id = RequestId(0);
 
@@ -844,7 +919,7 @@ mod tests {
                         now,
                         ceiling,
                         status_interval: Duration::from_millis(500),
-                        hotplugged: 0,
+                        hotplugged,
                     }
                 }
                 Move::Disconnect => {
@@ -855,12 +930,25 @@ mod tests {
                     now,
                     message: HostMessage::Ceiling { ceiling },
                 },
+                Move::Geometry { hotplugged } => Event::Host {
+                    now,
+                    message: HostMessage::Geometry { hotplugged },
+                },
                 Move::Answer {
+                    to,
                     grant,
                     target,
                     reason,
                 } => {
-                    let id = engine.pending_request().unwrap_or(RequestId(0));
+                    let id = match to {
+                        Addressee::Pending => engine.pending_request(),
+                        Addressee::Stray(id) => Some(id),
+                    };
+
+                    let Some(id) = id else {
+                        continue;
+                    };
+
                     let message = if grant {
                         HostMessage::Grant { id, target }
                     } else {
@@ -885,9 +973,46 @@ mod tests {
 
             let actions = engine.handle(event);
             check(&engine, &actions, &mut model)?;
+
+            visited.push(engine.phase().kind());
         }
 
-        Ok(())
+        Ok(visited)
+    }
+
+    #[test]
+    fn a_calm_timeline_with_plugged_memory_reaches_a_release() {
+        let quiet = Move::Tick {
+            total_mem: BOOT,
+            usage: CALM,
+            free: 0,
+            available: BOOT - CALM,
+            high_events: 0,
+            psi: 0.0,
+        };
+
+        let visited = drive(
+            ThrottleMode::Grow,
+            ReleaseConfig::Titrate(titrate()),
+            &[
+                (
+                    0,
+                    Move::Connect {
+                        ceiling: CEILING,
+                        hotplugged: 512 * MIB,
+                    },
+                ),
+                (1_000, quiet),
+                (1_000, quiet),
+                (1_000, quiet),
+            ],
+        )
+        .expect("the timeline holds the invariants");
+
+        assert!(
+            visited.contains(&PhaseKind::Releasing),
+            "the timeline never released: {visited:?}"
+        );
     }
 
     proptest! {

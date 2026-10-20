@@ -1,15 +1,28 @@
 use std::time::Duration;
 
-use pazari_proto::{DenyReason, GuestMessage, RequestId};
+use pazari_proto::{DenyReason, GuestMessage, ReclaimId, RequestId};
 use pazari_types::{Deadline, Timestamp};
 use tracing::debug;
 
 use crate::engine::{
     counters::Pressure,
-    grow::Grow,
-    limits::Brake,
+    limits::{Brake, Moved},
     phase::{Phase, State, Step, exhausted::Exhausted, steady::Steady},
+    refusal::Refusal,
 };
+
+/// Whether a request is the guest's first since the workload braked, or a
+/// retry from an exhaustion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attempt {
+    First,
+
+    /// The workload has wanted more than the ceiling allows since
+    /// `exhausted_since`.
+    Retry {
+        exhausted_since: Timestamp,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -21,7 +34,7 @@ enum Stage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Growing {
-    exhausted_since: Option<Timestamp>,
+    attempt: Attempt,
     stage: Stage,
 }
 
@@ -32,22 +45,22 @@ impl Growing {
 
     /// Answers a brake the workload hit at `at`.
     pub fn braked_at(step: &mut Step<'_>, at: Timestamp) -> Phase {
-        step.world.grow.braked(at);
+        step.world.note_braked(at);
 
-        Self::start(step, None)
+        Self::start(step, Attempt::First)
     }
 
-    pub fn start(step: &mut Step<'_>, exhausted_since: Option<Timestamp>) -> Phase {
+    pub fn start(step: &mut Step<'_>, attempt: Attempt) -> Phase {
         step.brake(Brake::Engaged);
 
         if !step.world.connected() {
             debug!("cannot request memory: no host session");
 
-            return Self::at(exhausted_since, Stage::Blocked);
+            return Self::at(attempt, Stage::Blocked);
         }
 
         let Some(target) = step.world.grow_target() else {
-            return Exhausted::enter(step, exhausted_since);
+            return Exhausted::enter(step, attempt, step.config().deny_backoff.get());
         };
 
         let id = step.world.take_id();
@@ -57,8 +70,8 @@ impl Growing {
             id = id.get(),
             current,
             target,
-            grow = ?step.world.grow,
-            usage = step.guest().usage(),
+            grow = ?step.world.grow(),
+            usage = ?step.guest().usage(),
             ceiling = ?step.limits().ceiling(),
             "requesting more memory from the host",
         );
@@ -69,14 +82,11 @@ impl Growing {
             target,
         });
 
-        Self::at(exhausted_since, Stage::Requesting { id, target })
+        Self::at(attempt, Stage::Requesting { id, target })
     }
 
-    const fn at(exhausted_since: Option<Timestamp>, stage: Stage) -> Phase {
-        Phase::Growing(Self {
-            exhausted_since,
-            stage,
-        })
+    const fn at(attempt: Attempt, stage: Stage) -> Phase {
+        Phase::Growing(Self { attempt, stage })
     }
 
     pub const fn pending_request(self) -> Option<RequestId> {
@@ -90,10 +100,18 @@ impl Growing {
         matches!(self.pending_request(), Some(pending) if pending.get() == id.get())
     }
 
+    /// When the exhaustion began, while a retry from it waits on the host.
+    const fn retrying(self) -> Option<Timestamp> {
+        match (self.attempt, self.stage) {
+            (Attempt::Retry { exhausted_since }, Stage::Requesting { .. }) => Some(exhausted_since),
+            _ => None,
+        }
+    }
+
     const fn blocked(self) -> Phase {
         match self.stage {
             Stage::Requesting { .. } | Stage::Backoff { .. } => {
-                Self::at(self.exhausted_since, Stage::Blocked)
+                Self::at(self.attempt, Stage::Blocked)
             }
             _ => Phase::Growing(self),
         }
@@ -105,10 +123,6 @@ impl State for Growing {
         Phase::Growing(self)
     }
 
-    fn busy(self) -> &'static str {
-        "a grant request is outstanding"
-    }
-
     fn brake(self, _step: &mut Step<'_>) -> Phase {
         self.stay()
     }
@@ -116,27 +130,33 @@ impl State for Growing {
     fn resume(self, step: &mut Step<'_>) -> Phase {
         match self.stage {
             Stage::Settling { .. } => self.stay(),
-            _ => Self::start(step, self.exhausted_since),
+            _ => Self::start(step, self.attempt),
         }
     }
 
     fn advance(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
+        if let Some(since) = self.retrying()
+            && !Exhausted::stalling(step, since)
+        {
+            return Exhausted::enter(step, self.attempt, step.config().deny_backoff.get());
+        }
+
         match self.stage {
             Stage::Backoff { retry_at } if retry_at.reached(step.now) => {
-                Self::start(step, self.exhausted_since)
+                Self::start(step, self.attempt)
             }
             Stage::Settling { expires, .. } if expires.reached(step.now) => Steady::settled(step),
             _ => self.stay(),
         }
     }
 
-    fn on_total_changed(self, step: &mut Step<'_>, changed: bool) -> Phase {
+    fn on_total_changed(self, step: &mut Step<'_>, moved: Moved) -> Phase {
         match self.stage {
             Stage::Settling { target, .. } if step.limits().total_mem() >= target => {
                 Steady::settled(step)
             }
             _ => {
-                if changed {
+                if moved != Moved::Unchanged {
                     step.world.rebrake(step.fx);
                 }
 
@@ -151,9 +171,9 @@ impl State for Growing {
         }
 
         let expires = Deadline::after(step.now, step.config().settle_grace.get());
-        let settling = Self::at(self.exhausted_since, Stage::Settling { target, expires });
+        let settling = Self::at(self.attempt, Stage::Settling { target, expires });
 
-        settling.on_total_changed(step, false)
+        settling.on_total_changed(step, Moved::Unchanged)
     }
 
     fn on_deny(
@@ -167,11 +187,14 @@ impl State for Growing {
             return self.stay();
         }
 
-        if reason == DenyReason::Ceiling || step.world.grow_target().is_none() {
-            return Exhausted::enter(step, self.exhausted_since);
-        }
-
         let backoff = retry_after.unwrap_or_else(|| step.config().deny_backoff.get());
+
+        if reason == DenyReason::Ceiling
+            || matches!(self.attempt, Attempt::Retry { .. })
+            || step.world.grow_target().is_none()
+        {
+            return Exhausted::enter(step, self.attempt, backoff);
+        }
 
         debug!(
             %id,
@@ -181,18 +204,36 @@ impl State for Growing {
         );
 
         Self::at(
-            self.exhausted_since,
+            self.attempt,
             Stage::Backoff {
                 retry_at: Deadline::after(step.now, backoff),
             },
         )
     }
 
+    fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, _desired: u64) -> Phase {
+        step.nak(id, Refusal::Growing);
+
+        self.stay()
+    }
+
     fn on_connected(self, _step: &mut Step<'_>) -> Phase {
         self.blocked()
     }
 
-    fn on_disconnected(self, _step: &mut Step<'_>) -> Phase {
+    fn on_interval(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
+        if self.retrying().is_some() && step.world.calm() {
+            return Steady::recovered(step);
+        }
+
+        self.stay()
+    }
+
+    fn on_disconnected(self, step: &mut Step<'_>) -> Phase {
+        if self.retrying().is_some() {
+            return Exhausted::enter(step, self.attempt, step.config().deny_backoff.get());
+        }
+
         self.blocked()
     }
 }

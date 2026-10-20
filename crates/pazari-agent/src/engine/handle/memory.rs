@@ -9,8 +9,8 @@ impl Engine {
         total_mem: u64,
         fx: &mut Effects,
     ) {
-        let changed = self.world.set_total_mem(total_mem);
+        let moved = self.world.set_total_mem(total_mem);
 
-        self.transition(now, fx, |phase, step| phase.on_total_changed(step, changed));
+        self.transition(now, fx, |phase, step| phase.on_total_changed(step, moved));
     }
 }

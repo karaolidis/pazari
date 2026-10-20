@@ -10,7 +10,7 @@ pub struct BootInfo {
     pub total_mem: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Snapshot {
     pub total_mem: u64,
     pub workload_usage: u64,

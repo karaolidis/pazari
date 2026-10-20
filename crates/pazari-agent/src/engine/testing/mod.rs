@@ -9,7 +9,7 @@ use pazari_types::{Delay, Interval, Swappiness, Timestamp};
 
 use crate::engine::{
     Action, BootInfo, Engine, EngineConfig, Event, ExhaustionMode, ExponentialConfig, GrowConfig,
-    Phase, ReleaseConfig, Snapshot, SweepConfig, ThrottleMode, TitrateConfig,
+    Phase, ReleaseConfig, Snapshot, SweepConfig, ThrottleMode, TitrateConfig, counters::Pressure,
 };
 
 pub const MIB: u64 = 1 << 20;
@@ -28,6 +28,21 @@ pub const CALM: u64 = 500 * MIB;
 pub const STALLED: u64 = 1700 * MIB;
 
 pub const HOUR: Duration = Duration::from_secs(3600);
+
+pub const QUIET: Pressure = Pressure {
+    throttled: false,
+    breached: false,
+};
+
+pub const THROTTLED: Pressure = Pressure {
+    throttled: true,
+    breached: false,
+};
+
+pub const BREACHED: Pressure = Pressure {
+    throttled: false,
+    breached: true,
+};
 
 pub const fn bytes(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).expect("a positive byte count")
@@ -48,7 +63,7 @@ pub fn delay(secs: u64) -> Delay {
 pub fn titrate() -> TitrateConfig {
     TitrateConfig {
         step: bytes(256 * MIB),
-        intervals: count(3),
+        after: count(3),
         cooldown: delay(30),
     }
 }
@@ -69,16 +84,16 @@ pub fn config() -> EngineConfig {
         grow: GrowConfig::Exponential(ExponentialConfig {
             step: bytes(512 * MIB),
             escalate_within: interval(10),
+            cap: bytes(64),
         }),
+        release: ReleaseConfig::Titrate(titrate()),
         deny_backoff: interval(5),
         settle_grace: interval(10),
-        recovery_intervals: count(3),
-        release: ReleaseConfig::Titrate(titrate()),
+        recover_after: count(3),
         reclaim_swappiness: Some(Swappiness::NONE),
         exhaustion: ExhaustionMode::Stall {
             timeout: interval(12),
         },
-        tick_interval: interval(1),
     }
 }
 

@@ -15,11 +15,11 @@ pub use crate::engine::phase::{
     steady::Steady,
 };
 use crate::engine::{
-    action::Action,
     config::EngineConfig,
     counters::Pressure,
     effects::Effects,
-    limits::{Brake, Limits},
+    limits::{Brake, Limits, Moved},
+    refusal::Refusal,
     world::{Guest, World},
 };
 
@@ -32,7 +32,7 @@ pub struct Step<'a> {
 
 impl Step<'_> {
     pub const fn config(&self) -> &EngineConfig {
-        &self.world.config
+        self.world.config()
     }
 
     pub const fn limits(&self) -> Limits {
@@ -47,24 +47,18 @@ impl Step<'_> {
         self.world.brake(brake, self.fx);
     }
 
-    pub fn emit(&mut self, action: Action) {
-        self.fx.emit(action);
-    }
-
     pub fn send(&mut self, message: GuestMessage) {
         self.world.send(message, self.fx);
     }
 
-    pub fn nak(&mut self, id: ReclaimId, reason: &str) {
-        self.world.nak(id, reason, self.fx);
+    pub fn nak(&mut self, id: ReclaimId, refusal: Refusal) {
+        self.world.nak(id, refusal, self.fx);
     }
 }
 
 #[enum_dispatch]
 pub trait State: Copy {
     fn stay(self) -> Phase;
-
-    fn busy(self) -> &'static str;
 
     fn brake(self, step: &mut Step<'_>) -> Phase;
 
@@ -78,8 +72,8 @@ pub trait State: Copy {
         self.stay()
     }
 
-    fn on_total_changed(self, step: &mut Step<'_>, changed: bool) -> Phase {
-        if changed {
+    fn on_total_changed(self, step: &mut Step<'_>, moved: Moved) -> Phase {
+        if moved != Moved::Unchanged {
             step.world.rebrake(step.fx);
         }
 
@@ -100,11 +94,7 @@ pub trait State: Copy {
         self.stay()
     }
 
-    fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, _desired: u64) -> Phase {
-        step.nak(id, self.busy());
-
-        self.stay()
-    }
+    fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, desired: u64) -> Phase;
 
     fn on_reclaim_finished(self, _step: &mut Step<'_>, _reclaimed: u64) -> Phase {
         self.stay()
@@ -133,34 +123,63 @@ pub enum Phase {
     Exhausted(Exhausted),
 }
 
-impl Phase {
-    pub const NAMES: [&'static str; 5] = [
-        "steady",
-        "awaiting_grant",
-        "reclaiming",
-        "releasing",
-        "exhausted",
+/// Which phase the engine is in, without what it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseKind {
+    Steady,
+    Growing,
+    Reclaiming,
+    Releasing,
+    Exhausted,
+}
+
+impl PhaseKind {
+    pub const ALL: [Self; 5] = [
+        Self::Steady,
+        Self::Growing,
+        Self::Reclaiming,
+        Self::Releasing,
+        Self::Exhausted,
     ];
 
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Steady => "steady",
+            Self::Growing => "awaiting_grant",
+            Self::Reclaiming => "reclaiming",
+            Self::Releasing => "releasing",
+            Self::Exhausted => "exhausted",
+        }
+    }
+}
+
+impl fmt::Display for PhaseKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl Phase {
     #[must_use]
     pub const fn start() -> Self {
         Self::Steady(Steady::start())
     }
 
     #[must_use]
-    pub const fn name(self) -> &'static str {
+    pub const fn kind(self) -> PhaseKind {
         match self {
-            Self::Steady(_) => "steady",
-            Self::Growing(_) => "awaiting_grant",
-            Self::Reclaiming(_) => "reclaiming",
-            Self::Releasing(_) => "releasing",
-            Self::Exhausted(_) => "exhausted",
+            Self::Steady(_) => PhaseKind::Steady,
+            Self::Growing(_) => PhaseKind::Growing,
+            Self::Reclaiming(_) => PhaseKind::Reclaiming,
+            Self::Releasing(_) => PhaseKind::Releasing,
+            Self::Exhausted(_) => PhaseKind::Exhausted,
         }
     }
 
     /// Answers the workload hitting the brake.
     pub fn braked(step: &mut Step<'_>) -> Self {
-        let Some(amount) = step.config().throttle.reclaim(step.world.slack()) else {
+        let Some(amount) = step.world.throttle_reclaim() else {
             return Growing::braked(step);
         };
 
@@ -183,6 +202,6 @@ impl Phase {
 
 impl fmt::Display for Phase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
+        self.kind().fmt(f)
     }
 }

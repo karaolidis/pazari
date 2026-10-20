@@ -95,6 +95,7 @@ mod tests {
         kind = "exponential"
         step = "1GiB"
         escalate_within = "20s"
+        cap = 16
 
         [release]
         kind = "titrate"
@@ -221,18 +222,18 @@ mod tests {
                 grow: GrowConfig::Exponential(ExponentialConfig {
                     step: bytes(1024 * MIB),
                     escalate_within: interval(Duration::from_secs(20)),
+                    cap: bytes(16),
+                }),
+                release: ReleaseConfig::Titrate(TitrateConfig {
+                    step: bytes(128 * MIB),
+                    after: count(5),
+                    cooldown: Delay::ZERO,
                 }),
                 deny_backoff: interval(Duration::from_millis(2_500)),
                 settle_grace: interval(Duration::from_secs(15)),
-                recovery_intervals: count(5),
-                release: ReleaseConfig::Titrate(TitrateConfig {
-                    step: bytes(128 * MIB),
-                    intervals: count(5),
-                    cooldown: Delay::ZERO,
-                }),
+                recover_after: count(5),
                 reclaim_swappiness: Some(Swappiness::NONE),
                 exhaustion: ExhaustionMode::Kill,
-                tick_interval: interval(Duration::from_millis(500)),
             }
         );
 
@@ -280,20 +281,20 @@ mod tests {
                 grow: GrowConfig::Exponential(ExponentialConfig {
                     step: bytes(512 * MIB),
                     escalate_within: interval(Duration::from_secs(10)),
+                    cap: bytes(64),
+                }),
+                release: ReleaseConfig::Titrate(TitrateConfig {
+                    step: bytes(256 * MIB),
+                    after: count(3),
+                    cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
                 }),
                 deny_backoff: interval(Duration::from_secs(5)),
                 settle_grace: interval(Duration::from_secs(10)),
-                recovery_intervals: count(3),
-                release: ReleaseConfig::Titrate(TitrateConfig {
-                    step: bytes(256 * MIB),
-                    intervals: count(3),
-                    cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
-                }),
+                recover_after: count(3),
                 reclaim_swappiness: None,
                 exhaustion: ExhaustionMode::Stall {
                     timeout: interval(Duration::from_secs(60)),
                 },
-                tick_interval: interval(Duration::from_secs(1)),
             }
         );
 
@@ -478,7 +479,7 @@ mod tests {
             config.engine.release,
             ReleaseConfig::Titrate(TitrateConfig {
                 step: bytes(64 * MIB),
-                intervals: count(3),
+                after: count(3),
                 cooldown: Delay::try_new(Duration::from_secs(30)).expect("a short delay"),
             })
         );
@@ -549,6 +550,36 @@ mod tests {
         assert_eq!(
             error,
             "throttle.amount rejects 0: expected a positive byte count"
+        );
+    }
+
+    #[test]
+    fn a_grow_table_keeps_the_cap_it_does_not_override() {
+        let config = parse(&MINIMAL.replace(
+            "[host.transport]",
+            "[grow]\nkind = \"exponential\"\nstep = \"1GiB\"\n\n[host.transport]",
+        ));
+
+        assert_eq!(
+            config.engine.grow,
+            GrowConfig::Exponential(ExponentialConfig {
+                step: bytes(1024 * MIB),
+                escalate_within: interval(Duration::from_secs(10)),
+                cap: bytes(64),
+            })
+        );
+    }
+
+    #[test]
+    fn a_zero_grow_cap_names_the_table_that_carries_it() {
+        let error = rejects(&MINIMAL.replace(
+            "[host.transport]",
+            "[grow]\nkind = \"exponential\"\ncap = 0\n\n[host.transport]",
+        ));
+
+        assert_eq!(
+            error,
+            "grow.cap rejects 0: expected a positive count of steps"
         );
     }
 

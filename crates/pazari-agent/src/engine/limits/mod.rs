@@ -9,6 +9,14 @@ pub enum Brake {
     Released,
 }
 
+/// Which way `MemTotal` went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moved {
+    Grew,
+    Shrank,
+    Unchanged,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     service_reserve: u64,
@@ -58,7 +66,7 @@ impl Limits {
     }
 
     pub const fn released(self) -> bool {
-        self.high >= self.max
+        matches!(self.brake, Brake::Released)
     }
 
     pub const fn service_reserve(self) -> u64 {
@@ -82,16 +90,31 @@ impl Limits {
         self.budget().saturating_sub(self.burst_reserve.get())
     }
 
-    pub const fn set_total_mem(&mut self, total_mem: u64) -> bool {
-        let changed = total_mem != self.total_mem;
+    pub const fn set_total_mem(&mut self, total_mem: u64) -> Moved {
+        let moved = if total_mem > self.total_mem {
+            Moved::Grew
+        } else if total_mem < self.total_mem {
+            Moved::Shrank
+        } else {
+            Moved::Unchanged
+        };
+
         self.total_mem = total_mem;
-        changed
+
+        moved
     }
 
-    pub fn raise_ceiling(&mut self, ceiling: u64) -> bool {
-        let raised = self.ceiling.is_none_or(|current| ceiling > current);
+    /// Adopts the host's ceiling. A first ceiling counts as a raise.
+    pub const fn set_ceiling(&mut self, ceiling: u64) -> Moved {
+        let moved = match self.ceiling {
+            Some(current) if ceiling < current => Moved::Shrank,
+            Some(current) if ceiling == current => Moved::Unchanged,
+            _ => Moved::Grew,
+        };
+
         self.ceiling = Some(ceiling);
-        raised
+
+        moved
     }
 
     pub fn apply(&mut self, brake: Brake, fx: &mut Effects) {
@@ -117,7 +140,7 @@ impl Limits {
         self.apply(self.brake, fx);
     }
 
-    pub fn set_high(&mut self, value: u64, fx: &mut Effects) {
+    fn set_high(&mut self, value: u64, fx: &mut Effects) {
         if value != self.high {
             self.high = value;
             fx.emit(Action::SetHigh(value));
@@ -135,14 +158,12 @@ impl Limits {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const S: u64 = 256;
-    const R: u64 = 128;
+    use crate::engine::testing::{BURST, MIB, SERVICE, bytes};
 
     fn limits(total_mem: u64, high: u64, max: u64) -> Limits {
         Limits {
-            service_reserve: S,
-            burst_reserve: NonZeroU64::new(R).unwrap(),
+            service_reserve: SERVICE,
+            burst_reserve: bytes(BURST),
             total_mem,
             ceiling: None,
             high,
@@ -159,63 +180,86 @@ mod tests {
 
     #[test]
     fn a_wider_plug_raises_max_before_high() {
-        let grown = limits(4096, 1664, 1792);
+        let grown = limits(4096 * MIB, 1536 * MIB, 1792 * MIB);
 
         assert_eq!(
             applied(grown, Brake::Engaged),
-            vec![Action::SetMax(3840), Action::SetHigh(3712)]
+            vec![Action::SetMax(3840 * MIB), Action::SetHigh(3584 * MIB)]
         );
     }
 
     #[test]
     fn a_narrower_plug_lowers_high_before_max() {
-        let shrunk = limits(1024, 1664, 1792);
+        let shrunk = limits(1024 * MIB, 1536 * MIB, 1792 * MIB);
 
         assert_eq!(
             applied(shrunk, Brake::Engaged),
-            vec![Action::SetHigh(640), Action::SetMax(768)]
+            vec![Action::SetHigh(512 * MIB), Action::SetMax(768 * MIB)]
         );
     }
 
     #[test]
     fn a_released_brake_puts_high_on_max() {
         assert_eq!(
-            applied(limits(2048, 1664, 1792), Brake::Released),
-            vec![Action::SetHigh(1792)]
+            applied(limits(2048 * MIB, 1536 * MIB, 1792 * MIB), Brake::Released),
+            vec![Action::SetHigh(1792 * MIB)]
         );
     }
 
     #[test]
     fn limits_already_in_place_emit_nothing() {
-        assert_eq!(applied(limits(2048, 1664, 1792), Brake::Engaged), vec![]);
-    }
-
-    #[test]
-    fn the_brake_is_remembered_for_the_next_plug() {
-        let mut limits = limits(2048, 1664, 1792);
-        let mut fx = Effects::default();
-
-        limits.apply(Brake::Released, &mut fx);
-        assert_eq!(limits.brake(), Brake::Released);
-
-        fx.drain();
-        limits.set_total_mem(4096);
-        limits.reapply(&mut fx);
-
         assert_eq!(
-            fx.drain(),
-            vec![Action::SetMax(3840), Action::SetHigh(3840)]
+            applied(limits(2048 * MIB, 1536 * MIB, 1792 * MIB), Brake::Engaged),
+            vec![]
         );
     }
 
     #[test]
-    fn only_a_higher_ceiling_counts_as_raised() {
-        let mut limits = limits(2048, 1664, 1792);
+    fn the_brake_is_remembered_for_the_next_plug() {
+        let mut limits = limits(2048 * MIB, 1536 * MIB, 1792 * MIB);
+        let mut fx = Effects::default();
 
-        assert!(limits.raise_ceiling(4096));
-        assert!(!limits.raise_ceiling(4096));
-        assert!(!limits.raise_ceiling(2048));
-        assert!(limits.raise_ceiling(8192));
-        assert_eq!(limits.ceiling(), Some(8192));
+        limits.apply(Brake::Released, &mut fx);
+        assert!(limits.released());
+
+        fx.drain();
+        limits.set_total_mem(4096 * MIB);
+        limits.reapply(&mut fx);
+
+        assert_eq!(
+            fx.drain(),
+            vec![Action::SetMax(3840 * MIB), Action::SetHigh(3840 * MIB)]
+        );
+    }
+
+    #[test]
+    fn an_engaged_brake_on_an_empty_budget_is_still_engaged() {
+        let mut limits = limits(SERVICE, 0, 0);
+        let mut fx = Effects::default();
+
+        limits.apply(Brake::Engaged, &mut fx);
+
+        assert_eq!(limits.high(), limits.max());
+        assert!(!limits.released());
+    }
+
+    #[test]
+    fn a_new_total_says_which_way_it_moved() {
+        let mut limits = limits(2048 * MIB, 1536 * MIB, 1792 * MIB);
+
+        assert_eq!(limits.set_total_mem(2048 * MIB), Moved::Unchanged);
+        assert_eq!(limits.set_total_mem(2560 * MIB), Moved::Grew);
+        assert_eq!(limits.set_total_mem(2304 * MIB), Moved::Shrank);
+    }
+
+    #[test]
+    fn a_new_ceiling_says_which_way_it_moved() {
+        let mut limits = limits(2048 * MIB, 1536 * MIB, 1792 * MIB);
+
+        assert_eq!(limits.set_ceiling(4096 * MIB), Moved::Grew);
+        assert_eq!(limits.set_ceiling(4096 * MIB), Moved::Unchanged);
+        assert_eq!(limits.set_ceiling(2048 * MIB), Moved::Shrank);
+        assert_eq!(limits.set_ceiling(8192 * MIB), Moved::Grew);
+        assert_eq!(limits.ceiling(), Some(8192 * MIB));
     }
 }

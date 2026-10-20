@@ -3,7 +3,7 @@ use pazari_metrics::{
 };
 use pazari_proto::{GuestMessage, HostMessage};
 
-use crate::engine::{Action, Engine, Event, Phase, Snapshot};
+use crate::engine::{Action, Engine, Event, Phase, PhaseKind, Snapshot};
 
 const PREFIX: &str = "pazari_agent";
 
@@ -86,16 +86,18 @@ impl Observer {
         };
 
         let phase = engine.phase();
-        let name = phase.name();
+        let kind = phase.kind();
 
-        for candidate in Phase::NAMES {
+        for candidate in PhaseKind::ALL {
             series
                 .mode
-                .get_or_create(&ModeLabel { mode: candidate })
-                .set(i64::from(candidate == name));
+                .get_or_create(&ModeLabel {
+                    mode: candidate.name(),
+                })
+                .set(i64::from(candidate == kind));
         }
 
-        if series.was.map(Phase::name) != Some(name) {
+        if series.was.map(Phase::kind) != Some(kind) {
             match phase {
                 Phase::Exhausted(_) => {
                     series.exhaustions.inc();

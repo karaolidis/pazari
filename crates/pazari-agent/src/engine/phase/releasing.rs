@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{num::NonZeroU64, time::Duration};
 
 use pazari_proto::{DenyReason, GuestMessage, ReclaimId, RequestId};
 use pazari_types::Deadline;
@@ -6,7 +6,9 @@ use tracing::debug;
 
 use crate::engine::{
     counters::Pressure,
+    limits::Moved,
     phase::{Phase, State, Step, steady::Steady},
+    refusal::Refusal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,20 +29,29 @@ enum Outcome {
 }
 
 impl Outcome {
-    const fn refusal(self) -> Option<&'static str> {
+    const fn refusal(self) -> Option<Refusal> {
         match self {
             Self::Offered | Self::Ended => None,
-            Self::Spent => Some("the reclaim left nothing the guest can spare"),
-            Self::Braked => Some("the workload throttled before the reclaim landed"),
+            Self::Spent => Some(Refusal::Spent),
+            Self::Braked => Some(Refusal::Braked),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
-    Freeing { bytes: u64, owed: Option<Owed> },
-    Offering { id: RequestId, target: u64 },
-    Settling { target: u64, expires: Deadline },
+    Freeing {
+        bytes: NonZeroU64,
+        owed: Option<Owed>,
+    },
+    Offering {
+        id: RequestId,
+        target: u64,
+    },
+    Settling {
+        target: u64,
+        expires: Deadline,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,14 +60,14 @@ pub struct Releasing {
 }
 
 impl Releasing {
-    pub fn begin(step: &mut Step<'_>, bytes: u64, owed: Option<Owed>) -> Phase {
+    pub fn begin(step: &mut Step<'_>, bytes: NonZeroU64, owed: Option<Owed>) -> Phase {
         let releasing = Self {
             stage: Stage::Freeing { bytes, owed },
         };
 
         let Some(reclaim) = step.world.reclaim_for(bytes) else {
             debug!(
-                bytes,
+                bytes = bytes.get(),
                 free = ?step.guest().free(),
                 "free memory already covers the release",
             );
@@ -65,7 +76,7 @@ impl Releasing {
         };
 
         debug!(
-            bytes,
+            bytes = bytes.get(),
             reclaim = reclaim.get(),
             free = ?step.guest().free(),
             "reclaiming from the workload cgroup",
@@ -95,8 +106,8 @@ impl Releasing {
             return;
         };
 
-        if let Some(reason) = outcome.refusal() {
-            step.nak(owed.0, reason);
+        if let Some(refusal) = outcome.refusal() {
+            step.nak(owed.0, refusal);
         }
     }
 
@@ -116,10 +127,6 @@ impl Releasing {
 impl State for Releasing {
     fn stay(self) -> Phase {
         Phase::Releasing(self)
-    }
-
-    fn busy(self) -> &'static str {
-        "a release is already in progress"
     }
 
     fn brake(self, step: &mut Step<'_>) -> Phase {
@@ -147,13 +154,13 @@ impl State for Releasing {
         }
     }
 
-    fn on_total_changed(self, step: &mut Step<'_>, changed: bool) -> Phase {
+    fn on_total_changed(self, step: &mut Step<'_>, moved: Moved) -> Phase {
         match self.stage {
             Stage::Settling { target, .. } if step.limits().total_mem() <= target => {
                 self.finish(step, Outcome::Offered)
             }
             _ => {
-                if changed {
+                if moved != Moved::Unchanged {
                     step.world.rebrake(step.fx);
                 }
 
@@ -169,7 +176,7 @@ impl State for Releasing {
 
         let expires = Deadline::after(step.now, step.config().settle_grace.get());
 
-        Self::settling(target, expires).on_total_changed(step, false)
+        Self::settling(target, expires).on_total_changed(step, Moved::Unchanged)
     }
 
     fn on_deny(
@@ -186,6 +193,12 @@ impl State for Releasing {
         self.finish(step, Outcome::Offered)
     }
 
+    fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, _desired: u64) -> Phase {
+        step.nak(id, Refusal::Releasing);
+
+        self.stay()
+    }
+
     fn on_reclaim_finished(self, step: &mut Step<'_>, reclaimed: u64) -> Phase {
         let Stage::Freeing { bytes, .. } = self.stage else {
             return self.stay();
@@ -195,14 +208,9 @@ impl State for Releasing {
             return self.finish(step, Outcome::Ended);
         }
 
-        let releasable = step
-            .world
-            .release_budget_after_reclaim(bytes, reclaimed)
-            .unwrap_or(0);
-
-        if releasable == 0 {
+        let Some(releasable) = step.world.release_budget_after_reclaim(bytes, reclaimed) else {
             return self.finish(step, Outcome::Spent);
-        }
+        };
 
         self.answer(step, Outcome::Offered);
 
@@ -212,8 +220,8 @@ impl State for Releasing {
         debug!(
             id = id.get(),
             current,
-            releasable,
-            asked = bytes,
+            releasable = releasable.get(),
+            asked = bytes.get(),
             reclaimed,
             "offering memory back to the host",
         );
@@ -221,13 +229,13 @@ impl State for Releasing {
         step.send(GuestMessage::OfferRelease {
             id,
             current,
-            releasable,
+            releasable: releasable.get(),
         });
 
         Phase::Releasing(Self {
             stage: Stage::Offering {
                 id,
-                target: current.saturating_sub(releasable),
+                target: current.saturating_sub(releasable.get()),
             },
         })
     }

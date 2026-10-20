@@ -16,19 +16,6 @@ pub enum ThrottleMode {
     Reclaim { amount: NonZeroU64 },
 }
 
-impl ThrottleMode {
-    /// How much to reclaim before asking the host, given the guest's slack.
-    #[must_use]
-    pub fn reclaim(self, slack: Option<u64>) -> Option<NonZeroU64> {
-        match self {
-            Self::Grow => None,
-            Self::Reclaim { amount } => slack
-                .is_some_and(|slack| slack >= amount.get())
-                .then_some(amount),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrowConfig {
     Exponential(ExponentialConfig),
@@ -38,6 +25,7 @@ pub enum GrowConfig {
 pub struct ExponentialConfig {
     pub step: NonZeroU64,
     pub escalate_within: Interval,
+    pub cap: NonZeroU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +37,7 @@ pub enum ReleaseConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TitrateConfig {
     pub step: NonZeroU64,
-    pub intervals: NonZeroU32,
+    pub after: NonZeroU32,
     pub cooldown: Delay,
 }
 
@@ -72,11 +60,9 @@ pub struct EngineConfig {
 
     pub deny_backoff: Interval,
     pub settle_grace: Interval,
-    pub recovery_intervals: NonZeroU32,
+    pub recover_after: NonZeroU32,
 
     pub reclaim_swappiness: Option<Swappiness>,
 
     pub exhaustion: ExhaustionMode,
-
-    pub tick_interval: Interval,
 }

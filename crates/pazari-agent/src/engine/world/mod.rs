@@ -6,12 +6,13 @@ use tracing::debug;
 
 use crate::engine::{
     action::Action,
-    config::EngineConfig,
+    config::{EngineConfig, ThrottleMode},
     counters::Pressure,
     effects::Effects,
     event::{BootInfo, Snapshot},
     grow::{Grow, GrowStrategy},
-    limits::{Brake, Limits},
+    limits::{Brake, Limits, Moved},
+    refusal::Refusal,
     release::{Release, ReleaseStrategy},
     streak::Streak,
 };
@@ -36,8 +37,8 @@ impl Guest {
         self.reading
     }
 
-    pub fn usage(self) -> u64 {
-        self.reading.map_or(0, |reading| reading.workload_usage)
+    pub fn usage(self) -> Option<u64> {
+        Some(self.reading?.workload_usage)
     }
 
     pub fn free(self) -> Option<u64> {
@@ -64,50 +65,61 @@ impl Guest {
     }
 }
 
+/// A session with the host, past its handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Link {
-    connected: bool,
-    next_id: RequestId,
+struct Session {
     status_interval: Duration,
     next_status: Option<Deadline>,
 }
 
-impl Link {
-    const fn closed() -> Self {
+impl Session {
+    const fn new(status_interval: Duration) -> Self {
         Self {
-            connected: false,
-            next_id: RequestId(1),
-            status_interval: Duration::ZERO,
+            status_interval,
             next_status: None,
         }
     }
 
-    const fn open(&mut self, status_interval: Duration) {
-        self.connected = true;
-        self.status_interval = status_interval;
-        self.next_status = None;
-        self.next_id = RequestId(1);
-    }
-
-    const fn close(&mut self) {
-        self.connected = false;
-        self.next_status = None;
-    }
-
-    const fn take_id(&mut self) -> RequestId {
-        let id = self.next_id;
-        self.next_id = id.next();
-        id
-    }
-
     fn status_due(&mut self, now: Timestamp) -> bool {
-        if !self.connected || self.next_status.is_some_and(|next| !next.reached(now)) {
+        if self.next_status.is_some_and(|next| !next.reached(now)) {
             return false;
         }
 
         self.next_status = Some(Deadline::after(now, self.status_interval));
 
         true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Link {
+    next_id: RequestId,
+    session: Option<Session>,
+}
+
+impl Link {
+    const fn closed() -> Self {
+        Self {
+            next_id: RequestId(1),
+            session: None,
+        }
+    }
+
+    const fn open(status_interval: Duration) -> Self {
+        Self {
+            session: Some(Session::new(status_interval)),
+            ..Self::closed()
+        }
+    }
+
+    const fn connected(&self) -> bool {
+        self.session.is_some()
+    }
+
+    const fn take_id(&mut self) -> RequestId {
+        let id = self.next_id;
+        self.next_id = id.next();
+        id
     }
 }
 
@@ -120,12 +132,12 @@ enum Reclaim {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct World {
-    pub config: EngineConfig,
+    config: EngineConfig,
     limits: Limits,
     guest: Guest,
     link: Link,
-    pub grow: GrowStrategy,
-    pub release: ReleaseStrategy,
+    grow: GrowStrategy,
+    release: ReleaseStrategy,
     calm: Streak,
     reclaim: Reclaim,
 }
@@ -144,6 +156,10 @@ impl World {
         }
     }
 
+    pub const fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
     pub const fn limits(&self) -> Limits {
         self.limits
     }
@@ -152,8 +168,12 @@ impl World {
         self.guest
     }
 
+    pub const fn grow(&self) -> GrowStrategy {
+        self.grow
+    }
+
     pub const fn connected(&self) -> bool {
-        self.link.connected
+        self.link.connected()
     }
 
     pub const fn take_id(&mut self) -> RequestId {
@@ -161,16 +181,16 @@ impl World {
     }
 
     pub fn send(&self, message: GuestMessage, fx: &mut Effects) {
-        if self.link.connected {
+        if self.link.connected() {
             fx.emit(Action::Send(message));
         }
     }
 
-    pub fn nak(&self, id: ReclaimId, reason: &str, fx: &mut Effects) {
+    pub fn nak(&self, id: ReclaimId, refusal: Refusal, fx: &mut Effects) {
         self.send(
             GuestMessage::ReclaimNak {
                 id,
-                reason: reason.to_owned(),
+                reason: refusal.to_string(),
             },
             fx,
         );
@@ -208,16 +228,23 @@ impl World {
         matches!(self.reclaim, Reclaim::Running)
     }
 
-    pub fn set_high(&mut self, value: u64, fx: &mut Effects) {
-        self.limits.set_high(value, fx);
+    /// How much to reclaim before asking the host, if the guest has it to spare.
+    pub fn throttle_reclaim(&self) -> Option<NonZeroU64> {
+        match self.config.throttle {
+            ThrottleMode::Grow => None,
+            ThrottleMode::Reclaim { amount } => self
+                .slack()
+                .is_some_and(|slack| slack >= amount.get())
+                .then_some(amount),
+        }
     }
 
-    pub const fn set_total_mem(&mut self, total_mem: u64) -> bool {
+    pub const fn set_total_mem(&mut self, total_mem: u64) -> Moved {
         self.limits.set_total_mem(total_mem)
     }
 
-    pub fn raise_ceiling(&mut self, ceiling: u64) -> bool {
-        self.limits.raise_ceiling(ceiling)
+    pub const fn set_ceiling(&mut self, ceiling: u64) -> Moved {
+        self.limits.set_ceiling(ceiling)
     }
 
     pub const fn observe(&mut self, reading: Snapshot) {
@@ -225,13 +252,13 @@ impl World {
     }
 
     pub fn connect(&mut self, status_interval: Duration, hotplugged: u64) {
-        self.link.open(status_interval);
+        self.link = Link::open(status_interval);
         self.grow.reset();
         self.set_hotplugged(hotplugged);
     }
 
     pub const fn disconnect(&mut self) {
-        self.link.close();
+        self.link.session = None;
     }
 
     pub fn set_hotplugged(&mut self, hotplugged: u64) {
@@ -250,7 +277,10 @@ impl World {
     }
 
     pub fn status_due(&mut self, now: Timestamp) -> bool {
-        self.link.status_due(now)
+        self.link
+            .session
+            .as_mut()
+            .is_some_and(|session| session.status_due(now))
     }
 
     pub fn note_interval(&mut self, now: Timestamp, pressure: Pressure) {
@@ -263,9 +293,35 @@ impl World {
         self.release.observe(now, slack, pressure);
     }
 
+    /// The workload hit the brake at `at`.
+    pub fn note_braked(&mut self, at: Timestamp) {
+        self.grow.braked(at);
+    }
+
+    /// A grow has landed.
+    pub fn note_grown(&mut self, now: Timestamp) {
+        self.grow.settled(now);
+    }
+
+    /// The guest settled after a resize, or after an attempt at one.
+    pub fn note_rested(&mut self, now: Timestamp) {
+        self.release.rested(now);
+    }
+
+    /// The workload came back under its ceiling after exhausting it.
+    pub fn note_recovered(&mut self) {
+        self.grow.reset();
+        self.release.recovered();
+    }
+
+    /// How much to give back this interval, if anything.
+    pub fn release_due(&mut self, now: Timestamp, pressure: Pressure) -> Option<NonZeroU64> {
+        self.release.due(now, pressure)
+    }
+
     /// Whether the workload has been calm long enough to end an exhaustion.
     pub const fn calm(&self) -> bool {
-        self.calm.reached(self.config.recovery_intervals)
+        self.calm.reached(self.config.recover_after)
     }
 
     pub fn slack(&self) -> Option<u64> {
@@ -276,19 +332,24 @@ impl World {
         )
     }
 
-    pub fn grow_target(&self) -> Option<u64> {
-        let total_mem = self.limits.total_mem();
-
+    /// How far the workload's usage reaches past the memory the guest has.
+    fn deficit(&self) -> Option<u64> {
         let need = self
             .guest
-            .usage()
+            .usage()?
             .saturating_add(self.limits.service_reserve())
             .saturating_add(self.limits.burst_reserve());
 
-        let deficit = need.saturating_sub(total_mem);
-        let step = deficit.max(self.grow.step().get());
+        Some(need.saturating_sub(self.limits.total_mem()))
+    }
 
-        let mut target = self.guest.round_up(total_mem.saturating_add(step));
+    pub fn grow_target(&self) -> Option<u64> {
+        let total_mem = self.limits.total_mem();
+        let step = self.grow.step().get();
+
+        let reach = self.deficit().map_or(step, |deficit| deficit.max(step));
+
+        let mut target = self.guest.round_up(total_mem.saturating_add(reach));
 
         if let Some(ceiling) = self.limits.ceiling()
             && target > ceiling
@@ -300,7 +361,9 @@ impl World {
     }
 
     /// What a release needs reclaimed beyond free memory.
-    pub fn reclaim_for(&self, bytes: u64) -> Option<NonZeroU64> {
+    pub fn reclaim_for(&self, bytes: NonZeroU64) -> Option<NonZeroU64> {
+        let bytes = bytes.get();
+
         NonZeroU64::new(
             self.guest
                 .free()
@@ -308,15 +371,19 @@ impl World {
         )
     }
 
-    pub fn release_budget(&self, desired: u64) -> Option<u64> {
-        Some(self.budget_for(desired, self.slack()?))
+    pub fn release_budget(&self, desired: u64) -> Option<NonZeroU64> {
+        self.budget_for(desired, self.slack()?)
     }
 
-    pub fn release_budget_after_reclaim(&self, desired: u64, reclaimed: u64) -> Option<u64> {
-        Some(self.budget_for(desired, self.slack()?.saturating_add(reclaimed)))
+    pub fn release_budget_after_reclaim(
+        &self,
+        desired: NonZeroU64,
+        reclaimed: u64,
+    ) -> Option<NonZeroU64> {
+        self.budget_for(desired.get(), self.slack()?.saturating_add(reclaimed))
     }
 
-    fn budget_for(&self, desired: u64, slack: u64) -> u64 {
+    fn budget_for(&self, desired: u64, slack: u64) -> Option<NonZeroU64> {
         let total_mem = self.limits.total_mem();
 
         let floor = self.guest.boot_mem(total_mem).unwrap_or(total_mem).max(
@@ -327,17 +394,15 @@ impl World {
 
         let by_floor = total_mem.saturating_sub(floor);
 
-        self.guest.round_down(desired.min(by_floor).min(slack))
+        NonZeroU64::new(self.guest.round_down(desired.min(by_floor).min(slack)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU64;
-
     use super::*;
     use crate::engine::testing::{
-        BLOCK, BOOT, BURST, CALM, MIB, SERVICE, at, boot, config, snap, snap_available,
+        BLOCK, BOOT, BURST, CALM, MIB, SERVICE, at, boot, bytes, config, snap, snap_available,
     };
 
     fn world() -> World {
@@ -367,8 +432,8 @@ mod tests {
         let mut world = world();
         world.observe(snap(BOOT, CALM, 0));
 
-        world.grow.settled(at(100));
-        world.grow.braked(at(101));
+        world.note_grown(at(100));
+        world.note_braked(at(101));
 
         assert_eq!(world.grow_target(), Some(3072 * MIB));
     }
@@ -378,8 +443,8 @@ mod tests {
         let mut world = world();
         world.observe(snap(BOOT, CALM, 0));
 
-        world.grow.settled(at(100));
-        world.grow.braked(at(101));
+        world.note_grown(at(100));
+        world.note_braked(at(101));
         world.connect(Duration::ZERO, 0);
 
         assert_eq!(world.grow_target(), Some(2560 * MIB));
@@ -399,7 +464,7 @@ mod tests {
     fn a_grow_target_is_clamped_and_aligned_under_the_ceiling() {
         let mut world = world();
         world.observe(snap(BOOT, CALM, 0));
-        world.raise_ceiling(2200 * MIB);
+        world.set_ceiling(2200 * MIB);
 
         assert_eq!(world.grow_target(), Some(2176 * MIB));
     }
@@ -408,7 +473,7 @@ mod tests {
     fn a_grow_target_runs_out_at_a_ceiling_on_the_plug() {
         let mut world = world();
         world.observe(snap(BOOT, CALM, 0));
-        world.raise_ceiling(BOOT);
+        world.set_ceiling(BOOT);
 
         assert_eq!(world.grow_target(), None);
     }
@@ -420,7 +485,7 @@ mod tests {
         assert_eq!(world.slack(), None);
         assert_eq!(world.release_budget(u64::MAX), None);
         assert_eq!(
-            world.release_budget_after_reclaim(u64::MAX, 256 * MIB),
+            world.release_budget_after_reclaim(bytes(u64::MAX), 256 * MIB),
             None
         );
     }
@@ -431,16 +496,16 @@ mod tests {
         world.observe(snap(BOOT, CALM, 0));
         world.connect(Duration::ZERO, 0);
 
-        assert_eq!(world.release_budget(256 * MIB), Some(0));
+        assert_eq!(world.release_budget(256 * MIB), None);
     }
 
     #[test]
     fn a_release_budget_gives_back_what_the_floor_allows() {
         let world = grown(CALM);
 
-        assert_eq!(world.release_budget(256 * MIB), Some(256 * MIB));
+        assert_eq!(world.release_budget(256 * MIB), Some(bytes(256 * MIB)));
         // 2560 total_mem against a 2048 floor leaves 512, whatever was asked for.
-        assert_eq!(world.release_budget(1024 * MIB), Some(512 * MIB));
+        assert_eq!(world.release_budget(1024 * MIB), Some(bytes(512 * MIB)));
     }
 
     #[test]
@@ -451,10 +516,10 @@ mod tests {
         world.connect(Duration::ZERO, 512 * MIB);
 
         world.observe(snap_available(2560 * MIB, 1200 * MIB, 640 * MIB, 0));
-        assert_eq!(world.release_budget(512 * MIB), Some(128 * MIB));
+        assert_eq!(world.release_budget(512 * MIB), Some(bytes(128 * MIB)));
 
         world.observe(snap_available(2560 * MIB, 0, 512 * MIB, 0));
-        assert_eq!(world.release_budget(512 * MIB), Some(0));
+        assert_eq!(world.release_budget(512 * MIB), None);
     }
 
     #[test]
@@ -465,17 +530,17 @@ mod tests {
         world.connect(Duration::ZERO, 512 * MIB);
         world.observe(snap_available(2560 * MIB, 2000 * MIB, 512 * MIB, 0));
 
-        assert_eq!(world.release_budget(512 * MIB), Some(0));
+        assert_eq!(world.release_budget(512 * MIB), None);
         assert_eq!(
-            world.release_budget_after_reclaim(512 * MIB, 256 * MIB),
-            Some(256 * MIB)
+            world.release_budget_after_reclaim(bytes(512 * MIB), 256 * MIB),
+            Some(bytes(256 * MIB))
         );
     }
 
     #[test]
     fn a_release_budget_leaves_a_block_of_band() {
         let boot = BootInfo {
-            block_size: NonZeroU64::new(BLOCK).expect("a positive byte count"),
+            block_size: bytes(BLOCK),
             total_mem: 4096 * MIB,
         };
 
@@ -484,7 +549,10 @@ mod tests {
         world.observe(snap(4096 * MIB, 0, 0));
         world.connect(Duration::ZERO, 4096 * MIB - 128 * MIB);
 
-        let given = world.release_budget(u64::MAX).expect("a reading");
+        let given = world
+            .release_budget(u64::MAX)
+            .expect("a block to give")
+            .get();
         let left = 4096 * MIB - given;
 
         assert_eq!(left, SERVICE + BURST + BLOCK);
@@ -495,7 +563,7 @@ mod tests {
     fn a_release_budget_lands_on_a_block_boundary() {
         let world = grown(CALM);
 
-        assert_eq!(world.release_budget(200 * MIB), Some(128 * MIB));
+        assert_eq!(world.release_budget(200 * MIB), Some(bytes(128 * MIB)));
     }
 
     #[test]

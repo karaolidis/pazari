@@ -7,6 +7,7 @@ use tracing::debug;
 use crate::engine::{
     Engine,
     effects::Effects,
+    limits::Moved,
     phase::{Phase, State, Step},
 };
 
@@ -40,7 +41,7 @@ impl Engine {
         ceiling: u64,
         fx: &mut Effects,
     ) -> bool {
-        if !self.world.raise_ceiling(ceiling) {
+        if self.world.set_ceiling(ceiling) != Moved::Grew {
             return false;
         }
 
@@ -65,13 +66,16 @@ impl Engine {
         true
     }
 
+    /// Sends a status once one is due, from the first reading on.
     pub(in crate::engine) fn emit_status(&mut self, now: Timestamp, fx: &mut Effects) {
+        let (Some(reading), Some(counters)) = (self.world.guest().reading(), self.counters.seen())
+        else {
+            return;
+        };
+
         if !self.world.status_due(now) {
             return;
         }
-
-        let counters = self.counters.seen();
-        let reading = self.world.guest().reading().unwrap_or_default();
 
         self.world.send(
             GuestMessage::Status(Status {

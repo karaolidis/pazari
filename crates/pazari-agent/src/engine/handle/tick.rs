@@ -3,7 +3,7 @@ use tracing::{debug, warn};
 
 use crate::engine::{
     Engine,
-    counters::Events,
+    counters::{Events, Source},
     effects::Effects,
     event::Snapshot,
     phase::{Phase, State},
@@ -18,7 +18,7 @@ impl Engine {
     ) {
         let events = self
             .counters
-            .observe(snapshot.high_events, snapshot.max_events, false);
+            .observe(snapshot.high_events, snapshot.max_events, Source::Tick);
 
         self.world.observe(snapshot);
 
@@ -46,7 +46,7 @@ impl Engine {
         max_events: u64,
         fx: &mut Effects,
     ) {
-        let events = self.counters.observe(high_events, max_events, true);
+        let events = self.counters.observe(high_events, max_events, Source::Wake);
 
         self.note_breaches(events);
 
@@ -63,7 +63,7 @@ impl Engine {
         warn!(
             breaches = breaches.get(),
             available = ?self.world.guest().available(),
-            usage = self.world.guest().usage(),
+            usage = ?self.world.guest().usage(),
             memory_max = self.world.limits().max(),
             total_mem = self.world.limits().total_mem(),
             phase = %self.phase,
@@ -73,7 +73,7 @@ impl Engine {
 
     fn brake(&mut self, now: Timestamp, fx: &mut Effects) {
         debug!(
-            usage = self.world.guest().usage(),
+            usage = ?self.world.guest().usage(),
             high = self.world.limits().high(),
             total_mem = self.world.limits().total_mem(),
             released = self.world.limits().released(),

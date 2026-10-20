@@ -77,28 +77,31 @@ swappiness = 0
 #     kind = "grow"
 # - Reclaim from the workload before asking the host.
 #     kind = "reclaim"
-#     # How much one reclaim frees.
+#     # How much one reclaim asks for.
 #     amount = "256MiB"
 kind = "grow"
 
 # How much more memory each request asks the host for.
 [grow]
 # Possible variants:
-# - One step at first, doubled for each brake that follows soon after the
-#   last grow.
+# - One step at first. Each brake that follows soon after the last grow
+#   doubles it, up to `cap` steps.
 #     kind = "exponential"
 #     # The first request, and the unit later ones are multiples of.
 #     step = "512MiB"
 #
 #     # How soon after a grow a brake still doubles the next request.
 #     escalate_within = "10s"
+#
+#     # The most steps one request asks for.
+#     cap = 64
 kind = "exponential"
 
 # When the guest gives memory back to the host, and how much.
 [release]
 # Possible variants:
-# - One fixed step at a time, once the guest has held it spare for a run of
-#   calm intervals and the last resize has cooled off.
+# - One fixed step at a time. The guest must hold the step spare for a run
+#   of calm intervals. The last resize must have cooled off.
 #     kind = "titrate"
 #     # How much one release gives back.
 #     step = "256MiB"

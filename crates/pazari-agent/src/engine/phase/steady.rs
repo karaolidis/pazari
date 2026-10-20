@@ -3,13 +3,12 @@ use tracing::debug;
 
 use crate::engine::{
     counters::Pressure,
-    grow::Grow,
     limits::Brake,
     phase::{
         Phase, State, Step,
         releasing::{Owed, Releasing},
     },
-    release::Release,
+    refusal::Refusal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,13 +20,13 @@ impl Steady {
     }
 
     pub fn settled(step: &mut Step<'_>) -> Phase {
-        step.world.grow.settled(step.now);
+        step.world.note_grown(step.now);
 
         Self::released(step)
     }
 
     pub fn released(step: &mut Step<'_>) -> Phase {
-        step.world.release.rested(step.now);
+        step.world.note_rested(step.now);
 
         Self::enter(step)
     }
@@ -37,8 +36,7 @@ impl Steady {
     }
 
     pub fn recovered(step: &mut Step<'_>) -> Phase {
-        step.world.grow.reset();
-        step.world.release.recovered();
+        step.world.note_recovered();
 
         Self::enter(step)
     }
@@ -55,10 +53,6 @@ impl State for Steady {
         Phase::Steady(self)
     }
 
-    fn busy(self) -> &'static str {
-        "no headroom to release without inducing pressure"
-    }
-
     fn brake(self, step: &mut Step<'_>) -> Phase {
         Phase::braked(step)
     }
@@ -69,35 +63,38 @@ impl State for Steady {
 
     fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, desired: u64) -> Phase {
         if step.world.reclaiming() {
-            step.nak(id, "a reclaim has yet to report");
+            step.nak(id, Refusal::ReclaimPending);
 
             return self.stay();
         }
 
-        let will_release = step.world.release_budget(desired).unwrap_or(0);
+        let will_release = step.world.release_budget(desired);
 
         debug!(
             %id,
             desired,
-            will_release,
-            usage = step.guest().usage(),
+            ?will_release,
+            usage = ?step.guest().usage(),
             total_mem = step.limits().total_mem(),
             "answering the host's reclaim request",
         );
 
-        if will_release == 0 {
-            step.nak(id, self.busy());
+        let Some(will_release) = will_release else {
+            step.nak(id, Refusal::NoHeadroom);
 
             return self.stay();
-        }
+        };
 
-        step.send(GuestMessage::ReclaimAck { id, will_release });
+        step.send(GuestMessage::ReclaimAck {
+            id,
+            will_release: will_release.get(),
+        });
 
         Releasing::begin(step, will_release, Some(Owed::new(id)))
     }
 
     fn on_interval(self, step: &mut Step<'_>, pressure: Pressure) -> Phase {
-        let Some(desired) = step.world.release.due(step.now, pressure) else {
+        let Some(desired) = step.world.release_due(step.now, pressure) else {
             return self.stay();
         };
 
@@ -105,23 +102,21 @@ impl State for Steady {
             return self.stay();
         }
 
-        let bytes = step.world.release_budget(desired.get()).unwrap_or(0);
-
-        if bytes == 0 {
+        let Some(bytes) = step.world.release_budget(desired.get()) else {
             debug!(
                 available = ?step.guest().available(),
-                usage = step.guest().usage(),
+                usage = ?step.guest().usage(),
                 total_mem = step.limits().total_mem(),
                 "slack has held, but no headroom to release",
             );
 
             return self.stay();
-        }
+        };
 
         debug!(
-            bytes,
+            bytes = bytes.get(),
             available = ?step.guest().available(),
-            usage = step.guest().usage(),
+            usage = ?step.guest().usage(),
             total_mem = step.limits().total_mem(),
             "guest has held reclaimable memory long enough to shrink",
         );

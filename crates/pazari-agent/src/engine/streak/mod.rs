@@ -24,10 +24,7 @@ impl Streak {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn intervals(value: u32) -> NonZeroU32 {
-        NonZeroU32::new(value).unwrap()
-    }
+    use crate::engine::testing::count;
 
     #[test]
     fn a_streak_has_to_reach_the_configured_length() {
@@ -36,7 +33,7 @@ mod tests {
         for expected in [false, false, true, true] {
             streak = streak.then(true);
 
-            assert_eq!(streak.reached(intervals(3)), expected);
+            assert_eq!(streak.reached(count(3)), expected);
         }
     }
 
@@ -45,6 +42,6 @@ mod tests {
         let streak = Streak::BROKEN.then(true).then(true).then(false);
 
         assert_eq!(streak, Streak::BROKEN);
-        assert!(!streak.then(true).reached(intervals(3)));
+        assert!(!streak.then(true).reached(count(3)));
     }
 }

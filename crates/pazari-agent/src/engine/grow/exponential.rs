@@ -4,8 +4,8 @@ use pazari_types::{Deadline, Scale, Timestamp};
 
 use crate::engine::{config::ExponentialConfig, grow::Grow};
 
-/// One step at first, doubled for each brake that follows soon after the
-/// last grow, up to a cap.
+/// One step at first. Each brake that follows soon after the last grow doubles
+/// it, up to `cap` steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Exponential {
     config: ExponentialConfig,
@@ -14,12 +14,10 @@ pub struct Exponential {
 }
 
 impl Exponential {
-    const CAP: NonZeroU64 = NonZeroU64::new(64).expect("the cap is not zero");
-
     pub const fn new(config: ExponentialConfig) -> Self {
         Self {
             config,
-            scale: Scale::new(Self::CAP),
+            scale: Scale::new(config.cap),
             escalate_until: None,
         }
     }
@@ -49,23 +47,18 @@ impl Grow for Exponential {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use pazari_types::Interval;
-
     use super::*;
+    use crate::engine::testing::{MIB, at, bytes, interval};
 
-    const MIB: u64 = 1 << 20;
-
-    const START: Timestamp = Timestamp::from_millis(0);
-    const INSIDE: Timestamp = Timestamp::from_millis(5_000);
-    const OUTSIDE: Timestamp = Timestamp::from_millis(15_000);
+    const START: Timestamp = at(0);
+    const INSIDE: Timestamp = at(5);
+    const OUTSIDE: Timestamp = at(15);
 
     fn exponential() -> Exponential {
         Exponential::new(ExponentialConfig {
-            step: NonZeroU64::new(512 * MIB).expect("a positive step"),
-            escalate_within: Interval::try_new(Duration::from_secs(10))
-                .expect("a positive interval"),
+            step: bytes(512 * MIB),
+            escalate_within: interval(10),
+            cap: bytes(64),
         })
     }
 
@@ -76,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn escalation_stops_at_sixty_four_steps() {
+    fn escalation_stops_at_the_cap() {
         let mut grow = settled();
 
         for _ in 0..8 {
@@ -86,6 +79,22 @@ mod tests {
         grow.braked(INSIDE);
 
         assert_eq!(grow.step().get(), 64 * 512 * MIB);
+    }
+
+    #[test]
+    fn a_smaller_cap_stops_escalation_sooner() {
+        let mut grow = Exponential::new(ExponentialConfig {
+            cap: bytes(4),
+            ..exponential().config
+        });
+        grow.settled(START);
+
+        for _ in 0..4 {
+            grow.braked(INSIDE);
+            grow.settled(INSIDE);
+        }
+
+        assert_eq!(grow.step().get(), 4 * 512 * MIB);
     }
 
     #[test]

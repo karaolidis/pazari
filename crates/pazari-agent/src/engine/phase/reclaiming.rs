@@ -1,13 +1,17 @@
 use std::num::NonZeroU64;
 
+use pazari_proto::ReclaimId;
 use pazari_types::Timestamp;
 use tracing::debug;
 
-use crate::engine::phase::{Phase, State, Step, growing::Growing, steady::Steady};
+use crate::engine::{
+    phase::{Phase, State, Step, growing::Growing, steady::Steady},
+    refusal::Refusal,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
-    /// Waiting for a reclaim already running, whose bytes count towards
+    /// Waiting for a reclaim already running. What it frees counts towards
     /// `wanted`.
     Waiting {
         wanted: NonZeroU64,
@@ -41,7 +45,7 @@ impl Reclaiming {
         debug!(
             amount = amount.get(),
             slack = ?step.world.slack(),
-            usage = step.guest().usage(),
+            usage = ?step.guest().usage(),
             "reclaiming from the workload before asking the host",
         );
 
@@ -59,15 +63,17 @@ impl State for Reclaiming {
         Phase::Reclaiming(self)
     }
 
-    fn busy(self) -> &'static str {
-        "the workload is reclaiming to make room"
-    }
-
     fn brake(self, _step: &mut Step<'_>) -> Phase {
         self.stay()
     }
 
     fn resume(self, _step: &mut Step<'_>) -> Phase {
+        self.stay()
+    }
+
+    fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, _desired: u64) -> Phase {
+        step.nak(id, Refusal::Reclaiming);
+
         self.stay()
     }
 
@@ -78,7 +84,7 @@ impl State for Reclaiming {
                     return Steady::made_room(step);
                 };
 
-                if step.config().throttle.reclaim(step.world.slack()).is_none() {
+                if step.world.throttle_reclaim().is_none() {
                     return Growing::braked_at(step, self.braked);
                 }
 

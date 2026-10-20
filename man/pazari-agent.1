@@ -151,13 +151,14 @@ in
 .Bl -tag -width "stall"
 .It Cm stall
 The brake stays on and the workload runs throttled.
-The agent keeps retrying for the configured timeout.
+Until the timeout, the agent asks again after each refusal, unless the workload
+is calm.
 If no memory has arrived by then, it raises
 .Va memory.high
 to
 .Va memory.max
-and stops retrying; the kernel's OOM killer then acts in the cgroup once the
-workload reaches
+and stops asking.
+The kernel's OOM killer then acts in the cgroup once the workload reaches
 .Va memory.max .
 .It Cm kill
 The agent raises
@@ -184,15 +185,13 @@ rises for any reason;
 .It
 the workload stays calm for
 .Cm exhaustion.recover_after
-ticks;
+ticks; or
 .It
-the connection to the host is re-established; or
-.It
-during a stall, a retry finds room under the ceiling.
+a retry finds room under the ceiling.
 .El
 .Pp
-After a stall has timed out, the agent no longer retries, so only the first four
-apply.
+Besides the retries during a stall, the agent retries once each time the
+connection to the host is re-established.
 .Ss Connection to the host
 The agent connects to
 .Xr pazarid 1

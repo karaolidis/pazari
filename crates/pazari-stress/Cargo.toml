@@ -1,11 +1,9 @@
 [package]
 name = "pazari-stress"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Deterministic memory workload generator"
-authors = [
-    "Nikolaos Karaolidis <nick@karaolidis.com>",
-]
+authors.workspace = true
 
 [lints]
 workspace = true
@@ -15,20 +13,20 @@ name = "pazari-stress"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.104"
-bytesize = "2.7.0"
-clap = { version = "4.6.7", features = ["derive"] }
-humantime = "2.4.0"
-libc = "0.2.189"
-pazari-systemd = { path = "../pazari-systemd" }
-pazari-types = { path = "../pazari-types" }
-rustix = { version = "1.1.5", features = ["mm", "param"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-serde_with = { version = "3.23.0", default-features = false, features = ["macros", "std"] }
-signal-hook = { version = "0.4.4", default-features = false }
-thiserror = "2.0.20"
-tracing = "0.1.44"
+anyhow.workspace = true
+bytesize.workspace = true
+clap = { workspace = true, features = ["derive"] }
+humantime.workspace = true
+libc.workspace = true
+pazari-systemd.workspace = true
+pazari-types.workspace = true
+rustix = { workspace = true, features = ["mm", "param"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+serde_with = { workspace = true, features = ["macros", "std"] }
+signal-hook.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile.workspace = true

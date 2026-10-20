@@ -6,7 +6,7 @@
   symlinkJoin,
 }:
 let
-  version = "0.1.0";
+  inherit ((lib.importTOML ../Cargo.toml).workspace.package) version;
 
   unwrapped = rustPlatform.buildRustPackage {
     pname = "pazari-unwrapped";

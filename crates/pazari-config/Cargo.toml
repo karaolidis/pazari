@@ -1,18 +1,16 @@
 [package]
 name = "pazari-config"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Configuration loading shared by the pazari binaries"
-authors = [
-    "Nikolaos Karaolidis <nick@karaolidis.com>",
-]
+authors.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
-doku = "0.21.2"
-pazari-types = { path = "../pazari-types" }
-serde = { version = "1.0.229", features = ["derive"] }
-thiserror = "2.0.20"
-toml = "1.1.6"
+doku.workspace = true
+pazari-types.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+toml.workspace = true

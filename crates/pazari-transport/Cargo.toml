@@ -1,21 +1,19 @@
 [package]
 name = "pazari-transport"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Transport abstractions and adapters for pazari"
-authors = [
-    "Nikolaos Karaolidis <nick@karaolidis.com>",
-]
+authors.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
-pazari-proto = { path = "../pazari-proto" }
-serde = "1.0.229"
-thiserror = "2.0.20"
-tokio = { version = "1.53.1", default-features = false, features = ["net", "io-util", "rt"] }
-tokio-vsock = "0.7.2"
+pazari-proto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync"] }
+tokio-vsock.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1.53.1", default-features = false, features = ["macros", "rt-multi-thread", "time", "net", "io-util", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "io-util", "rt"] }

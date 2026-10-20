@@ -1,11 +1,9 @@
 [package]
 name = "pazari-agent"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "pazari guest agent"
-authors = [
-    "Nikolaos Karaolidis <nick@karaolidis.com>",
-]
+authors.workspace = true
 
 [lints]
 workspace = true
@@ -15,28 +13,27 @@ name = "pazari-agent"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.104"
-bytesize = { version = "2.7.0", features = ["serde"] }
-clap = { version = "4.6.7", features = ["derive"] }
-doku = "0.21.2"
-enum_dispatch = "0.3.13"
-humantime-serde = "1.1.1"
-pazari-config = { path = "../pazari-config" }
-pazari-metrics = { path = "../pazari-metrics" }
-pazari-proto = { path = "../pazari-proto" }
-pazari-systemd = { path = "../pazari-systemd" }
-pazari-transport = { path = "../pazari-transport" }
-pazari-types = { path = "../pazari-types" }
-rustix = { version = "1.1.5", features = ["net"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde-inline-default = "1.0.2"
-thiserror = "2.0.20"
-tokio = { version = "1.53.1", default-features = false, features = ["rt", "time", "sync", "net", "fs", "io-util", "macros", "signal"] }
-toml = "1.1.6"
-tracing = "0.1.44"
-zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
+anyhow.workspace = true
+bytesize = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["derive"] }
+doku.workspace = true
+enum_dispatch.workspace = true
+humantime-serde.workspace = true
+pazari-config.workspace = true
+pazari-metrics.workspace = true
+pazari-proto.workspace = true
+pazari-systemd.workspace = true
+pazari-transport.workspace = true
+pazari-types.workspace = true
+rustix = { workspace = true, features = ["net"] }
+serde = { workspace = true, features = ["derive"] }
+serde-inline-default.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "sync", "net", "fs", "io-util", "macros", "signal"] }
+tracing.workspace = true
+zbus = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
-proptest = "1.11.0"
-tempfile = "3.27.0"
-tokio = { version = "1.53.1", default-features = false, features = ["rt", "time", "sync", "net", "fs", "io-util", "macros", "rt-multi-thread"] }
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "sync", "net", "fs", "io-util", "macros", "rt-multi-thread"] }

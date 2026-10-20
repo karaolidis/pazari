@@ -7,7 +7,6 @@ use crate::engine::{
     limits::Brake,
     phase::{
         Phase, State, Step,
-        growing::Growing,
         releasing::{Owed, Releasing},
     },
     release::Release,
@@ -30,6 +29,10 @@ impl Steady {
     pub fn released(step: &mut Step<'_>) -> Phase {
         step.world.release.rested(step.now);
 
+        Self::enter(step)
+    }
+
+    pub fn made_room(step: &mut Step<'_>) -> Phase {
         Self::enter(step)
     }
 
@@ -57,7 +60,7 @@ impl State for Steady {
     }
 
     fn brake(self, step: &mut Step<'_>) -> Phase {
-        Growing::braked(step)
+        Phase::braked(step)
     }
 
     fn resume(self, _step: &mut Step<'_>) -> Phase {
@@ -65,6 +68,12 @@ impl State for Steady {
     }
 
     fn on_reclaim_request(self, step: &mut Step<'_>, id: u64, desired: u64) -> Phase {
+        if step.world.reclaiming() {
+            step.nak(id, "a reclaim has yet to report");
+
+            return self.stay();
+        }
+
         let will_release = step.world.release_budget(desired).unwrap_or(0);
 
         debug!(
@@ -92,7 +101,7 @@ impl State for Steady {
             return self.stay();
         };
 
-        if !step.world.connected() {
+        if !step.world.connected() || step.world.reclaiming() {
             return self.stay();
         }
 

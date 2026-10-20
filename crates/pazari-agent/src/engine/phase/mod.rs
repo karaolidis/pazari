@@ -1,5 +1,6 @@
 mod exhausted;
 mod growing;
+mod reclaiming;
 mod releasing;
 mod steady;
 
@@ -10,7 +11,8 @@ use pazari_proto::{DenyReason, GuestMessage};
 use pazari_types::Timestamp;
 
 pub use crate::engine::phase::{
-    exhausted::Exhausted, growing::Growing, releasing::Releasing, steady::Steady,
+    exhausted::Exhausted, growing::Growing, reclaiming::Reclaiming, releasing::Releasing,
+    steady::Steady,
 };
 use crate::engine::{
     action::Action,
@@ -126,12 +128,19 @@ pub trait State: Copy {
 pub enum Phase {
     Steady(Steady),
     Growing(Growing),
+    Reclaiming(Reclaiming),
     Releasing(Releasing),
     Exhausted(Exhausted),
 }
 
 impl Phase {
-    pub const NAMES: [&'static str; 4] = ["steady", "awaiting_grant", "releasing", "exhausted"];
+    pub const NAMES: [&'static str; 5] = [
+        "steady",
+        "awaiting_grant",
+        "reclaiming",
+        "releasing",
+        "exhausted",
+    ];
 
     #[must_use]
     pub const fn start() -> Self {
@@ -143,9 +152,23 @@ impl Phase {
         match self {
             Self::Steady(_) => "steady",
             Self::Growing(_) => "awaiting_grant",
+            Self::Reclaiming(_) => "reclaiming",
             Self::Releasing(_) => "releasing",
             Self::Exhausted(_) => "exhausted",
         }
+    }
+
+    /// Answers the workload hitting the brake.
+    pub fn braked(step: &mut Step<'_>) -> Self {
+        let Some(amount) = step.config().throttle.reclaim(step.world.slack()) else {
+            return Growing::braked(step);
+        };
+
+        if step.world.reclaiming() {
+            return Reclaiming::waiting(step, amount);
+        }
+
+        Reclaiming::begin(step, amount)
     }
 
     #[must_use]

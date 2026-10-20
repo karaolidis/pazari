@@ -25,7 +25,7 @@ use crate::{
     config::Config,
     engine::{
         EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, SweepConfig,
-        TitrateConfig,
+        ThrottleMode, TitrateConfig,
     },
     runtime::{Backend, RuntimeConfig},
     session::SessionConfig,
@@ -33,6 +33,8 @@ use crate::{
 
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const RECOVERY_INTERVALS: u32 = 3;
+
+const THROTTLE_RECLAIM: ByteSize = ByteSize::mib(256);
 
 const GROW_STEP: ByteSize = ByteSize::mib(512);
 const ESCALATE_WITHIN: Duration = Duration::from_secs(10);
@@ -130,6 +132,11 @@ pub struct EngineSection {
     #[doku(example = "kind = \"stall\"")]
     exhaustion: ExhaustionSection,
 
+    /// What the agent does when the workload throttles at `memory.high`.
+    #[serde_inline_default(ThrottleSection::Grow {})]
+    #[doku(example = "kind = \"grow\"")]
+    throttle: ThrottleSection,
+
     /// How much more memory each request asks the host for.
     #[serde_inline_default(GrowSection::Exponential {
         step: GROW_STEP,
@@ -155,6 +162,7 @@ impl EngineSection {
             burst_reserve: NonZeroU64::new(self.burst_reserve.as_u64())
                 .bytes("engine.burst_reserve")?,
 
+            throttle: self.throttle.resolve()?,
             grow: self.grow.resolve()?,
             deny_backoff: Interval::try_new(self.deny_backoff).at("engine.deny_backoff")?,
             settle_grace: Interval::try_new(self.settle_grace).at("engine.settle_grace")?,
@@ -201,6 +209,34 @@ impl ExhaustionSection {
                 timeout: Interval::try_new(timeout).at("engine.exhaustion.timeout")?,
             }),
             Self::Kill {} => Ok(ExhaustionMode::Kill),
+        }
+    }
+}
+
+/// What the agent does when the workload throttles at `memory.high`.
+#[serde_inline_default]
+#[derive(Debug, Deserialize, Document)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ThrottleSection {
+    /// Ask the host for more at once.
+    Grow {},
+
+    /// Reclaim from the workload before asking the host.
+    Reclaim {
+        /// How much one reclaim frees.
+        #[serde_inline_default(THROTTLE_RECLAIM)]
+        #[doku(as = "String", example = "256MiB")]
+        amount: ByteSize,
+    },
+}
+
+impl ThrottleSection {
+    fn resolve(self) -> Result<ThrottleMode, ConfigError> {
+        match self {
+            Self::Grow {} => Ok(ThrottleMode::Grow),
+            Self::Reclaim { amount } => Ok(ThrottleMode::Reclaim {
+                amount: NonZeroU64::new(amount.as_u64()).bytes("engine.throttle.amount")?,
+            }),
         }
     }
 }

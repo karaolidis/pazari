@@ -28,7 +28,12 @@ pub struct Growing {
 
 impl Growing {
     pub fn braked(step: &mut Step<'_>) -> Phase {
-        step.world.grow.braked(step.now);
+        Self::braked_at(step, step.now)
+    }
+
+    /// Answers a brake the workload hit at `at`.
+    pub fn braked_at(step: &mut Step<'_>, at: Timestamp) -> Phase {
+        step.world.grow.braked(at);
 
         Self::start(step, None)
     }

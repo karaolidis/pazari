@@ -25,7 +25,7 @@ pub use crate::engine::{
     action::Action,
     config::{
         EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, SweepConfig,
-        TitrateConfig,
+        ThrottleMode, TitrateConfig,
     },
     error::EngineError,
     event::{BootInfo, Event, Snapshot},
@@ -115,6 +115,8 @@ impl Engine {
             } => self.on_throttle_wake(now, high_events, max_events, fx),
             Event::TotalChanged { now, total_mem } => self.on_total_changed(now, total_mem, fx),
             Event::ReclaimFinished { now, reclaimed } => {
+                self.world.reclaim_finished();
+
                 self.transition(now, fx, |phase, step| {
                     phase.on_reclaim_finished(step, reclaimed)
                 });
@@ -194,11 +196,12 @@ mod tests {
     use super::*;
     use crate::engine::testing::*;
 
-    fn properties_config(release: ReleaseConfig) -> EngineConfig {
+    fn properties_config(throttle: ThrottleMode, release: ReleaseConfig) -> EngineConfig {
         EngineConfig {
             exhaustion: ExhaustionMode::Stall {
                 timeout: interval(60),
             },
+            throttle,
             release,
             ..config()
         }
@@ -652,6 +655,15 @@ mod tests {
         ]
     }
 
+    fn throttle() -> impl Strategy<Value = ThrottleMode> {
+        prop_oneof![
+            Just(ThrottleMode::Grow),
+            Just(ThrottleMode::Reclaim {
+                amount: bytes(256 * MIB),
+            }),
+        ]
+    }
+
     fn release() -> impl Strategy<Value = ReleaseConfig> {
         prop_oneof![
             Just(ReleaseConfig::Titrate(titrate())),
@@ -712,6 +724,7 @@ mod tests {
     struct Model {
         connected: bool,
         last_id: u64,
+        reclaiming: bool,
     }
 
     fn check(engine: &Engine, actions: &[Action], model: &mut Model) -> Result<(), TestCaseError> {
@@ -732,6 +745,11 @@ mod tests {
         }
 
         for action in actions {
+            if matches!(action, Action::StartReclaim { .. }) {
+                prop_assert!(!model.reclaiming, "started a reclaim while one was running");
+                model.reclaiming = true;
+            }
+
             let Action::Send(message) = action else {
                 continue;
             };
@@ -766,13 +784,18 @@ mod tests {
         Ok(())
     }
 
-    fn drive(release: ReleaseConfig, timeline: &[(u64, Move)]) -> Result<(), TestCaseError> {
+    fn drive(
+        throttle: ThrottleMode,
+        release: ReleaseConfig,
+        timeline: &[(u64, Move)],
+    ) -> Result<(), TestCaseError> {
         let (mut engine, actions) =
-            Engine::try_new(properties_config(release), boot()).expect("a workable boot");
+            Engine::try_new(properties_config(throttle, release), boot()).expect("a workable boot");
         let mut now = Timestamp::START;
         let mut model = Model {
             connected: false,
             last_id: 0,
+            reclaiming: false,
         };
 
         check(&engine, &actions, &mut model)?;
@@ -808,7 +831,10 @@ mod tests {
                     max_events: 0,
                 },
                 Move::Plug { total_mem } => Event::TotalChanged { now, total_mem },
-                Move::Reclaimed { reclaimed } => Event::ReclaimFinished { now, reclaimed },
+                Move::Reclaimed { reclaimed } => {
+                    model.reclaiming = false;
+                    Event::ReclaimFinished { now, reclaimed }
+                }
                 Move::Connect { ceiling } => {
                     model.connected = true;
                     model.last_id = 0;
@@ -866,10 +892,11 @@ mod tests {
     proptest! {
         #[test]
         fn the_engine_holds_its_invariants_over_arbitrary_event_streams(
+            throttle in throttle(),
             release in release(),
             timeline in timeline(),
         ) {
-            drive(release, &timeline)?;
+            drive(throttle, release, &timeline)?;
         }
     }
 }

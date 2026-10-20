@@ -120,6 +120,13 @@ impl Link {
     }
 }
 
+/// The workload cgroup's one reclaim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reclaim {
+    Idle,
+    Running,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct World {
     pub config: EngineConfig,
@@ -129,6 +136,7 @@ pub struct World {
     pub grow: GrowStrategy,
     pub release: ReleaseStrategy,
     calm: Streak,
+    reclaim: Reclaim,
 }
 
 impl World {
@@ -140,6 +148,7 @@ impl World {
             grow: GrowStrategy::from(config.grow),
             release: ReleaseStrategy::from(config.release),
             calm: Streak::BROKEN,
+            reclaim: Reclaim::Idle,
             config,
         }
     }
@@ -182,6 +191,30 @@ impl World {
 
     pub fn rebrake(&mut self, fx: &mut Effects) {
         self.limits.reapply(fx);
+    }
+
+    pub fn start_reclaim(&mut self, bytes: NonZeroU64, fx: &mut Effects) {
+        fx.emit(Action::StartReclaim {
+            bytes: bytes.get(),
+            swappiness: self.config.reclaim_swappiness,
+        });
+
+        self.reclaim = Reclaim::Running;
+    }
+
+    pub fn cancel_reclaim(&self, fx: &mut Effects) {
+        if self.reclaiming() {
+            fx.emit(Action::CancelReclaim);
+        }
+    }
+
+    pub const fn reclaim_finished(&mut self) {
+        self.reclaim = Reclaim::Idle;
+    }
+
+    /// Whether a reclaim has started and not yet reported.
+    pub const fn reclaiming(&self) -> bool {
+        matches!(self.reclaim, Reclaim::Running)
     }
 
     pub fn set_high(&mut self, value: u64, fx: &mut Effects) {

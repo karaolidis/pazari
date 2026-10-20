@@ -69,7 +69,7 @@ see
 Sizing the two reserves is covered in
 .Xr pazari-agent.toml 5 .
 .Ss Modes
-The agent is always in one of four modes, reported by the
+The agent is always in one of five modes, reported by the
 .Va pazari_agent_mode
 metric.
 .Bl -tag -width "awaiting_grant"
@@ -81,11 +81,25 @@ host.
 A grant request is outstanding, a refused request is waiting to be retried, or
 granted memory has not yet arrived.
 The limits do not move.
+.It Cm reclaiming
+The agent is reclaiming from the workload cgroup before asking the host.
 .It Cm releasing
 The agent is reclaiming memory from the workload cgroup to return to the host.
 .It Cm exhausted
 The guest has reached its ceiling.
 .El
+.Ss Throttles
+When the workload throttles at
+.Va memory.high ,
+the agent asks the host for more.
+With
+.Cm engine.throttle
+set to
+.Cm reclaim ,
+it first reclaims
+.Cm amount
+from the workload cgroup, if the guest has that much to spare.
+It asks the host only if the reclaim falls short.
 .Ss Growing
 A grant request asks for the larger of the step the
 .Cm engine.grow
@@ -334,7 +348,8 @@ Set at startup: to 1 under
 .Cm kind = Qq kill ,
 to 0 otherwise.
 .It Pa <cgroup>/memory.reclaim
-Written to free memory before it is returned to the host.
+Written to free memory before it is returned to the host, and to make room on a
+throttle.
 .El
 .Sh EXIT STATUS
 .Ex -std

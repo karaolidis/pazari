@@ -95,11 +95,25 @@ impl Observer {
                 .set(i64::from(candidate == name));
         }
 
-        if matches!(phase, Phase::Exhausted(_)) && series.was != Some(name) {
-            series.exhaustions.inc();
+        if series.was.map(Phase::name) != Some(name) {
+            match phase {
+                Phase::Exhausted(_) => {
+                    series.exhaustions.inc();
+                }
+                Phase::Reclaiming(_) => {
+                    series.throttle_reclaims.inc();
+                }
+                Phase::Steady(_) | Phase::Growing(_) | Phase::Releasing(_) => {}
+            }
+
+            if matches!(series.was, Some(Phase::Reclaiming(_)))
+                && !matches!(phase, Phase::Steady(_))
+            {
+                series.throttle_reclaim_shortfalls.inc();
+            }
         }
 
-        series.was = Some(name);
+        series.was = Some(phase);
 
         series.limits.high.set_saturating(engine.high());
         series.limits.max.set_saturating(engine.max());
@@ -132,11 +146,13 @@ struct Series {
     reclaims: Counter,
     reclaim_asked: Counter,
     exhaustions: Counter,
+    throttle_reclaims: Counter,
+    throttle_reclaim_shortfalls: Counter,
 
     connections: Counter,
     disconnections: Counter,
 
-    was: Option<&'static str>,
+    was: Option<Phase>,
 }
 
 impl Series {
@@ -191,6 +207,16 @@ impl Series {
             "exhaustions",
             "Times the workload wanted more than the ceiling allows",
             self.exhaustions.clone(),
+        );
+        registry.register(
+            "throttle_reclaims",
+            "Throttles answered by reclaiming",
+            self.throttle_reclaims.clone(),
+        );
+        registry.register(
+            "throttle_reclaim_shortfalls",
+            "Throttle reclaims that fell short",
+            self.throttle_reclaim_shortfalls.clone(),
         );
 
         registry.register(
@@ -307,7 +333,7 @@ mod tests {
     use pazari_types::Swappiness;
 
     use super::*;
-    use crate::engine::testing::*;
+    use crate::engine::{EngineConfig, ThrottleMode, testing::*};
 
     fn carries(registry: &Registry, series: &str) {
         let text = registry.encoded().expect("a registry encodes");
@@ -500,6 +526,40 @@ mod tests {
         observer.refresh(&engine);
 
         carries(&registry, "pazari_agent_exhaustions_total 1");
+    }
+
+    #[test]
+    fn a_throttle_reclaim_and_its_shortfall_are_counted() {
+        let (mut observer, registry) = Observer::new();
+        let mut engine = started_with(
+            EngineConfig {
+                throttle: ThrottleMode::Reclaim {
+                    amount: bytes(256 * MIB),
+                },
+                ..config()
+            },
+            CEILING,
+        );
+
+        observer.refresh(&engine);
+        wake(&mut engine, at(100), 1);
+        observer.refresh(&engine);
+
+        carries(&registry, "pazari_agent_mode{mode=\"reclaiming\"} 1");
+        carries(&registry, "pazari_agent_throttle_reclaims_total 1");
+        carries(
+            &registry,
+            "pazari_agent_throttle_reclaim_shortfalls_total 0",
+        );
+
+        reclaimed(&mut engine, at(101), 0);
+        observer.refresh(&engine);
+
+        carries(&registry, "pazari_agent_mode{mode=\"awaiting_grant\"} 1");
+        carries(
+            &registry,
+            "pazari_agent_throttle_reclaim_shortfalls_total 1",
+        );
     }
 
     #[test]

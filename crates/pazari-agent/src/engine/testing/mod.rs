@@ -8,7 +8,7 @@ use pazari_types::{Delay, Interval, Swappiness, Timestamp};
 
 use crate::engine::{
     Action, BootInfo, Engine, EngineConfig, Event, ExhaustionMode, ExponentialConfig, GrowConfig,
-    Phase, ReleaseConfig, Snapshot, SweepConfig, TitrateConfig,
+    Phase, ReleaseConfig, Snapshot, SweepConfig, ThrottleMode, TitrateConfig,
 };
 
 pub const MIB: u64 = 1 << 20;
@@ -64,6 +64,7 @@ pub fn config() -> EngineConfig {
     EngineConfig {
         service_reserve: SERVICE,
         burst_reserve: bytes(BURST),
+        throttle: ThrottleMode::Grow,
         grow: GrowConfig::Exponential(ExponentialConfig {
             step: bytes(512 * MIB),
             escalate_within: interval(10),
@@ -143,6 +144,10 @@ pub fn wake(engine: &mut Engine, now: Timestamp, high_events: u64) -> Vec<Action
     })
 }
 
+pub fn reclaimed(engine: &mut Engine, now: Timestamp, reclaimed: u64) -> Vec<Action> {
+    engine.handle(Event::ReclaimFinished { now, reclaimed })
+}
+
 pub fn host(engine: &mut Engine, now: Timestamp, message: HostMessage) -> Vec<Action> {
     engine.handle(Event::Host { now, message })
 }
@@ -153,6 +158,13 @@ pub const fn request(id: u64, current: u64, target: u64) -> Action {
         current,
         target,
     })
+}
+
+pub const fn reclaim(bytes: u64) -> Action {
+    Action::StartReclaim {
+        bytes,
+        swappiness: Some(Swappiness::NONE),
+    }
 }
 
 pub const fn deny(id: u64) -> HostMessage {
@@ -232,4 +244,16 @@ pub fn grown(engine: &mut Engine) {
         ),
         vec![]
     );
+}
+
+/// Grows the engine and holds it calm until its release's reclaim is running.
+pub fn releasing(engine: &mut Engine) {
+    tick(engine, at(99), snap(BOOT, STALLED, 0));
+    grown(engine);
+
+    for second in 140..=143 {
+        tick(engine, at(second), snap(2560 * MIB, CALM, 1));
+    }
+
+    assert!(matches!(engine.phase(), Phase::Releasing(_)));
 }

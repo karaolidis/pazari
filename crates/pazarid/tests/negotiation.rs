@@ -11,7 +11,8 @@ use std::{
 use pazari_agent::{
     engine::{
         Action as GuestAction, BootInfo, Engine, EngineConfig, Event as GuestEvent, ExhaustionMode,
-        ExponentialConfig, GrowConfig, Phase as GuestPhase, ReleaseConfig, Snapshot, TitrateConfig,
+        ExponentialConfig, GrowConfig, Phase as GuestPhase, ReleaseConfig, Snapshot, ThrottleMode,
+        TitrateConfig,
     },
     session::{Geometry, Outbound, Session, SessionConfig},
 };
@@ -114,6 +115,7 @@ fn engine_config() -> EngineConfig {
     EngineConfig {
         service_reserve: SERVICE,
         burst_reserve: bytes(BURST),
+        throttle: ThrottleMode::Grow,
         grow: GrowConfig::Exponential(ExponentialConfig {
             step: bytes(512 * MIB),
             escalate_within: patient(),

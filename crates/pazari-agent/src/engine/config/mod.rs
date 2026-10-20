@@ -10,6 +10,26 @@ pub enum ExhaustionMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThrottleMode {
+    Grow,
+
+    Reclaim { amount: NonZeroU64 },
+}
+
+impl ThrottleMode {
+    /// How much to reclaim before asking the host, given the guest's slack.
+    #[must_use]
+    pub fn reclaim(self, slack: Option<u64>) -> Option<NonZeroU64> {
+        match self {
+            Self::Grow => None,
+            Self::Reclaim { amount } => slack
+                .is_some_and(|slack| slack >= amount.get())
+                .then_some(amount),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrowConfig {
     Exponential(ExponentialConfig),
 }
@@ -46,6 +66,7 @@ pub struct EngineConfig {
 
     pub burst_reserve: NonZeroU64,
 
+    pub throttle: ThrottleMode,
     pub grow: GrowConfig,
     pub release: ReleaseConfig,
 

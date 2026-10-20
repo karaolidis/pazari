@@ -211,7 +211,7 @@ mod tests {
     use crate::{
         engine::{
             EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, Snapshot,
-            TitrateConfig,
+            ThrottleMode, TitrateConfig,
         },
         runtime::{cgroup::MEMORY_HIGH, testing::cgroup_dir},
         session::SessionConfig,
@@ -240,6 +240,7 @@ mod tests {
         EngineConfig {
             service_reserve: SERVICE,
             burst_reserve: bytes(BURST),
+            throttle: ThrottleMode::Grow,
             grow: GrowConfig::Exponential(ExponentialConfig {
                 step: bytes(512 * MIB),
                 escalate_within: interval(10),

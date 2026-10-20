@@ -5,9 +5,8 @@ use pazari_types::Deadline;
 use tracing::debug;
 
 use crate::engine::{
-    action::Action,
     counters::Pressure,
-    phase::{Phase, State, Step, growing::Growing, steady::Steady},
+    phase::{Phase, State, Step, steady::Steady},
     world::RequestId,
 };
 
@@ -40,7 +39,7 @@ impl Outcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
-    Reclaiming { bytes: u64, owed: Option<Owed> },
+    Freeing { bytes: u64, owed: Option<Owed> },
     Offering { id: RequestId, target: u64 },
     Settling { target: u64, expires: Deadline },
 }
@@ -53,7 +52,7 @@ pub struct Releasing {
 impl Releasing {
     pub fn begin(step: &mut Step<'_>, bytes: u64, owed: Option<Owed>) -> Phase {
         let releasing = Self {
-            stage: Stage::Reclaiming { bytes, owed },
+            stage: Stage::Freeing { bytes, owed },
         };
 
         let Some(reclaim) = step.world.reclaim_for(bytes) else {
@@ -66,20 +65,14 @@ impl Releasing {
             return releasing.on_reclaim_finished(step, 0);
         };
 
-        let swappiness = step.config().reclaim_swappiness;
-
         debug!(
             bytes,
             reclaim = reclaim.get(),
             free = ?step.guest().free(),
-            ?swappiness,
             "reclaiming from the workload cgroup",
         );
 
-        step.emit(Action::StartReclaim {
-            bytes: reclaim.get(),
-            swappiness,
-        });
+        step.world.start_reclaim(reclaim, step.fx);
 
         Phase::Releasing(releasing)
     }
@@ -96,7 +89,7 @@ impl Releasing {
     }
 
     fn answer(self, step: &mut Step<'_>, outcome: Outcome) {
-        let Stage::Reclaiming {
+        let Stage::Freeing {
             owed: Some(owed), ..
         } = self.stage
         else {
@@ -131,15 +124,15 @@ impl State for Releasing {
     }
 
     fn brake(self, step: &mut Step<'_>) -> Phase {
-        if !matches!(self.stage, Stage::Reclaiming { .. }) {
+        if !matches!(self.stage, Stage::Freeing { .. }) {
             return self.stay();
         }
 
         self.answer(step, Outcome::Braked);
 
-        step.emit(Action::CancelReclaim);
+        step.world.cancel_reclaim(step.fx);
 
-        Growing::braked(step)
+        Phase::braked(step)
     }
 
     fn resume(self, _step: &mut Step<'_>) -> Phase {
@@ -195,7 +188,7 @@ impl State for Releasing {
     }
 
     fn on_reclaim_finished(self, step: &mut Step<'_>, reclaimed: u64) -> Phase {
-        let Stage::Reclaiming { bytes, .. } = self.stage else {
+        let Stage::Freeing { bytes, .. } = self.stage else {
             return self.stay();
         };
 
@@ -241,10 +234,14 @@ impl State for Releasing {
     }
 
     fn on_connected(self, step: &mut Step<'_>) -> Phase {
+        step.world.cancel_reclaim(step.fx);
+
         Steady::released(step)
     }
 
     fn on_disconnected(self, step: &mut Step<'_>) -> Phase {
+        step.world.cancel_reclaim(step.fx);
+
         self.finish(step, Outcome::Ended)
     }
 }
@@ -339,6 +336,45 @@ mod tests {
             "the guest braked out of a release and left the reclaim running: {actions:?}",
         );
         assert!(matches!(engine.phase(), Phase::Growing(_)));
+    }
+
+    #[test]
+    fn a_cancelled_reclaim_blocks_a_host_reclaim_until_it_reports() {
+        let mut engine = started();
+        releasing(&mut engine);
+
+        wake(&mut engine, at(144), 2);
+        host(
+            &mut engine,
+            at(145),
+            HostMessage::Grant {
+                id: 2,
+                target: 3072 * MIB,
+            },
+        );
+        engine.handle(Event::TotalChanged {
+            now: at(146),
+            total_mem: 3072 * MIB,
+        });
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
+
+        let request = HostMessage::ReclaimRequest {
+            id: 7,
+            desired: 512 * MIB,
+            deadline_ms: Duration::from_secs(30),
+        };
+
+        assert!(matches!(
+            host(&mut engine, at(147), request.clone()).as_slice(),
+            [Action::Send(GuestMessage::ReclaimNak { id: 7, .. })]
+        ));
+
+        reclaimed(&mut engine, at(148), 0);
+
+        assert!(matches!(
+            host(&mut engine, at(149), request).as_slice(),
+            [Action::Send(GuestMessage::ReclaimAck { id: 7, .. }), ..]
+        ));
     }
 
     #[test]

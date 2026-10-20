@@ -36,6 +36,17 @@ reclaim_swappiness = 0
 #     kind = "kill"
 kind = "stall"
 
+# What the agent does when the workload throttles at `memory.high`.
+[engine.throttle]
+# Possible variants:
+# - Ask the host for more at once.
+#     kind = "grow"
+# - Reclaim from the workload before asking the host.
+#     kind = "reclaim"
+#     # How much one reclaim frees.
+#     amount = "256MiB"
+kind = "grow"
+
 # How much more memory each request asks the host for.
 [engine.grow]
 # Possible variants:

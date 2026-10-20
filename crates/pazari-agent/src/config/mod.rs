@@ -45,7 +45,7 @@ mod tests {
     use crate::{
         engine::{
             ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, SweepConfig,
-            TitrateConfig,
+            ThrottleMode, TitrateConfig,
         },
         runtime::Backend,
     };
@@ -69,6 +69,10 @@ mod tests {
 
         [engine.exhaustion]
         kind = "kill"
+
+        [engine.throttle]
+        kind = "reclaim"
+        amount = "128MiB"
 
         [engine.grow]
         kind = "exponential"
@@ -204,6 +208,9 @@ mod tests {
             EngineConfig {
                 service_reserve: 0,
                 burst_reserve: bytes(192 * MIB),
+                throttle: ThrottleMode::Reclaim {
+                    amount: bytes(128 * MIB),
+                },
                 grow: GrowConfig::Exponential(ExponentialConfig {
                     step: bytes(1024 * MIB),
                     escalate_within: interval(Duration::from_secs(20)),
@@ -262,6 +269,7 @@ mod tests {
             EngineConfig {
                 service_reserve: 256 * MIB,
                 burst_reserve: bytes(256 * MIB),
+                throttle: ThrottleMode::Grow,
                 grow: GrowConfig::Exponential(ExponentialConfig {
                     step: bytes(512 * MIB),
                     escalate_within: interval(Duration::from_secs(10)),
@@ -503,6 +511,34 @@ mod tests {
         ));
 
         assert!(error.contains("intervals"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_reclaim_throttle_takes_the_default_amount() {
+        let config = parse(&MINIMAL.replace(
+            "[runtime]",
+            "[engine.throttle]\nkind = \"reclaim\"\n\n[runtime]",
+        ));
+
+        assert_eq!(
+            config.engine.throttle,
+            ThrottleMode::Reclaim {
+                amount: bytes(256 * MIB),
+            }
+        );
+    }
+
+    #[test]
+    fn a_zero_throttle_amount_names_the_table_that_carries_it() {
+        let error = rejects(&MINIMAL.replace(
+            "[runtime]",
+            "[engine.throttle]\nkind = \"reclaim\"\namount = \"0B\"\n\n[runtime]",
+        ));
+
+        assert_eq!(
+            error,
+            "engine.throttle.amount rejects 0: expected a positive byte count"
+        );
     }
 
     #[test]

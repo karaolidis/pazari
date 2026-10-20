@@ -114,6 +114,23 @@ Release the brake immediately, and have the kernel kill the whole cgroup when
 it reaches
 .Va memory.max .
 .El
+.Ss [engine.throttle]\&
+What the agent does when the workload throttles at
+.Va memory.high .
+Optional; defaults to
+.Cm grow .
+.Bl -tag -width Ds
+.It Cm kind No = Qq Cm grow
+Ask the host for more at once.
+.It Cm kind No = Qq Cm reclaim
+Reclaim from the workload cgroup before asking the host.
+.Bl -tag -width Ds
+.It Cm amount No = Ar size
+How much one reclaim frees.
+Default
+.Cm 256MiB .
+.El
+.El
 .Ss [engine.grow]\&
 How much more memory each grant request asks for.
 Optional; defaults to
@@ -392,7 +409,7 @@ The workload's memory pressure.
 1 while connected to the host.
 .El
 .Ss Counters
-.Bl -tag -width "reclaim_asked_bytes_total" -compact
+.Bl -tag -width "throttle_reclaim_shortfalls_total" -compact
 .It Va throttle_wakes_total
 Times the agent was woken by a throttle.
 .It Va grant_requests_total
@@ -405,11 +422,15 @@ Refusals received, labelled
 .It Va offers_total
 Offers to release sent.
 .It Va reclaims_total
-Reclaim requests received from the host.
+Reclaims started on the workload cgroup.
 .It Va reclaim_asked_bytes_total
-Bytes those requests asked for.
+Bytes those reclaims asked the kernel for.
 .It Va exhaustions_total
 Times the agent became exhausted.
+.It Va throttle_reclaims_total
+Throttles answered by reclaiming.
+.It Va throttle_reclaim_shortfalls_total
+Throttle reclaims that fell short.
 .It Va connections_total
 Connections established.
 .It Va disconnections_total

@@ -17,7 +17,6 @@ anyhow.workspace = true
 bytesize.workspace = true
 clap = { workspace = true, features = ["derive"] }
 humantime.workspace = true
-libc.workspace = true
 pazari-systemd.workspace = true
 pazari-types.workspace = true
 rustix = { workspace = true, features = ["mm", "param"] }
@@ -29,4 +28,5 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+libc.workspace = true
 tempfile.workspace = true

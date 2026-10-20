@@ -1,7 +1,6 @@
 use std::{
     io::Write,
     num::NonZeroU64,
-    path::PathBuf,
     process,
     sync::atomic::{AtomicBool, Ordering},
     thread,
@@ -15,7 +14,7 @@ use tracing::{info, warn};
 use crate::{
     pace::Pacer,
     plan::{Kind, Plan},
-    region::{Fill, Region, RegionError},
+    region::{Commit, Fill, HugePages, Region, RegionError},
     report::{ReportError, Reporter, Started},
     scratch::{Scratch, ScratchError},
 };
@@ -25,10 +24,9 @@ pub struct Options {
     pub plan: Plan,
     pub arena: NonZeroU64,
     pub interval: Interval,
-    pub no_reserve: bool,
-    pub no_thp: bool,
+    pub commit: Commit,
+    pub huge_pages: HugePages,
     pub fill: Fill,
-    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +45,8 @@ pub fn run<W: Write>(
 ) -> Result<Outcome, RunError> {
     let region = Region::map(
         options.arena,
-        options.no_reserve,
-        options.no_thp,
+        options.commit,
+        options.huge_pages,
         options.fill,
     )?;
 
@@ -63,25 +61,21 @@ pub fn run<W: Write>(
         pid: process::id(),
         page_size: region.page(),
         arena: region.bytes(),
-        no_reserve: options.no_reserve,
-        no_thp: options.no_thp,
+        commit: options.commit,
+        huge_pages: options.huge_pages,
         fill: options.fill,
-        cache_dir: options.cache_dir.as_deref(),
+        cache_dir: options.plan.cache_dir(),
         plan: &options.plan,
     })?;
 
-    let scratch = options
-        .cache_dir
-        .as_deref()
-        .map(Scratch::create)
-        .transpose()?;
+    let scratch = options.plan.cache_dir().map(Scratch::create).transpose()?;
 
     let mut walk = Walk {
         region,
         scratch,
         out,
         interrupt,
-        interval: options.interval.get(),
+        interval: options.interval,
         frontier: 0,
         index: 0,
         started: Instant::now(),
@@ -126,7 +120,7 @@ struct Walk<'a, W> {
     scratch: Option<Scratch>,
     out: &'a mut Reporter<W>,
     interrupt: &'a AtomicBool,
-    interval: Duration,
+    interval: Interval,
     frontier: u64,
     index: usize,
     started: Instant,
@@ -140,7 +134,7 @@ impl<W: Write> Walk<'_, W> {
     fn phase(&mut self, kind: &Kind) -> Result<Flow, RunError> {
         self.started = Instant::now();
         self.touched = 0;
-        self.due = self.interval;
+        self.due = self.interval.get();
         self.marked = Duration::ZERO;
         self.counted = 0;
 
@@ -250,7 +244,7 @@ impl<W: Write> Walk<'_, W> {
 
             self.scratch
                 .as_mut()
-                .ok_or(ScratchError::Missing { index: self.index })?
+                .expect("a plan with a cache phase has a cache directory")
                 .fill(step)?;
 
             self.touched = self.touched.saturating_add(step);
@@ -309,8 +303,8 @@ pub enum RunError {
     Scratch(#[from] ScratchError),
 }
 
-fn due(interval: Duration, elapsed: Duration) -> Duration {
-    let period = interval.as_nanos().max(1);
+fn due(interval: Interval, elapsed: Duration) -> Duration {
+    let period = interval.get().as_nanos();
     let nanos = (elapsed.as_nanos() / period + 1).saturating_mul(period);
 
     Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
@@ -318,7 +312,7 @@ fn due(interval: Duration, elapsed: Duration) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     use serde_json::Value;
 
@@ -326,19 +320,25 @@ mod tests {
 
     const MIB: u64 = 1 << 20;
 
-    fn options(specs: &[&str], interval: u64) -> Options {
-        let plan = Plan::parse(specs).expect("the specs are a workable plan");
+    fn interval(millis: u64) -> Interval {
+        Interval::try_new(Duration::from_millis(millis)).expect("a positive interval under a day")
+    }
+
+    fn options_in(specs: &[&str], cache_dir: Option<PathBuf>, millis: u64) -> Options {
+        let plan = Plan::parse(specs, cache_dir).expect("the specs are a workable plan");
 
         Options {
             arena: plan.arena(None).expect("the plan grows into something"),
-            interval: Interval::try_new(Duration::from_millis(interval))
-                .expect("a positive interval under a day"),
-            no_reserve: false,
-            no_thp: false,
+            interval: interval(millis),
+            commit: Commit::Reserve,
+            huge_pages: HugePages::Allowed,
             fill: Fill::Index,
-            cache_dir: None,
             plan,
         }
+    }
+
+    fn options(specs: &[&str], millis: u64) -> Options {
+        options_in(specs, None, millis)
     }
 
     fn walk(options: &Options, interrupt: &AtomicBool) -> (Outcome, Vec<Value>) {
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn a_reporting_instant_is_always_the_next_one_after_now() {
-        let interval = Duration::from_millis(100);
+        let interval = interval(100);
 
         assert_eq!(due(interval, Duration::ZERO), Duration::from_millis(100));
         assert_eq!(
@@ -419,10 +419,11 @@ mod tests {
     #[test]
     fn a_cache_phase_runs_and_cleans_up_after_itself() {
         let dir = tempfile::TempDir::new().expect("a temporary directory");
-        let options = Options {
-            cache_dir: Some(dir.path().to_owned()),
-            ..options(&["grow=1MiB", "cache=3MiB,chunk=1MiB"], 10)
-        };
+        let options = options_in(
+            &["grow=1MiB", "cache=3MiB,chunk=1MiB"],
+            Some(dir.path().to_owned()),
+            10,
+        );
 
         let (outcome, events) = walk(&options, &AtomicBool::new(false));
 
@@ -440,24 +441,6 @@ mod tests {
                 .count(),
             0,
             "the scratch file outlived the run"
-        );
-    }
-
-    #[test]
-    fn a_cache_phase_without_a_cache_dir_fails_loudly() {
-        let mut reported = Vec::new();
-        let mut out = Reporter::new(&mut reported);
-
-        let error = run(
-            &options(&["grow=1MiB", "cache=1MiB"], 10),
-            &mut out,
-            &AtomicBool::new(false),
-        )
-        .expect_err("there is nowhere to write");
-
-        assert_eq!(
-            error.to_string(),
-            "phase 1 writes page cache, but the run has no cache directory"
         );
     }
 
@@ -625,7 +608,7 @@ mod tests {
     fn a_plan_that_only_waits_still_holds_its_arena() {
         let mut options = options(&["grow=1MiB"], 10);
 
-        options.plan = Plan::parse(["hold=30ms"]).expect("a workable plan");
+        options.plan = Plan::parse(["hold=30ms"], None).expect("a workable plan");
 
         let (outcome, events) = walk(&options, &AtomicBool::new(false));
 

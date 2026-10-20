@@ -7,6 +7,7 @@
 .Sh SYNOPSIS
 .Nm
 .Op Fl -arena Ar size
+.Op Fl -cache-dir Ar dir
 .Op Fl -fill Cm index | random
 .Op Fl -interval Ar duration
 .Op Fl -no-reserve
@@ -118,8 +119,8 @@ A
 faults in every page it touches, including a partial final page.
 A
 .Cm release
-drops only whole pages, so a range that ends mid-page leaves that page
-resident.
+drops every page wholly above the new frontier.
+The page the frontier ends in stays resident.
 A
 .Cm cache
 syncs what it writes, so the page cache it leaves is clean.
@@ -178,9 +179,10 @@ if set.
 and
 .Va target_bytes
 for
-.Cm grow
-and
+.Cm grow ,
 .Cm release
+and
+.Cm cache ,
 or
 .Va target_ms
 for
@@ -245,8 +247,10 @@ or
 .It 1
 The run ended with
 .Cm failed .
+So does an invalid plan or option value.
 .It 2
-The command line was invalid; no events were written.
+The options could not be parsed.
+No events were written.
 .El
 .Sh EXAMPLES
 Grow to 2GiB, hold, then return most of it:

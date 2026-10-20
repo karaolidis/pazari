@@ -10,7 +10,7 @@ pub mod scratch;
 pub use crate::{
     pace::Pacer,
     plan::{Kind, Phase, Plan, PlanError},
-    region::{Fill, FillError, Region, RegionError},
+    region::{Commit, Fill, FillError, HugePages, Region, RegionError},
     report::{Event, ReportError, Reporter, Started},
     run::{Options, Outcome, RunError},
     scratch::{Scratch, ScratchError},

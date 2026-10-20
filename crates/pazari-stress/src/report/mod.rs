@@ -5,14 +5,14 @@ use std::{
     time::Duration,
 };
 
-use pazari_types::Clock;
-use serde::Serialize;
+use pazari_types::{Clock, Timestamp};
+use serde::{Serialize, Serializer};
 use serde_with::{DurationMilliSeconds, serde_as};
 use thiserror::Error;
 
 use crate::{
     plan::{Kind, Plan},
-    region::Fill,
+    region::{Commit, Fill, HugePages},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -20,8 +20,13 @@ pub struct Started<'a> {
     pub pid: u32,
     pub page_size: u64,
     pub arena: u64,
-    pub no_reserve: bool,
-    pub no_thp: bool,
+
+    #[serde(rename = "no_reserve", serialize_with = "no_reserve")]
+    pub commit: Commit,
+
+    #[serde(rename = "no_thp", serialize_with = "no_thp")]
+    pub huge_pages: HugePages,
+
     pub fill: Fill,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,7 +55,11 @@ pub enum Event<'a> {
 
     Progress {
         index: usize,
-        elapsed_ms: u64,
+
+        #[serde_as(as = "DurationMilliSeconds<u64>")]
+        #[serde(rename = "elapsed_ms")]
+        elapsed: Duration,
+
         touched: u64,
         frontier: u64,
         rate_bps: u64,
@@ -58,20 +67,31 @@ pub enum Event<'a> {
 
     Completed {
         index: usize,
-        elapsed_ms: u64,
+
+        #[serde_as(as = "DurationMilliSeconds<u64>")]
+        #[serde(rename = "elapsed_ms")]
+        elapsed: Duration,
     },
 
     Done {
-        elapsed_ms: u64,
+        #[serde_as(as = "DurationMilliSeconds<u64>")]
+        #[serde(rename = "elapsed_ms")]
+        elapsed: Duration,
     },
 
     Interrupted {
         index: usize,
-        elapsed_ms: u64,
+
+        #[serde_as(as = "DurationMilliSeconds<u64>")]
+        #[serde(rename = "elapsed_ms")]
+        elapsed: Duration,
     },
 
     Failed {
-        elapsed_ms: u64,
+        #[serde_as(as = "DurationMilliSeconds<u64>")]
+        #[serde(rename = "elapsed_ms")]
+        elapsed: Duration,
+
         error: &'a str,
     },
 }
@@ -106,11 +126,6 @@ impl<W: Write> Reporter<W> {
         }
     }
 
-    #[must_use]
-    pub const fn clock(&self) -> Clock {
-        self.clock
-    }
-
     pub fn started(&mut self, started: Started<'_>) -> Result<(), ReportError> {
         self.emit(&Event::Started(started))
     }
@@ -133,7 +148,7 @@ impl<W: Write> Reporter<W> {
     ) -> Result<(), ReportError> {
         self.emit(&Event::Progress {
             index,
-            elapsed_ms: self.clock.now().as_millis(),
+            elapsed: self.elapsed(),
             touched,
             frontier,
             rate_bps,
@@ -143,28 +158,33 @@ impl<W: Write> Reporter<W> {
     pub fn completed(&mut self, index: usize) -> Result<(), ReportError> {
         self.emit(&Event::Completed {
             index,
-            elapsed_ms: self.clock.now().as_millis(),
+            elapsed: self.elapsed(),
         })
     }
 
     pub fn done(&mut self) -> Result<(), ReportError> {
         self.emit(&Event::Done {
-            elapsed_ms: self.clock.now().as_millis(),
+            elapsed: self.elapsed(),
         })
     }
 
     pub fn interrupted(&mut self, index: usize) -> Result<(), ReportError> {
         self.emit(&Event::Interrupted {
             index,
-            elapsed_ms: self.clock.now().as_millis(),
+            elapsed: self.elapsed(),
         })
     }
 
     pub fn failed(&mut self, error: &str) -> Result<(), ReportError> {
         self.emit(&Event::Failed {
-            elapsed_ms: self.clock.now().as_millis(),
+            elapsed: self.elapsed(),
             error,
         })
+    }
+
+    /// The time since the reporter started, in whole milliseconds.
+    fn elapsed(&self) -> Duration {
+        self.clock.now().saturating_duration_since(Timestamp::START)
     }
 
     fn emit(&mut self, event: &Event<'_>) -> Result<(), ReportError> {
@@ -198,6 +218,22 @@ pub enum ReportError {
     },
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde hands fields by reference"
+)]
+fn no_reserve<S: Serializer>(commit: &Commit, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_bool(*commit == Commit::NoReserve)
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde hands fields by reference"
+)]
+fn no_thp<S: Serializer>(huge_pages: &HugePages, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_bool(*huge_pages == HugePages::Excluded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,7 +249,7 @@ mod tests {
     }
 
     fn plan(specs: &[&str]) -> Plan {
-        Plan::parse(specs).expect("the specs are a workable plan")
+        Plan::parse(specs, None).expect("the specs are a workable plan")
     }
 
     #[test]
@@ -225,8 +261,8 @@ mod tests {
             pid: 42,
             page_size: 4096,
             arena: 8 * MIB,
-            no_reserve: false,
-            no_thp: true,
+            commit: Commit::Reserve,
+            huge_pages: HugePages::Excluded,
             fill: Fill::Random,
             cache_dir: None,
             plan: &plan,
@@ -322,7 +358,7 @@ mod tests {
     fn the_clock_the_events_are_stamped_from_starts_with_the_reporter() {
         let out = Reporter::new(Vec::new());
 
-        assert!(out.clock().now().as_millis() < 100);
+        assert!(out.elapsed() < Duration::from_millis(100));
     }
 
     #[test]

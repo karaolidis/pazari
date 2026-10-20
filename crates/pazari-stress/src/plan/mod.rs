@@ -1,4 +1,9 @@
-use std::{num::NonZeroU64, path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    num::NonZeroU64,
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::Duration,
+};
 
 use bytesize::ByteSize;
 use serde::Serialize;
@@ -124,10 +129,14 @@ pub struct Plan {
 
     #[serde(skip)]
     peak: u64,
+
+    #[serde(skip)]
+    cache_dir: Option<PathBuf>,
 }
 
 impl Plan {
-    pub fn parse<I, S>(specs: I) -> Result<Self, PlanError>
+    /// Reads the specs in order, keeping `cache_dir` only if a cache phase writes there.
+    pub fn parse<I, S>(specs: I, cache_dir: Option<PathBuf>) -> Result<Self, PlanError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -167,7 +176,23 @@ impl Plan {
             });
         }
 
-        Ok(Self { phases, peak })
+        let cache_dir = phases
+            .iter()
+            .enumerate()
+            .find(|(_, phase)| matches!(phase.kind, Kind::Cache { .. }))
+            .map(|(index, phase)| {
+                cache_dir.ok_or_else(|| PlanError::Scratchless {
+                    index,
+                    spec: phase.spec.clone(),
+                })
+            })
+            .transpose()?;
+
+        Ok(Self {
+            phases,
+            peak,
+            cache_dir,
+        })
     }
 
     #[must_use]
@@ -181,20 +206,9 @@ impl Plan {
     }
 
     /// Where cache phases write, if the plan has any.
-    pub fn cache_dir(&self, requested: Option<PathBuf>) -> Result<Option<PathBuf>, PlanError> {
-        let Some((index, phase)) = self
-            .phases
-            .iter()
-            .enumerate()
-            .find(|(_, phase)| matches!(phase.kind, Kind::Cache { .. }))
-        else {
-            return Ok(None);
-        };
-
-        requested.map(Some).ok_or_else(|| PlanError::Scratchless {
-            index,
-            spec: phase.spec.clone(),
-        })
+    #[must_use]
+    pub fn cache_dir(&self) -> Option<&Path> {
+        self.cache_dir.as_deref()
     }
 
     pub fn arena(&self, requested: Option<u64>) -> Result<NonZeroU64, PlanError> {
@@ -486,13 +500,13 @@ mod tests {
     }
 
     fn rejects(specs: &[&str]) -> String {
-        Plan::parse(specs)
+        Plan::parse(specs, None)
             .expect_err("the specs are not a workable plan")
             .to_string()
     }
 
     fn plan(specs: &[&str]) -> Plan {
-        Plan::parse(specs).expect("the specs are a workable plan")
+        Plan::parse(specs, None).expect("the specs are a workable plan")
     }
 
     #[test]
@@ -540,35 +554,41 @@ mod tests {
     #[test]
     fn a_cache_phase_leaves_the_frontier_where_it_was() {
         assert_eq!(
-            plan(&["grow=1GiB", "cache=4GiB", "grow=1GiB"]).peak(),
+            Plan::parse(
+                ["grow=1GiB", "cache=4GiB", "grow=1GiB"],
+                Some(PathBuf::from("/var/cache/stress"))
+            )
+            .expect("the specs are a workable plan")
+            .peak(),
             2 * GIB
         );
     }
 
     #[test]
     fn a_plan_that_writes_page_cache_needs_somewhere_to_write_it() {
-        let plan = plan(&["grow=1GiB", "cache=4GiB"]);
+        let specs = ["grow=1GiB", "cache=4GiB"];
+        let dir = PathBuf::from("/var/cache/stress");
 
         assert_eq!(
-            plan.cache_dir(None)
-                .expect_err("there is nowhere to write")
-                .to_string(),
+            rejects(&specs),
             "phase 1 \"cache=4GiB\" writes page cache, but no --cache-dir names where"
         );
         assert_eq!(
-            plan.cache_dir(Some(PathBuf::from("/var/cache/stress"))),
-            Ok(Some(PathBuf::from("/var/cache/stress")))
+            Plan::parse(specs, Some(dir.clone()))
+                .expect("the plan has somewhere to write")
+                .cache_dir(),
+            Some(dir.as_path())
         );
     }
 
     #[test]
     fn a_plan_without_cache_phases_has_no_use_for_a_cache_dir() {
-        let plan = plan(&["grow=1GiB"]);
-
-        assert_eq!(plan.cache_dir(None), Ok(None));
+        assert_eq!(plan(&["grow=1GiB"]).cache_dir(), None);
         assert_eq!(
-            plan.cache_dir(Some(PathBuf::from("/var/cache/stress"))),
-            Ok(None)
+            Plan::parse(["grow=1GiB"], Some(PathBuf::from("/var/cache/stress")))
+                .expect("the specs are a workable plan")
+                .cache_dir(),
+            None
         );
     }
 

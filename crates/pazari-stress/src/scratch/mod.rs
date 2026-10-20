@@ -81,9 +81,6 @@ impl Drop for Scratch {
 
 #[derive(Debug, Error)]
 pub enum ScratchError {
-    #[error("phase {index} writes page cache, but the run has no cache directory")]
-    Missing { index: usize },
-
     #[error("failed to create the scratch file {}: {source}", path.display())]
     Create { path: PathBuf, source: io::Error },
 

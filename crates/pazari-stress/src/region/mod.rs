@@ -41,6 +41,26 @@ pub struct FillError {
     value: String,
 }
 
+/// Whether the arena is charged to the commit limit when it is mapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Commit {
+    /// Charged up front.
+    Reserve,
+
+    /// Mapped `MAP_NORESERVE`, so never charged up front.
+    NoReserve,
+}
+
+/// Whether the arena may be backed by transparent huge pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HugePages {
+    /// Left to the system's policy.
+    Allowed,
+
+    /// Advised `MADV_NOHUGEPAGE`.
+    Excluded,
+}
+
 /// One anonymous private mapping, touched from the bottom up.
 #[derive(Debug)]
 pub struct Region {
@@ -54,8 +74,8 @@ impl Region {
     /// Maps an arena of at least `bytes`, rounded up to a whole page.
     pub fn map(
         bytes: NonZeroU64,
-        no_reserve: bool,
-        no_thp: bool,
+        commit: Commit,
+        huge_pages: HugePages,
         fill: Fill,
     ) -> Result<Self, RegionError> {
         let page = page_size();
@@ -67,7 +87,7 @@ impl Region {
 
         let mut flags = MapFlags::PRIVATE;
 
-        if no_reserve {
+        if commit == Commit::NoReserve {
             flags |= MapFlags::NORESERVE;
         }
 
@@ -92,7 +112,7 @@ impl Region {
             fill,
         };
 
-        if no_thp {
+        if huge_pages == HugePages::Excluded {
             // SAFETY: the whole mapping is ours, and advice neither reads nor writes it.
             unsafe { madvise(base, len, Advice::LinuxNoHugepage) }.map_err(|source| {
                 RegionError::NoThp {
@@ -127,17 +147,18 @@ impl Region {
         Ok(())
     }
 
-    /// Drops every page the range holds whole, handing the memory straight back.
+    /// Drops every page from `from` up to the frontier, handing the memory straight back.
     ///
-    /// A range that starts or ends inside a page leaves that page alone.
-    pub fn release(&mut self, from: u64, to: u64) -> Result<u64, RegionError> {
-        let (start, end) = self.bounds(from, to)?;
+    /// A page that also holds bytes below `from` stays.
+    /// Nothing past `frontier` may be in use, so the page it ends in goes too.
+    pub fn release(&mut self, from: u64, frontier: u64) -> Result<(), RegionError> {
+        let (start, end) = self.bounds(from, frontier)?;
 
         let first = start.next_multiple_of(self.page);
-        let last = end - end % self.page;
+        let last = end.next_multiple_of(self.page);
 
         if first >= last {
-            return Ok(0);
+            return Ok(());
         }
 
         let span = last - first;
@@ -149,13 +170,12 @@ impl Region {
                 bytes: widen(span),
                 source: source.into(),
             }
-        })?;
-
-        Ok(widen(span))
+        })
     }
 
     /// The bytes of the range that are resident right now.
-    pub fn resident(&self, from: u64, to: u64) -> Result<u64, RegionError> {
+    #[cfg(test)]
+    fn resident(&self, from: u64, to: u64) -> Result<u64, RegionError> {
         let (start, end) = self.bounds(from, to)?;
 
         let first = start - start % self.page;
@@ -272,6 +292,7 @@ pub enum RegionError {
         source: io::Error,
     },
 
+    #[cfg(test)]
     #[error("failed to read what is resident in {bytes} bytes at offset {offset}: {source}")]
     Residency {
         offset: u64,
@@ -306,7 +327,8 @@ mod tests {
     }
 
     fn arena(wanted: u64, fill: Fill) -> Region {
-        Region::map(bytes(wanted), false, false, fill).expect("a mappable arena")
+        Region::map(bytes(wanted), Commit::Reserve, HugePages::Allowed, fill)
+            .expect("a mappable arena")
     }
 
     fn resident(region: &Region, from: u64, to: u64) -> u64 {
@@ -366,10 +388,7 @@ mod tests {
         region.touch(0, 4 * MIB).expect("the frontier advances");
         assert_eq!(resident(&region, 0, 4 * MIB), 4 * MIB);
 
-        assert_eq!(
-            region.release(2 * MIB, 4 * MIB).expect("the pages go back"),
-            2 * MIB
-        );
+        region.release(2 * MIB, 4 * MIB).expect("the pages go back");
 
         assert_eq!(resident(&region, 0, 2 * MIB), 2 * MIB);
         assert_eq!(resident(&region, 2 * MIB, 4 * MIB), 0);
@@ -393,15 +412,50 @@ mod tests {
     }
 
     #[test]
-    fn a_release_that_holds_no_whole_page_releases_nothing() {
+    fn a_release_keeps_the_page_that_still_holds_bytes_below_it() {
         let mut region = arena(4 * MIB, Fill::Index);
         let page = region.page();
 
-        region.touch(0, 4 * MIB).expect("the frontier advances");
+        region.touch(0, page - 1).expect("the frontier advances");
+        region.release(1, page - 1).expect("nothing to drop");
 
-        assert_eq!(region.release(1, page - 1).expect("nothing to drop"), 0);
-        assert_eq!(region.release(page, page).expect("nothing to drop"), 0);
-        assert_eq!(resident(&region, 0, 4 * MIB), 4 * MIB);
+        assert_eq!(resident(&region, 0, 4 * MIB), page);
+    }
+
+    #[test]
+    fn a_release_drops_the_partial_page_a_grow_faulted_in() {
+        let mut region = arena(4 * MIB, Fill::Index);
+        let page = region.page();
+
+        region.touch(0, page + 1).expect("the frontier advances");
+
+        region.release(1, page + 1).expect("the pages go back");
+
+        assert_eq!(resident(&region, 0, 4 * MIB), page);
+    }
+
+    #[test]
+    fn a_release_in_chunks_smaller_than_a_page_drops_every_page_it_passes() {
+        let mut region = arena(4 * MIB, Fill::Index);
+        let page = region.page();
+        let floor = page / 2;
+        let mut frontier = 3 * page;
+
+        region.touch(0, frontier).expect("the frontier advances");
+
+        while frontier > floor {
+            let next = frontier.saturating_sub(1000).max(floor);
+
+            region.release(next, frontier).expect("the pages go back");
+
+            frontier = next;
+        }
+
+        assert_eq!(
+            resident(&region, 0, 4 * MIB),
+            page,
+            "only the page the frontier ends in stays"
+        );
     }
 
     #[test]
@@ -473,8 +527,13 @@ mod tests {
 
     #[test]
     fn an_arena_can_be_mapped_without_a_commitment_or_huge_pages() {
-        let mut region =
-            Region::map(bytes(4 * MIB), true, true, Fill::Random).expect("a mappable arena");
+        let mut region = Region::map(
+            bytes(4 * MIB),
+            Commit::NoReserve,
+            HugePages::Excluded,
+            Fill::Random,
+        )
+        .expect("a mappable arena");
 
         region.touch(0, MIB).expect("the frontier advances");
 

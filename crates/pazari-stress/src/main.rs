@@ -9,7 +9,7 @@ use std::{
 use anyhow::Result;
 use bytesize::ByteSize;
 use clap::Parser;
-use pazari_stress::{Fill, Options, Plan, Reporter, run};
+use pazari_stress::{Commit, Fill, HugePages, Options, Plan, Reporter, run};
 use pazari_systemd::logging;
 use pazari_types::Interval;
 use signal_hook::{
@@ -77,15 +77,22 @@ fn main() -> ExitCode {
 }
 
 fn stress(cli: &Cli, out: &mut Reporter<StdoutLock<'static>>) -> Result<()> {
-    let plan = Plan::parse(&cli.phases)?;
+    let plan = Plan::parse(&cli.phases, cli.cache_dir.clone())?;
 
     let options = Options {
         arena: plan.arena(cli.arena.map(|arena| arena.as_u64()))?,
         interval: Interval::try_new(cli.interval)?,
-        no_reserve: cli.no_reserve,
-        no_thp: cli.no_thp,
+        commit: if cli.no_reserve {
+            Commit::NoReserve
+        } else {
+            Commit::Reserve
+        },
+        huge_pages: if cli.no_thp {
+            HugePages::Excluded
+        } else {
+            HugePages::Allowed
+        },
         fill: cli.fill,
-        cache_dir: plan.cache_dir(cli.cache_dir.clone())?,
         plan,
     };
 

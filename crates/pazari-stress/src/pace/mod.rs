@@ -10,8 +10,8 @@ pub struct Pacer {
 
 impl Pacer {
     /// A phase that goes as fast as the faults allow.
-    #[must_use]
-    pub const fn burst(chunk: NonZeroU64) -> Self {
+    #[cfg(test)]
+    const fn burst(chunk: NonZeroU64) -> Self {
         Self { rate: None, chunk }
     }
 
@@ -30,8 +30,8 @@ impl Pacer {
         Self { rate, chunk }
     }
 
-    #[must_use]
-    pub const fn is_paced(&self) -> bool {
+    #[cfg(test)]
+    const fn is_paced(&self) -> bool {
         self.rate.is_some()
     }
 
@@ -52,13 +52,6 @@ impl Pacer {
         let nanos = u128::from(issued) * NANOS_PER_SECOND / u128::from(rate.get());
 
         Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
-    }
-
-    /// How long to wait before the byte after `issued` may go out, having
-    /// already spent `elapsed` in the phase.
-    #[must_use]
-    pub fn wait(&self, issued: u64, elapsed: Duration) -> Duration {
-        self.deadline(issued).saturating_sub(elapsed)
     }
 
     /// The rate, in bytes a second, a phase actually held: what a report says
@@ -100,7 +93,6 @@ mod tests {
         assert!(!pacer.is_paced());
         assert_eq!(pacer.deadline(0), Duration::ZERO);
         assert_eq!(pacer.deadline(u64::MAX), Duration::ZERO);
-        assert_eq!(pacer.wait(u64::MAX, Duration::ZERO), Duration::ZERO);
     }
 
     #[test]
@@ -147,21 +139,6 @@ mod tests {
                 "the {nth}th chunk drifted"
             );
         }
-    }
-
-    #[test]
-    fn a_phase_that_is_behind_its_deadline_does_not_wait() {
-        let pacer = Pacer::at(bytes(100 * MIB), bytes(MIB));
-
-        assert_eq!(
-            pacer.wait(10 * MIB, Duration::from_millis(40)),
-            Duration::from_millis(60)
-        );
-        assert_eq!(
-            pacer.wait(10 * MIB, Duration::from_millis(100)),
-            Duration::ZERO
-        );
-        assert_eq!(pacer.wait(10 * MIB, Duration::from_secs(5)), Duration::ZERO);
     }
 
     #[test]

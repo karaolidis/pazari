@@ -67,6 +67,10 @@ let
         total: guest: total + guest.config.microvm.mem + guest.config.microvm.hotplugMem
       ) 0 (lib.attrValues built);
 
+      volumes = lib.foldl' (
+        total: guest: total + lib.foldl' (sum: volume: sum + volume.size) 0 guest.config.microvm.volumes
+      ) 0 (lib.attrValues built);
+
       budget = scenario.timeout + 300;
     in
     runNixOSTest {
@@ -84,7 +88,7 @@ let
         virtualisation = {
           cores = 2 + 2 * lib.length guests;
           memorySize = slack + held;
-          diskSize = 4096;
+          diskSize = 4096 + volumes;
 
           qemu.options = [
             "-cpu"

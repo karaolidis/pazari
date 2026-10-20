@@ -57,7 +57,7 @@ in
       type = format.type;
       default = { };
       example = {
-        policy.host_floor = "2GiB";
+        grant.floor = "2GiB";
 
         guests.example = {
           ceiling = "8GiB";

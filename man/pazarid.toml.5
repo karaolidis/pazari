@@ -17,41 +17,17 @@ Sizes and durations are written as in
 Unless stated otherwise, a duration must be greater than zero and at most 24
 hours.
 .Sh SETTINGS
-.Ss Top level
+.Ss [tick]\&
 .Bl -tag -width Ds
-.It Cm tick_interval No = Ar duration
+.It Cm interval No = Ar duration
 How often the daemon re-reads host memory, checks on pending resizes and quiet
 guests, and updates its metrics.
 Default
 .Cm 1s .
 .El
-.Ss [policy]\&
+.Ss [status]\&
 .Bl -tag -width Ds
-.It Cm host_floor No = Ar size
-Memory the host keeps for itself.
-A grow is granted only if available memory stays at or above this afterwards.
-Required; may be 0.
-.It Cm grant_swap No = Ar boolean
-Whether free swap counts as available memory.
-Default
-.Cm false .
-.It Cm grant_min_interval No = Ar duration
-Minimum time between grants to one guest.
-Also the retry delay given with
-.Cm host_pressure
-refusals.
-Default
-.Cm 5s .
-.It Cm reconcile_deadline No = Ar duration
-How long a resize may take before the daemon stops waiting for it.
-Default
-.Cm 30s .
-.It Cm shrink_revert No = Ar boolean
-Whether a shrink that did not finish is reverted to the size the guest actually
-holds.
-Default
-.Cm true .
-.It Cm welcome_status_interval No = Ar duration
+.It Cm interval No = Ar duration
 How often guests must report their status.
 Default
 .Cm 1s .
@@ -59,12 +35,45 @@ Default
 How many status intervals a guest may miss before it is marked stale.
 Default
 .Cm 3 .
-.It Cm reclaim_deadline No = Ar duration
+.El
+.Ss [grant]\&
+.Bl -tag -width Ds
+.It Cm floor No = Ar size
+Memory the host keeps for itself.
+A grow is granted only if available memory stays at or above this afterwards.
+Required; may be 0.
+.It Cm min_interval No = Ar duration
+Minimum time between grants to one guest.
+Also the retry delay given with
+.Cm host_pressure
+refusals.
+Default
+.Cm 5s .
+.It Cm swap No = Ar boolean
+Whether free swap counts as available memory.
+Default
+.Cm false .
+.El
+.Ss [actuation]\&
+.Bl -tag -width Ds
+.It Cm deadline No = Ar duration
+How long a resize may take before the daemon stops waiting for it.
+Default
+.Cm 30s .
+.It Cm revert_shrinks No = Ar boolean
+Whether a shrink that did not finish is reverted to the size the guest actually
+holds.
+Default
+.Cm true .
+.El
+.Ss [reclaim]\&
+.Bl -tag -width Ds
+.It Cm deadline No = Ar duration
 How long a guest has to answer a reclaim request.
 Default
 .Cm 30s .
 .El
-.Ss [policy.revocation]\&
+.Ss [reclaim.revocation]\&
 Optional.
 Without it, the daemon never asks guests to return memory, except after a
 ceiling is lowered.
@@ -177,19 +186,19 @@ Default
 .Sh CAPACITY
 The daemon warns at startup if
 .Bd -literal -offset indent
-sum(ceilings) + host_floor > MemTotal + SwapTotal
+sum(ceilings) + grant.floor > MemTotal + SwapTotal
 .Ed
 .Pp
 but starts anyway, since guests rarely all reach their ceilings at once.
 To guarantee that every byte a guest can hold is RAM, set ceilings so that
 .Bd -literal -offset indent
-sum(ceilings) + host_floor <= MemTotal
+sum(ceilings) + grant.floor <= MemTotal
 .Ed
 .Pp
 The daemon does not limit how much of the host one guest can take below its
 ceiling.
 Under
-.Cm grant_swap = true
+.Cm grant.swap = true
 in particular, one guest can use up the free swap.
 Set a memory limit on each VM's own systemd unit on the host.
 .Sh METRICS
@@ -259,14 +268,15 @@ Annotated example, installed with the package.
 A host keeping 4GiB for itself, asking for memory back under pressure, with one
 guest:
 .Bd -literal -offset indent
-tick_interval = "1s"
+[tick]
+interval = "1s"
 
-[policy]
-host_floor = "4GiB"
-grant_min_interval = "5s"
-grant_swap = false
+[grant]
+floor = "4GiB"
+min_interval = "5s"
+swap = false
 
-[policy.revocation]
+[reclaim.revocation]
 psi = 20.0
 step = "256MiB"
 

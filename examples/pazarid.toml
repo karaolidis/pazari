@@ -1,38 +1,42 @@
+[tick]
 # How often the daemon reads the host's memory and updates what it knows
 # about its guests.
-tick_interval = "1s"
+interval = "1s"
 
-[policy]
+[status]
 # How often a guest must send `status`.
-welcome_status_interval = "1s"
-
-# Memory the host keeps for itself. No grow is granted that would take
-# `MemAvailable` under it. Set me.
-host_floor = "2GiB"
-
-# How long a guest waits after a grant before another one.
-grant_min_interval = "5s"
-
-# How long an actuation is given to apply before the host stops waiting
-# for it.
-reconcile_deadline = "30s"
-
-# Whether a shrink that did not apply is taken back to the size the guest
-# still has.
-shrink_revert = true
+interval = "1s"
 
 # Missed `status` intervals before a guest is marked stale.
 stale_after = 3
 
-# How long a guest has to answer a `reclaim_request`.
-reclaim_deadline = "30s"
+[grant]
+# Memory the host keeps for itself. No grow is granted that would take
+# `MemAvailable` under it. Set me.
+floor = "2GiB"
+
+# How long a guest waits after a grant before another one.
+min_interval = "5s"
 
 # Whether free host swap counts towards what a grow may be granted out
 # of.
-grant_swap = false
+swap = false
+
+[actuation]
+# How long an actuation is given to apply before the host stops waiting
+# for it.
+deadline = "30s"
+
+# Whether a shrink that did not apply is taken back to the size the guest
+# still has.
+revert_shrinks = true
+
+[reclaim]
+# How long a guest has to answer a `reclaim_request`.
+deadline = "30s"
 
 # How the host takes memory back when it comes under pressure itself.
-[policy.revocation]
+[reclaim.revocation]
 # The host memory pressure, in percent of wall time, at which the daemon
 # starts asking guests for memory back. Set me.
 psi = 20.0

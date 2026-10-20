@@ -3,9 +3,9 @@
 
   timeout = 600;
 
-  daemon.policy = {
-    host_floor = "1GiB";
-    grant_min_interval = "2s";
+  daemon.settings.grant = {
+    floor = "1GiB";
+    min_interval = "2s";
   };
 
   guests =
@@ -29,9 +29,9 @@
             after = [ "var-cache-scratch.mount" ];
           };
 
-          services.pazari-agent.harness = {
-            engine = { inherit throttle; };
+          services.pazari-agent.settings = { inherit throttle; };
 
+          services.pazari-agent.harness = {
             workload = {
               arguments = [
                 "--interval"

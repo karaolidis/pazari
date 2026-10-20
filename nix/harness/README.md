@@ -17,7 +17,7 @@ A scenario is one `.nix` file in `nix/harness/scenarios`.
 | `timeout`     | Seconds the whole run may take before it is failed.              |
 | `breaches`    | Optional. True when the workload is meant to reach `memory.max`. |
 | `sample`      | Optional. Seconds between scrapes of every endpoint.             |
-| `daemon`      | What this scenario changes about the host daemon's settings.     |
+| `daemon`      | `settings` merged into the daemon's, and an optional `logLevel`. |
 | `guests`      | The guests.                                                      |
 | `host`        | Optional. A NixOS module merged into the outer machine.          |
 | `assertions`  | Python source declaring one `check(run)`.                        |
@@ -26,8 +26,8 @@ Each guest carries `daemon`, what the scenario changes about that guest's entry
 in the daemon's settings, and `module`, a NixOS module merged into the guest.
 That module usually only sets `services.pazari-agent.harness.workload.phases`,
 the `pazari-stress` plan the guest is driven with, and
-`services.pazari-agent.harness.engine`, what this scenario changes about the
-agent's engine.
+`services.pazari-agent.settings`, what this scenario changes about the agent's
+settings.
 
 `assertions` is written against the vocabulary in
 `nix/harness/driver/checks.py`, over the event series in

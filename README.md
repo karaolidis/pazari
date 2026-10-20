@@ -34,7 +34,7 @@ On the host:
     enable = true;
 
     settings = {
-      policy.host_floor = "4GiB";
+      grant.floor = "4GiB";
 
       guests.example = {
         ceiling = "32GiB";
@@ -59,12 +59,12 @@ In the guest:
     enable = true;
 
     settings = {
-      engine = {
+      workload = {
         service_reserve = "512MiB";
         burst_reserve = "256MiB";
       };
 
-      transport.kind = "vsock";
+      host.transport.kind = "vsock";
     };
   };
 }

@@ -29,18 +29,22 @@ use crate::{
 const RETRY_MIN: Duration = Duration::from_millis(500);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
-#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
 #[serde(deny_unknown_fields)]
 pub struct File {
-    /// How often the daemon reads the host's memory and updates what it knows
-    /// about its guests.
-    #[serde_inline_default(Duration::from_secs(1))]
-    #[serde(deserialize_with = "humantime_serde::deserialize")]
-    #[doku(as = "String", example = "1s")]
-    tick_interval: Duration,
+    #[serde(default)]
+    tick: TickSection,
 
-    policy: PolicySection,
+    #[serde(default)]
+    status: StatusSection,
+
+    grant: GrantSection,
+
+    #[serde(default)]
+    actuation: ActuationSection,
+
+    #[serde(default)]
+    reclaim: ReclaimSection,
 
     #[serde(default)]
     metrics: Option<MetricsSection>,
@@ -52,9 +56,27 @@ pub struct File {
 
 impl File {
     pub fn resolve(self) -> Result<Config, ConfigError> {
-        let tick_interval = Interval::try_new(self.tick_interval).at("tick_interval")?;
+        let tick_interval = Interval::try_new(self.tick.interval).at("tick.interval")?;
 
-        let policy = self.policy.resolve()?;
+        let policy = Policy {
+            welcome_status_interval: Interval::try_new(self.status.interval)
+                .at("status.interval")?,
+            host_floor: self.grant.floor.as_u64(),
+            grant_min_interval: Interval::try_new(self.grant.min_interval)
+                .at("grant.min_interval")?,
+            reconcile_deadline: Interval::try_new(self.actuation.deadline)
+                .at("actuation.deadline")?,
+            shrink_revert: self.actuation.revert_shrinks,
+            stale_after: NonZeroU32::new(self.status.stale_after)
+                .positive("status.stale_after", "count of intervals")?,
+            reclaim_deadline: Interval::try_new(self.reclaim.deadline).at("reclaim.deadline")?,
+            grant_swap: self.grant.swap,
+            revocation: self
+                .reclaim
+                .revocation
+                .map(RevocationSection::resolve)
+                .transpose()?,
+        };
 
         if self.guests.is_empty() {
             return Err(ConfigError::Guestless);
@@ -120,83 +142,110 @@ pub struct MetricsSection {
     listen: SocketAddr,
 }
 
+#[derive(Debug, Deserialize, Document)]
+#[serde(default, deny_unknown_fields)]
+pub struct TickSection {
+    /// How often the daemon reads the host's memory and updates what it knows
+    /// about its guests.
+    #[serde(deserialize_with = "humantime_serde::deserialize")]
+    #[doku(as = "String", example = "1s")]
+    interval: Duration,
+}
+
+impl Default for TickSection {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(1),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Document)]
+#[serde(default, deny_unknown_fields)]
+pub struct StatusSection {
+    /// How often a guest must send `status`.
+    #[serde(deserialize_with = "humantime_serde::deserialize")]
+    #[doku(as = "String", example = "1s")]
+    interval: Duration,
+
+    /// Missed `status` intervals before a guest is marked stale.
+    #[doku(example = "3")]
+    stale_after: u32,
+}
+
+impl Default for StatusSection {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(1),
+            stale_after: 3,
+        }
+    }
+}
+
 #[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
 #[serde(deny_unknown_fields)]
-pub struct PolicySection {
-    /// How often a guest must send `status`.
-    #[serde_inline_default(Duration::from_secs(1))]
-    #[serde(deserialize_with = "humantime_serde::deserialize")]
-    #[doku(as = "String", example = "1s")]
-    welcome_status_interval: Duration,
-
+pub struct GrantSection {
     /// Memory the host keeps for itself. No grow is granted that would take
     /// `MemAvailable` under it. Set me.
     #[doku(as = "String", example = "2GiB")]
-    host_floor: ByteSize,
+    floor: ByteSize,
 
     /// How long a guest waits after a grant before another one.
     #[serde_inline_default(Duration::from_secs(5))]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "5s")]
-    grant_min_interval: Duration,
-
-    /// How long an actuation is given to apply before the host stops waiting
-    /// for it.
-    #[serde_inline_default(Duration::from_secs(30))]
-    #[serde(deserialize_with = "humantime_serde::deserialize")]
-    #[doku(as = "String", example = "30s")]
-    reconcile_deadline: Duration,
-
-    /// Whether a shrink that did not apply is taken back to the size the guest
-    /// still has.
-    #[serde_inline_default(true)]
-    #[doku(example = "true")]
-    shrink_revert: bool,
-
-    /// Missed `status` intervals before a guest is marked stale.
-    #[serde_inline_default(3)]
-    #[doku(example = "3")]
-    stale_after: u32,
-
-    /// How long a guest has to answer a `reclaim_request`.
-    #[serde_inline_default(Duration::from_secs(30))]
-    #[serde(deserialize_with = "humantime_serde::deserialize")]
-    #[doku(as = "String", example = "30s")]
-    reclaim_deadline: Duration,
+    min_interval: Duration,
 
     /// Whether free host swap counts towards what a grow may be granted out
     /// of.
     #[serde_inline_default(false)]
     #[doku(example = "false")]
-    grant_swap: bool,
+    swap: bool,
+}
+
+#[derive(Debug, Deserialize, Document)]
+#[serde(default, deny_unknown_fields)]
+pub struct ActuationSection {
+    /// How long an actuation is given to apply before the host stops waiting
+    /// for it.
+    #[serde(deserialize_with = "humantime_serde::deserialize")]
+    #[doku(as = "String", example = "30s")]
+    deadline: Duration,
+
+    /// Whether a shrink that did not apply is taken back to the size the guest
+    /// still has.
+    #[doku(example = "true")]
+    revert_shrinks: bool,
+}
+
+impl Default for ActuationSection {
+    fn default() -> Self {
+        Self {
+            deadline: Duration::from_secs(30),
+            revert_shrinks: true,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Document)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReclaimSection {
+    /// How long a guest has to answer a `reclaim_request`.
+    #[serde(deserialize_with = "humantime_serde::deserialize")]
+    #[doku(as = "String", example = "30s")]
+    deadline: Duration,
 
     /// How the host takes memory back when it comes under pressure itself.
-    #[serde(default)]
     revocation: Option<RevocationSection>,
 }
 
-impl PolicySection {
-    fn resolve(self) -> Result<Policy, ConfigError> {
-        Ok(Policy {
-            welcome_status_interval: Interval::try_new(self.welcome_status_interval)
-                .at("policy.welcome_status_interval")?,
-            host_floor: self.host_floor.as_u64(),
-            grant_min_interval: Interval::try_new(self.grant_min_interval)
-                .at("policy.grant_min_interval")?,
-            reconcile_deadline: Interval::try_new(self.reconcile_deadline)
-                .at("policy.reconcile_deadline")?,
-            shrink_revert: self.shrink_revert,
-            stale_after: NonZeroU32::new(self.stale_after)
-                .positive("policy.stale_after", "count of intervals")?,
-            reclaim_deadline: Interval::try_new(self.reclaim_deadline)
-                .at("policy.reclaim_deadline")?,
-            grant_swap: self.grant_swap,
-            revocation: self
-                .revocation
-                .map(RevocationSection::resolve)
-                .transpose()?,
-        })
+impl Default for ReclaimSection {
+    fn default() -> Self {
+        Self {
+            deadline: Duration::from_secs(30),
+            revocation: None,
+        }
     }
 }
 
@@ -219,8 +268,8 @@ pub struct RevocationSection {
 impl RevocationSection {
     fn resolve(self) -> Result<Revocation, ConfigError> {
         Ok(Revocation {
-            psi: Psi::try_new(self.psi).at("policy.revocation.psi")?,
-            step: NonZeroU64::new(self.step.as_u64()).bytes("policy.revocation.step")?,
+            psi: Psi::try_new(self.psi).at("reclaim.revocation.psi")?,
+            step: NonZeroU64::new(self.step.as_u64()).bytes("reclaim.revocation.step")?,
         })
     }
 }

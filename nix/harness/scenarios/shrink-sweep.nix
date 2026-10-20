@@ -3,23 +3,23 @@
 
   timeout = 240;
 
-  daemon.policy = {
-    host_floor = "2GiB";
-    grant_min_interval = "2s";
+  daemon.settings.grant = {
+    floor = "2GiB";
+    min_interval = "2s";
   };
 
   guests.main = {
     daemon.ceiling = "3GiB";
 
     module = { ... }: {
-      services.pazari-agent.harness = {
-        engine.release = {
-          kind = "sweep";
-          min = "256MiB";
-          hold = "20s";
-          cooldown = "5s";
-        };
+      services.pazari-agent.settings.release = {
+        kind = "sweep";
+        min = "256MiB";
+        hold = "20s";
+        cooldown = "5s";
+      };
 
+      services.pazari-agent.harness = {
         workload.phases = [
           "grow=2GiB,rate=384MiB/s"
           "release=1800MiB"

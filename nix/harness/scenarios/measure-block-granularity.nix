@@ -43,20 +43,24 @@
                   '';
             };
 
-            services.pazari-agent.harness = {
-              engine = {
-                grow = {
-                  kind = "exponential";
-                  step = "128MiB";
-                };
+            services.pazari-agent.settings = {
+              resize = {
                 settle_grace = "3s";
                 deny_backoff = "1s";
-                release = {
-                  kind = "titrate";
-                  cooldown = "2s";
-                };
               };
 
+              grow = {
+                kind = "exponential";
+                step = "128MiB";
+              };
+
+              release = {
+                kind = "titrate";
+                cooldown = "2s";
+              };
+            };
+
+            services.pazari-agent.harness = {
               workload.phases = [
                 "grow=2GiB,rate=24MiB/s"
                 "release=1536MiB"
@@ -71,9 +75,9 @@
       coarse = arm "128M";
     };
 
-  daemon.policy = {
-    host_floor = "1GiB";
-    grant_min_interval = "500ms";
+  daemon.settings.grant = {
+    floor = "1GiB";
+    min_interval = "500ms";
   };
 
   assertions = ''

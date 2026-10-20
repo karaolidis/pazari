@@ -3,15 +3,20 @@
 
   timeout = 600;
 
-  daemon.policy = {
-    host_floor = "512MiB";
-    grant_min_interval = "2s";
-    grant_swap = true;
-    reclaim_deadline = "30s";
+  daemon.settings = {
+    grant = {
+      floor = "512MiB";
+      min_interval = "2s";
+      swap = true;
+    };
 
-    revocation = {
-      psi = 10.0;
-      step = "512MiB";
+    reclaim = {
+      deadline = "30s";
+
+      revocation = {
+        psi = 10.0;
+        step = "512MiB";
+      };
     };
   };
 
@@ -19,13 +24,13 @@
     daemon.ceiling = "2560MiB";
 
     module = { ... }: {
-      services.pazari-agent.harness = {
-        # The idle guest must not volunteer the memory before the host asks.
-        engine.release = {
-          kind = "titrate";
-          cooldown = "600s";
-        };
+      # The idle guest must not volunteer the memory before the host asks.
+      services.pazari-agent.settings.release = {
+        kind = "titrate";
+        cooldown = "600s";
+      };
 
+      services.pazari-agent.harness = {
         workload.phases = [
           "grow=1200MiB,rate=256MiB/s"
           "release=900MiB"

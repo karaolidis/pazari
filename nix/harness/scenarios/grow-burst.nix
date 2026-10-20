@@ -3,9 +3,9 @@
 
   timeout = 420;
 
-  daemon.policy = {
-    host_floor = "2GiB";
-    grant_min_interval = "2s";
+  daemon.settings.grant = {
+    floor = "2GiB";
+    min_interval = "2s";
   };
 
   guests.main = {

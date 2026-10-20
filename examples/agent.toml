@@ -1,7 +1,12 @@
+[tick]
 # How often the agent reads the workload cgroup and `/proc/meminfo`.
-tick_interval = "1s"
+interval = "1s"
 
-[engine]
+[workload]
+# The managed workload cgroup, as an absolute path under the unified
+# hierarchy. Set me.
+cgroup = "/sys/fs/cgroup/workload.slice"
+
 # Memory withheld for the guest's own services, excluding the workload.
 # Set me.
 service_reserve = "256MiB"
@@ -10,34 +15,63 @@ service_reserve = "256MiB"
 # workload can overrun the brake before it reaches its hard limit. Set me.
 burst_reserve = "256MiB"
 
-# How long to wait before re-asking a host that denied a request.
-deny_backoff = "5s"
+# Which adapter writes `memory.high` and `memory.max`.
+[workload.backend]
+# Possible variants:
+# - Straight to the cgroup's own files.
+#     kind = "cgroupfs"
+# - Through the runtime properties of a unit.
+#     kind = "systemd"
+#     # The unit carrying the limits as `MemoryHigh` and `MemoryMax`. Set me.
+#     unit = "workload.service"
+kind = "cgroupfs"
 
+[host]
+# How long to wait for the host's `welcome`.
+handshake_timeout = "10s"
+
+# The first reconnect delay.
+reconnect_min = "500ms"
+
+# The cap the reconnect delay doubles towards.
+reconnect_max = "30s"
+
+# How the agent reaches pazarid.
+[host.transport]
+# Possible variants:
+# - `AF_VSOCK`.
+#     kind = "vsock"
+#     # The host's context id.
+#     cid = 2
+#     
+#     # The port pazarid listens on.
+#     port = 4650
+# - An `AF_UNIX` socket.
+#     kind = "unix"
+#     # The socket pazarid listens on. Set me.
+#     path = "/run/pazari/host.sock"
+kind = "vsock"
+
+[resize]
 # How long a resize is left to settle.
 settle_grace = "10s"
 
-# Intervals of calm that end an exhaustion.
-recovery_intervals = 3
+# How long to wait before re-asking a host that denied a request.
+deny_backoff = "5s"
+
+# How long the hotplug listener waits for one resize's uevent to end.
+hotplug_debounce = "250ms"
+
+[reclaim]
+# How much one `memory.reclaim` write asks for.
+chunk = "64MiB"
 
 # The `swappiness=` argument for `memory.reclaim`. Leave the key out to
 # reclaim at the guest's own `vm.swappiness`.
-reclaim_swappiness = 0
-
-# What the agent does once the workload wants more than the ceiling
-# allows.
-[engine.exhaustion]
-# Possible variants:
-# - Leave the band open and let the workload degrade.
-#     kind = "stall"
-#     # How long a workload may want more than the ceiling allows before the
-#     # agent stops waiting for the host to move.
-#     timeout = "60s"
-# - Let the workload reach `memory.max` and be killed as a unit.
-#     kind = "kill"
-kind = "stall"
+swappiness = 0
 
 # What the agent does when the workload throttles at `memory.high`.
-[engine.throttle]
+[throttle]
 # Possible variants:
 # - Ask the host for more at once.
 #     kind = "grow"
@@ -48,7 +82,7 @@ kind = "stall"
 kind = "grow"
 
 # How much more memory each request asks the host for.
-[engine.grow]
+[grow]
 # Possible variants:
 # - One step at first, doubled for each brake that follows soon after the
 #   last grow.
@@ -61,7 +95,7 @@ kind = "grow"
 kind = "exponential"
 
 # When the guest gives memory back to the host, and how much.
-[engine.release]
+[release]
 # Possible variants:
 # - One fixed step at a time, once the guest has held it spare for a run of
 #   calm intervals and the last resize has cooled off.
@@ -70,7 +104,7 @@ kind = "exponential"
 #     step = "256MiB"
 #     
 #     # Intervals of a spare `step` over the reserves before a release.
-#     intervals = 3
+#     after = 3
 #     
 #     # How long after a resize before a release is allowed.
 #     cooldown = "30s"
@@ -86,65 +120,28 @@ kind = "exponential"
 #     cooldown = "30s"
 kind = "titrate"
 
-[runtime]
-# The managed workload cgroup, as an absolute path under the unified
-# hierarchy. Set me.
-cgroup = "/sys/fs/cgroup/workload.slice"
+[exhaustion]
+# Calm intervals that end an exhaustion.
+recover_after = 3
 
-# How long the hotplug listener waits for one resize's uevent to end.
-hotplug_debounce = "250ms"
+# What the agent does once the workload wants more than the ceiling
+# allows.
+[exhaustion.mode]
+# Possible variants:
+# - Leave the band open and let the workload degrade.
+#     kind = "stall"
+#     # How long a workload may want more than the ceiling allows before the
+#     # agent stops waiting for the host to move.
+#     timeout = "60s"
+# - Let the workload reach `memory.max` and be killed as a unit.
+#     kind = "kill"
+kind = "stall"
 
-# How much one `memory.reclaim` write asks for.
-reclaim_chunk = "64MiB"
-
+[preflight]
 # Whether `/sys/kernel/mm/transparent_hugepage/enabled` set to `always`
 # fails preflight.
 thp_always_fatal = true
 
-# Which adapter writes `memory.high` and `memory.max`.
-[runtime.backend]
-# Possible variants:
-# - Straight to the cgroup's own files.
-#     kind = "cgroupfs"
-# - Through the runtime properties of a unit.
-#     kind = "systemd"
-#     # The unit carrying the limits as `MemoryHigh` and `MemoryMax`. Set me.
-#     unit = "workload.service"
-kind = "cgroupfs"
-
 [metrics]
 # The address the Prometheus endpoint answers scrapes on.
 listen = "127.0.0.1:9651"
-
-[transport]
-# Possible variants:
-# - `AF_VSOCK`.
-#     kind = "vsock"
-#     # The host's context id.
-#     cid = 2
-#     
-#     # The port pazarid listens on.
-#     port = 4650
-#     
-#     # How long to wait for the host's `welcome`.
-#     handshake_timeout = "10s"
-#     
-#     # The first reconnect delay.
-#     reconnect_min = "500ms"
-#     
-#     # The cap the reconnect delay doubles towards.
-#     reconnect_max = "30s"
-# - An `AF_UNIX` socket.
-#     kind = "unix"
-#     # The socket pazarid listens on. Set me.
-#     path = "/run/pazari/host.sock"
-#     
-#     # How long to wait for the host's `welcome`.
-#     handshake_timeout = "10s"
-#     
-#     # The first reconnect delay.
-#     reconnect_min = "500ms"
-#     
-#     # The cap the reconnect delay doubles towards.
-#     reconnect_max = "30s"
-kind = "vsock"

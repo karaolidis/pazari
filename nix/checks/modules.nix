@@ -39,12 +39,12 @@ let
       openFirewall = true;
 
       settings = {
-        engine = {
+        workload = {
           service_reserve = "256MiB";
           burst_reserve = "256MiB";
         };
 
-        transport = {
+        host.transport = {
           kind = "vsock";
           cid = 2;
         };
@@ -62,7 +62,7 @@ let
       slice = "tenants.slice";
       watchdog.enable = false;
 
-      settings.runtime = {
+      settings.workload = {
         backend.kind = "cgroupfs";
       };
     };
@@ -96,7 +96,7 @@ let
       enable = true;
 
       settings = {
-        policy.host_floor = "2GiB";
+        grant.floor = "2GiB";
 
         guests.example = {
           ceiling = "8GiB";
@@ -123,19 +123,20 @@ in
   module-guest = verify "module-guest" [
     {
       name = "the workload cgroup is the slice's";
-      ok = guestSettings.runtime.cgroup == "/sys/fs/cgroup/workload.slice";
+      ok = guestSettings.workload.cgroup == "/sys/fs/cgroup/workload.slice";
     }
     {
       name = "the limits go through the slice unit";
       ok =
-        guestSettings.runtime.backend == {
+        guestSettings.workload.backend == {
           kind = "systemd";
           unit = "workload.slice";
         };
     }
     {
       name = "the settings the deployment sets survive";
-      ok = guestSettings.engine.burst_reserve == "256MiB" && guestSettings.transport.kind == "vsock";
+      ok =
+        guestSettings.workload.burst_reserve == "256MiB" && guestSettings.host.transport.kind == "vsock";
     }
     {
       name = "the metrics port becomes a listen address";
@@ -204,8 +205,8 @@ in
     {
       name = "a slice of the deployment's own is taken whole";
       ok =
-        borrowedSettings.runtime.cgroup == "/sys/fs/cgroup/tenants.slice"
-        && borrowedSettings.runtime.backend == { kind = "cgroupfs"; }
+        borrowedSettings.workload.cgroup == "/sys/fs/cgroup/tenants.slice"
+        && borrowedSettings.workload.backend == { kind = "cgroupfs"; }
         && borrowed.systemd.units ? "tenants.slice";
     }
     {
@@ -216,8 +217,8 @@ in
 
   module-host = verify "module-host" [
     {
-      name = "the policy the deployment sets survives";
-      ok = hostSettings.policy.host_floor == "2GiB";
+      name = "the grant floor the deployment sets survives";
+      ok = hostSettings.grant.floor == "2GiB";
     }
     {
       name = "a guest carries its ceiling, transport and device";

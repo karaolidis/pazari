@@ -5,9 +5,9 @@
 
   sample = 0.05;
 
-  daemon.policy = {
-    host_floor = "1GiB";
-    grant_min_interval = "500ms";
+  daemon.settings.grant = {
+    floor = "1GiB";
+    min_interval = "500ms";
   };
 
   guests =
@@ -15,20 +15,23 @@
       arm = tick: {
         daemon.ceiling = "4608MiB";
 
-        module = { lib, ... }: {
+        module = { ... }: {
           services.pazari-agent = {
-            settings.tick_interval = lib.mkForce tick;
+            settings = {
+              tick.interval = tick;
 
-            harness = {
-              engine = {
-                grow = {
-                  kind = "exponential";
-                  step = "128MiB";
-                };
+              resize = {
                 settle_grace = "3s";
                 deny_backoff = "1s";
               };
 
+              grow = {
+                kind = "exponential";
+                step = "128MiB";
+              };
+            };
+
+            harness = {
               workload.phases = [
                 "grow=3584MiB,rate=24MiB/s"
                 "hold=20s"
@@ -57,7 +60,7 @@
 
     import matplotlib.pyplot as plt
 
-    ARMS = [("tick500", "tick_interval = 500ms"), ("tick100", "tick_interval = 100ms")]
+    ARMS = [("tick500", "tick.interval = 500ms"), ("tick100", "tick.interval = 100ms")]
 
     ROUNDS = 8
 

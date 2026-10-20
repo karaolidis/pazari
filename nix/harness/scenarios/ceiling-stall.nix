@@ -3,25 +3,25 @@
 
   timeout = 300;
 
-  daemon.policy = {
-    host_floor = "2GiB";
-    grant_min_interval = "2s";
+  daemon.settings.grant = {
+    floor = "2GiB";
+    min_interval = "2s";
   };
 
   guests.main = {
     daemon.ceiling = "1792MiB";
 
     module = { ... }: {
-      services.pazari-agent.harness = {
-        engine = {
-          burst_reserve = "512MiB";
+      services.pazari-agent.settings = {
+        workload.burst_reserve = "512MiB";
 
-          exhaustion = {
-            kind = "stall";
-            timeout = "600s";
-          };
+        exhaustion.mode = {
+          kind = "stall";
+          timeout = "600s";
         };
+      };
 
+      services.pazari-agent.harness = {
         workload.phases = [
           "grow=850MiB,rate=96MiB/s"
           "hold=600s"

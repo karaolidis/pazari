@@ -42,32 +42,6 @@ let
     done
   '';
 
-  engine = {
-    service_reserve = "640MiB";
-    burst_reserve = "256MiB";
-
-    deny_backoff = "2s";
-    settle_grace = "5s";
-
-    reclaim_swappiness = 0;
-
-    exhaustion = {
-      kind = "stall";
-      timeout = "300s";
-    };
-
-    grow = {
-      kind = "exponential";
-      step = "512MiB";
-    };
-
-    release = {
-      kind = "titrate";
-      step = "256MiB";
-      intervals = 3;
-      cooldown = "5s";
-    };
-  };
 in
 {
   options.services.pazari-agent.harness = {
@@ -239,17 +213,6 @@ in
         '';
       };
     };
-
-    engine = lib.mkOption {
-      type = lib.types.attrsOf lib.types.anything;
-      default = { };
-      example = {
-        burst_reserve = "512MiB";
-      };
-      description = ''
-        What the scenario changes about the agent's engine settings.
-      '';
-    };
   };
 
   config = {
@@ -393,14 +356,41 @@ in
       openFirewall = true;
 
       settings = {
-        tick_interval = "500ms";
+        tick.interval = lib.mkDefault "500ms";
 
-        engine = engine // cfg.engine;
+        workload = {
+          service_reserve = lib.mkDefault "640MiB";
+          burst_reserve = lib.mkDefault "256MiB";
+        };
 
-        transport = {
+        host.transport = {
           kind = "vsock";
           cid = 2;
           port = cfg.vsockPort;
+        };
+
+        resize = {
+          settle_grace = lib.mkDefault "5s";
+          deny_backoff = lib.mkDefault "2s";
+        };
+
+        reclaim.swappiness = lib.mkDefault 0;
+
+        grow = lib.mkDefault {
+          kind = "exponential";
+          step = "512MiB";
+        };
+
+        release = lib.mkDefault {
+          kind = "titrate";
+          step = "256MiB";
+          after = 3;
+          cooldown = "5s";
+        };
+
+        exhaustion.mode = lib.mkDefault {
+          kind = "stall";
+          timeout = "300s";
         };
       };
     };

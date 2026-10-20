@@ -43,15 +43,19 @@ to
 Unless stated otherwise, a duration must be greater than zero and at most 24
 hours.
 .Sh SETTINGS
-.Ss Top level
+.Ss [tick]\&
 .Bl -tag -width Ds
-.It Cm tick_interval No = Ar duration
+.It Cm interval No = Ar duration
 How often the agent samples the workload cgroup and the guest's memory.
 Default
 .Cm 1s .
 .El
-.Ss [engine]\&
+.Ss [workload]\&
 .Bl -tag -width Ds
+.It Cm cgroup No = Ar path
+Absolute path of the workload cgroup, for example
+.Pa /sys/fs/cgroup/workload.slice .
+Required.
 .It Cm service_reserve No = Ar size
 Memory kept below
 .Va memory.max
@@ -65,23 +69,100 @@ and
 Required; must be greater than 0.
 See
 .Sx SIZING .
-.It Cm deny_backoff No = Ar duration
-How long to wait before retrying a refused request, when the host does not
-specify a delay.
+.El
+.Ss [workload.backend]\&
+How the agent sets
+.Va memory.high
+and
+.Va memory.max .
+Other cgroup files are always written directly.
+Optional; defaults to
+.Cm cgroupfs .
+.Bl -tag -width Ds
+.It Cm kind No = Qq Cm cgroupfs
+Write the cgroup files directly.
+.It Cm kind No = Qq Cm systemd
+Set
+.Va MemoryHigh
+and
+.Va MemoryMax
+as runtime properties of a unit over D-Bus.
+.Bl -tag -width Ds
+.It Cm unit No = Ar name
+The unit, for example
+.Ql workload.slice .
+Required.
+.El
+.El
+.Ss [host]\&
+The session with
+.Xr pazarid 1 .
+.Bl -tag -width Ds
+.It Cm handshake_timeout No = Ar duration
+How long to wait for the daemon to answer a new connection.
 Default
-.Cm 5s .
+.Cm 10s .
+.It Cm reconnect_min No = Ar duration
+First reconnect delay.
+Default
+.Cm 500ms .
+.It Cm reconnect_max No = Ar duration
+Maximum reconnect delay; the delay doubles up to this.
+Must be at least
+.Cm reconnect_min .
+Default
+.Cm 30s .
+.El
+.Ss [host.transport]\&
+How the agent reaches
+.Xr pazarid 1 .
+Required.
+.Bl -tag -width Ds
+.It Cm kind No = Qq Cm vsock
+.Bl -tag -width Ds
+.It Cm cid No = Ar integer
+The host's context ID.
+Default
+.Cm 2 .
+.It Cm port No = Ar integer
+Default
+.Cm 4650 .
+.El
+.It Cm kind No = Qq Cm unix
+For guests that are not virtual machines.
+.Bl -tag -width Ds
+.It Cm path No = Ar path
+The daemon's socket.
+Required.
+.El
+.El
+.Ss [resize]\&
+.Bl -tag -width Ds
 .It Cm settle_grace No = Ar duration
 How long to wait for granted memory to arrive before accepting the size the
 guest has.
 Default
 .Cm 10s .
-.It Cm recovery_intervals No = Ar count
-Consecutive calm ticks that end an exhaustion.
-A tick is calm when the workload neither throttles nor breaches, and the guest
-has a memory block to spare.
+.It Cm deny_backoff No = Ar duration
+How long to wait before retrying a refused request, when the host does not
+specify a delay.
 Default
-.Cm 3 .
-.It Cm reclaim_swappiness No = Ar integer
+.Cm 5s .
+.It Cm hotplug_debounce No = Ar duration
+After a memory hot-plug event, how long to wait for further events before
+re-reading the guest's memory.
+Default
+.Cm 250ms .
+.El
+.Ss [reclaim]\&
+.Bl -tag -width Ds
+.It Cm chunk No = Ar size
+The largest single
+.Va memory.reclaim
+write.
+Default
+.Cm 64MiB .
+.It Cm swappiness No = Ar integer
 The
 .Va swappiness
 passed to each
@@ -91,30 +172,7 @@ If unset, the guest's
 .Va vm.swappiness
 applies.
 .El
-.Ss [engine.exhaustion]\&
-What the agent does when the guest reaches its ceiling.
-Optional; defaults to
-.Cm stall
-with a
-.Cm 60s
-timeout.
-.Bl -tag -width Ds
-.It Cm kind No = Qq Cm stall
-Keep the workload throttled.
-.Bl -tag -width Ds
-.It Cm timeout No = Ar duration
-How long to keep the workload throttled before releasing the brake and letting
-it reach
-.Va memory.max .
-Default
-.Cm 60s .
-.El
-.It Cm kind No = Qq Cm kill
-Release the brake immediately, and have the kernel kill the whole cgroup when
-it reaches
-.Va memory.max .
-.El
-.Ss [engine.throttle]\&
+.Ss [throttle]\&
 What the agent does when the workload throttles at
 .Va memory.high .
 Optional; defaults to
@@ -131,7 +189,7 @@ Default
 .Cm 256MiB .
 .El
 .El
-.Ss [engine.grow]\&
+.Ss [grow]\&
 How much more memory each grant request asks for.
 Optional; defaults to
 .Cm exponential .
@@ -149,7 +207,7 @@ Default
 .Cm 10s .
 .El
 .El
-.Ss [engine.release]\&
+.Ss [release]\&
 When the guest returns memory to the host, and how much.
 Optional; defaults to
 .Cm titrate .
@@ -161,7 +219,7 @@ Release a fixed step at a time.
 How much one release returns.
 Default
 .Cm 256MiB .
-.It Cm intervals No = Ar count
+.It Cm after No = Ar count
 Consecutive ticks the guest must have
 .Cm step
 to spare before a release.
@@ -196,53 +254,46 @@ Default
 .Cm 30s .
 .El
 .El
-.Ss [runtime]\&
+.Ss [exhaustion]\&
 .Bl -tag -width Ds
-.It Cm cgroup No = Ar path
-Absolute path of the workload cgroup, for example
-.Pa /sys/fs/cgroup/workload.slice .
-Required.
-.It Cm hotplug_debounce No = Ar duration
-After a memory hot-plug event, how long to wait for further events before
-re-reading the guest's memory.
+.It Cm recover_after No = Ar count
+Consecutive calm ticks that end an exhaustion.
+A tick is calm when the workload neither throttles nor breaches, and the guest
+has a memory block to spare.
 Default
-.Cm 250ms .
-.It Cm reclaim_chunk No = Ar size
-The largest single
-.Va memory.reclaim
-write.
+.Cm 3 .
+.El
+.Ss [exhaustion.mode]\&
+What the agent does when the guest reaches its ceiling.
+Optional; defaults to
+.Cm stall
+with a
+.Cm 60s
+timeout.
+.Bl -tag -width Ds
+.It Cm kind No = Qq Cm stall
+Keep the workload throttled.
+.Bl -tag -width Ds
+.It Cm timeout No = Ar duration
+How long to keep the workload throttled before releasing the brake and letting
+it reach
+.Va memory.max .
 Default
-.Cm 64MiB .
+.Cm 60s .
+.El
+.It Cm kind No = Qq Cm kill
+Release the brake immediately, and have the kernel kill the whole cgroup when
+it reaches
+.Va memory.max .
+.El
+.Ss [preflight]\&
+.Bl -tag -width Ds
 .It Cm thp_always_fatal No = Ar boolean
 Whether
 .Va transparent_hugepage=always
 fails preflight rather than warning.
 Default
 .Cm true .
-.El
-.Ss [runtime.backend]\&
-How the agent sets
-.Va memory.high
-and
-.Va memory.max .
-Other cgroup files are always written directly.
-Optional; defaults to
-.Cm cgroupfs .
-.Bl -tag -width Ds
-.It Cm kind No = Qq Cm cgroupfs
-Write the cgroup files directly.
-.It Cm kind No = Qq Cm systemd
-Set
-.Va MemoryHigh
-and
-.Va MemoryMax
-as runtime properties of a unit over D-Bus.
-.Bl -tag -width Ds
-.It Cm unit No = Ar name
-The unit, for example
-.Ql workload.slice .
-Required.
-.El
 .El
 .Ss [metrics]\&
 Optional.
@@ -252,47 +303,6 @@ Without it, the agent serves no metrics.
 Address to serve OpenMetrics on, for example
 .Ql 127.0.0.1:9651 .
 Required.
-.El
-.Ss [transport]\&
-How the agent reaches
-.Xr pazarid 1 .
-Required.
-.Bl -tag -width Ds
-.It Cm kind No = Qq Cm vsock
-.Bl -tag -width Ds
-.It Cm cid No = Ar integer
-The host's context ID.
-Default
-.Cm 2 .
-.It Cm port No = Ar integer
-Default
-.Cm 4650 .
-.El
-.It Cm kind No = Qq Cm unix
-For guests that are not virtual machines.
-.Bl -tag -width Ds
-.It Cm path No = Ar path
-The daemon's socket.
-Required.
-.El
-.El
-.Pp
-Both kinds accept:
-.Bl -tag -width Ds
-.It Cm handshake_timeout No = Ar duration
-How long to wait for the daemon to answer a new connection.
-Default
-.Cm 10s .
-.It Cm reconnect_min No = Ar duration
-First reconnect delay.
-Default
-.Cm 500ms .
-.It Cm reconnect_max No = Ar duration
-Maximum reconnect delay; the delay doubles up to this.
-Must be at least
-.Cm reconnect_min .
-Default
-.Cm 30s .
 .El
 .Sh SIZING
 .Ss service_reserve
@@ -341,8 +351,8 @@ Measure on your own hardware.
 Grow round trip, from request to
 .Va MemTotal
 rising, over 11 grows:
-.Bl -column "tick_interval" "median" "95th percentile" -offset indent
-.It Sy tick_interval Ta Sy median Ta Sy 95th percentile
+.Bl -column "tick.interval" "median" "95th percentile" -offset indent
+.It Sy tick.interval Ta Sy median Ta Sy 95th percentile
 .It 500ms Ta 302ms Ta 402ms
 .It 100ms Ta 118ms Ta 180ms
 .El
@@ -447,28 +457,27 @@ Annotated example, installed with the package.
 A guest that boots with 2GiB, keeps 512MiB for its own services, uses a 256MiB
 burst reserve, and stalls for up to five minutes when exhausted:
 .Bd -literal -offset indent
-tick_interval = "500ms"
+[tick]
+interval = "500ms"
 
-[engine]
+[workload]
+cgroup = "/sys/fs/cgroup/workload.slice"
 service_reserve = "512MiB"
 burst_reserve = "256MiB"
 
-[engine.exhaustion]
-kind = "stall"
-timeout = "300s"
-
-[runtime]
-cgroup = "/sys/fs/cgroup/workload.slice"
-
-[runtime.backend]
+[workload.backend]
 kind = "systemd"
 unit = "workload.slice"
 
+[host.transport]
+kind = "vsock"
+
+[exhaustion.mode]
+kind = "stall"
+timeout = "300s"
+
 [metrics]
 listen = "127.0.0.1:9651"
-
-[transport]
-kind = "vsock"
 .Ed
 .Sh SEE ALSO
 .Xr pazari-agent 1 ,

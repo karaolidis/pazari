@@ -35,13 +35,13 @@ It reads its configuration once, at startup.
 .Ss Grants
 A grow is granted if the host's available memory, less memory already promised
 to other guests and less the growth requested, is at least
-.Cm policy.host_floor .
+.Cm grant.floor .
 Available memory is
 .Va MemAvailable ,
 plus
 .Va SwapFree
 if
-.Cm policy.grant_swap
+.Cm grant.swap
 is set.
 Grants are capped at the guest's ceiling and may be smaller than requested.
 .Pp
@@ -53,10 +53,10 @@ Retrying will not help until the ceiling is raised.
 .It Cm host_pressure
 The host does not have the memory, or has not yet read its memory figures.
 The guest is told to retry after
-.Cm policy.grant_min_interval .
+.Cm grant.min_interval .
 .It Cm rate_limited
 The guest was granted memory less than
-.Cm policy.grant_min_interval
+.Cm grant.min_interval
 ago.
 The guest is told how long to wait.
 .It Cm policy
@@ -67,7 +67,7 @@ Offers to release memory are always accepted.
 .Ss Reclaim
 The daemon never removes memory from a guest.
 With
-.Cm policy.revocation
+.Cm reclaim.revocation
 configured, it asks guests to return memory while the host is under pressure,
 and a guest may refuse; see
 .Xr pazarid.toml 5 .
@@ -98,7 +98,7 @@ Reads
 and exits if it cannot.
 .It
 Warns if the guests' ceilings plus
-.Cm policy.host_floor
+.Cm grant.floor
 exceed the host's RAM plus swap.
 See
 .Sx CAPACITY
@@ -106,12 +106,12 @@ in
 .Xr pazarid.toml 5 .
 .It
 Exits if
-.Cm policy.revocation
+.Cm reclaim.revocation
 is configured and the kernel does not provide
 .Pa /proc/pressure/memory .
 .It
 Warns if
-.Cm policy.grant_swap
+.Cm grant.swap
 is set and the host swaps to zram.
 .It
 Connects to each guest's QMP socket, opens its listeners, and reports

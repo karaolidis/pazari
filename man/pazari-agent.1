@@ -93,7 +93,7 @@ When the workload throttles at
 .Va memory.high ,
 the agent asks the host for more.
 With
-.Cm engine.throttle
+.Cm throttle
 set to
 .Cm reclaim ,
 it first reclaims
@@ -102,7 +102,7 @@ from the workload cgroup, if the guest has that much to spare.
 It asks the host only if the reclaim falls short.
 .Ss Growing
 A grant request asks for the larger of the step the
-.Cm engine.grow
+.Cm grow
 strategy names and the workload's current shortfall.
 The target is rounded up to the guest's memory block size and capped at the
 ceiling the host has set.
@@ -110,20 +110,20 @@ ceiling the host has set.
 After a grant, the agent waits for
 .Va MemTotal
 to reach the target, or for
-.Cm settle_grace
+.Cm resize.settle_grace
 to pass, whichever is first, and then works with whatever memory the guest has.
 .Pp
 A refusal with reason
 .Cm ceiling
 makes the agent exhausted.
 Any other refusal is retried after the delay the host names, or after
-.Cm deny_backoff
+.Cm resize.deny_backoff
 if it names none.
 Such retries continue for as long as the guest is below its ceiling, and the
 workload stays throttled while they do.
 .Ss Releasing
 The
-.Cm engine.release
+.Cm release
 strategy decides when to release and how much.
 The agent never releases memory the guest booted with.
 .Ss Host reclaim requests
@@ -145,7 +145,7 @@ The agent becomes exhausted when the host refuses a request with reason
 .Cm ceiling ,
 or when the guest already holds its whole ceiling.
 What happens next is set by
-.Cm engine.exhaustion
+.Cm exhaustion.mode
 in
 .Xr pazari-agent.toml 5 :
 .Bl -tag -width "stall"
@@ -183,7 +183,7 @@ the host raises the ceiling;
 rises for any reason;
 .It
 the workload stays calm for
-.Cm engine.recovery_intervals
+.Cm exhaustion.recover_after
 ticks;
 .It
 the connection to the host is re-established; or
@@ -263,7 +263,7 @@ or
 .It Cm cgroup v2
 The unified cgroup hierarchy is mounted.
 .It Cm workload cgroup
-.Cm runtime.cgroup
+.Cm workload.cgroup
 exists and the agent can read and write the files it needs.
 A failure lists each file it could not use.
 .It Cm agent cgroup
@@ -286,7 +286,7 @@ or boot with
 Transparent hugepages are not set to
 .Cm always .
 Fails by default; see
-.Cm runtime.thp_always_fatal
+.Cm preflight.thp_always_fatal
 in
 .Xr pazari-agent.toml 5 .
 .It Cm block size
@@ -298,7 +298,7 @@ Warns if a virtio device cannot be identified.
 .It Cm swap
 The guest has swap and the workload cgroup may use it.
 Only ever a warning, and skipped when
-.Cm engine.reclaim_swappiness
+.Cm reclaim.swappiness
 is 0.
 .El
 .Pp

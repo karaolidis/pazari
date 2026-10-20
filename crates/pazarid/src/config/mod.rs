@@ -130,19 +130,26 @@ mod tests {
     const EXAMPLE: &str = include_str!("../../../../examples/pazarid.toml");
 
     const FULL: &str = r#"
-        tick_interval = "500ms"
+        [tick]
+        interval = "500ms"
 
-        [policy]
-        welcome_status_interval = "2s"
-        host_floor = "3GiB"
-        grant_min_interval = "10s"
-        reconcile_deadline = "45s"
-        shrink_revert = false
+        [status]
+        interval = "2s"
         stale_after = 5
-        reclaim_deadline = "20s"
-        grant_swap = true
 
-        [policy.revocation]
+        [grant]
+        floor = "3GiB"
+        min_interval = "10s"
+        swap = true
+
+        [actuation]
+        deadline = "45s"
+        revert_shrinks = false
+
+        [reclaim]
+        deadline = "20s"
+
+        [reclaim.revocation]
         psi = 30.0
         step = "512MiB"
 
@@ -166,8 +173,8 @@ mod tests {
     "#;
 
     const MINIMAL: &str = r#"
-        [policy]
-        host_floor = "2GiB"
+        [grant]
+        floor = "2GiB"
 
         [guests.example]
         ceiling = "8GiB"
@@ -396,7 +403,7 @@ mod tests {
 
     #[test]
     fn a_file_that_names_no_guests_is_refused() {
-        let error = rejects("[policy]\nhost_floor = \"2GiB\"\n");
+        let error = rejects("[grant]\nfloor = \"2GiB\"\n");
 
         assert_eq!(error, "the file names no guests");
     }
@@ -442,27 +449,23 @@ mod tests {
     #[test]
     fn a_malformed_duration_names_the_field_that_carries_it() {
         let error = rejects(&MINIMAL.replace(
-            r#"host_floor = "2GiB""#,
-            "host_floor = \"2GiB\"\ngrant_min_interval = \"3 fortnights\"",
+            r#"floor = "2GiB""#,
+            "floor = \"2GiB\"\nmin_interval = \"3 fortnights\"",
         ));
 
-        assert!(
-            error.contains("grant_min_interval"),
-            "unexpected error: {error}"
-        );
+        assert!(error.contains("min_interval"), "unexpected error: {error}");
     }
 
     #[test]
     fn a_malformed_size_names_the_field_that_carries_it() {
-        let error =
-            rejects(&MINIMAL.replace(r#"host_floor = "2GiB""#, r#"host_floor = "2 lorries""#));
+        let error = rejects(&MINIMAL.replace(r#"floor = "2GiB""#, r#"floor = "2 lorries""#));
 
-        assert!(error.contains("host_floor"), "unexpected error: {error}");
+        assert!(error.contains("floor"), "unexpected error: {error}");
     }
 
     #[test]
     fn an_unknown_key_names_itself() {
-        let error = rejects(&MINIMAL.replace("[policy]", "[policy]\nnagle = true"));
+        let error = rejects(&MINIMAL.replace("[grant]", "[grant]\nnagle = true"));
 
         assert!(error.contains("nagle"), "unexpected error: {error}");
     }
@@ -505,24 +508,21 @@ mod tests {
 
     #[test]
     fn a_zero_interval_names_the_field_that_carries_it() {
-        let error = rejects(&MINIMAL.replace("[policy]", "tick_interval = \"0s\"\n\n[policy]"));
+        let error = rejects(&MINIMAL.replace("[grant]", "[tick]\ninterval = \"0s\"\n\n[grant]"));
 
         assert_eq!(
             error,
-            "tick_interval: Interval rejects 0ns: expected (0s, 24h]"
+            "tick.interval: Interval rejects 0ns: expected (0s, 24h]"
         );
     }
 
     #[test]
     fn a_zero_count_names_the_field_that_carries_it() {
-        let error = rejects(&MINIMAL.replace(
-            r#"host_floor = "2GiB""#,
-            "host_floor = \"2GiB\"\nstale_after = 0",
-        ));
+        let error = rejects(&MINIMAL.replace("[grant]", "[status]\nstale_after = 0\n\n[grant]"));
 
         assert_eq!(
             error,
-            "policy.stale_after rejects 0: expected a positive count of intervals"
+            "status.stale_after rejects 0: expected a positive count of intervals"
         );
     }
 
@@ -556,8 +556,8 @@ mod tests {
     fn a_metrics_table_binds_the_address_it_names() {
         assert_eq!(
             parse(&MINIMAL.replace(
-                "[policy]",
-                "[metrics]\nlisten = \"127.0.0.1:9650\"\n\n[policy]",
+                "[grant]",
+                "[metrics]\nlisten = \"127.0.0.1:9650\"\n\n[grant]",
             ))
             .metrics,
             Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9650)))
@@ -567,8 +567,8 @@ mod tests {
     #[test]
     fn a_metrics_address_that_is_not_one_names_the_field_that_carries_it() {
         let error = rejects(&MINIMAL.replace(
-            "[policy]",
-            "[metrics]\nlisten = \"nowhere in particular\"\n\n[policy]",
+            "[grant]",
+            "[metrics]\nlisten = \"nowhere in particular\"\n\n[grant]",
         ));
 
         assert!(error.contains("listen"), "unexpected error: {error}");
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn a_metrics_table_without_an_address_is_refused() {
-        let error = rejects(&MINIMAL.replace("[policy]", "[metrics]\n\n[policy]"));
+        let error = rejects(&MINIMAL.replace("[grant]", "[metrics]\n\n[grant]"));
 
         assert!(error.contains("listen"), "unexpected error: {error}");
     }
@@ -608,7 +608,7 @@ mod tests {
     fn a_revocation_threshold_outside_its_range_is_refused() {
         assert_eq!(
             rejects(&FULL.replace("psi = 30.0", "psi = 101.0")),
-            "policy.revocation.psi: Psi rejects 101.0: expected (0, 100]"
+            "reclaim.revocation.psi: Psi rejects 101.0: expected (0, 100]"
         );
     }
 
@@ -616,7 +616,7 @@ mod tests {
     fn a_revocation_that_asks_for_nothing_is_refused() {
         assert_eq!(
             rejects(&FULL.replace(r#"step = "512MiB""#, r#"step = "0B""#)),
-            "policy.revocation.step rejects 0: expected a positive byte count"
+            "reclaim.revocation.step rejects 0: expected a positive byte count"
         );
     }
 

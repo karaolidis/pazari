@@ -3,9 +3,9 @@
 
   timeout = 300;
 
-  daemon.policy = {
-    host_floor = "2GiB";
-    grant_min_interval = "2s";
+  daemon.settings.grant = {
+    floor = "2GiB";
+    min_interval = "2s";
   };
 
   guests.main = {
@@ -17,7 +17,7 @@
       environment.systemPackages = [ config.services.pazari-agent.package ];
 
       services.pazari-agent = {
-        settings.runtime.thp_always_fatal = false;
+        settings.preflight.thp_always_fatal = false;
 
         harness.workload.phases = [
           "grow=1GiB,rate=256MiB/s"

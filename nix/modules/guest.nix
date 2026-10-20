@@ -97,12 +97,12 @@ in
       type = format.type;
       default = { };
       example = {
-        engine = {
+        workload = {
           service_reserve = "256MiB";
           burst_reserve = "256MiB";
         };
 
-        transport.kind = "vsock";
+        host.transport.kind = "vsock";
       };
       description = ''
         The agent's configuration, rendered to `/etc/pazari/agent.toml`.
@@ -147,7 +147,7 @@ in
     };
 
     services.pazari-agent.settings = {
-      runtime = {
+      workload = {
         cgroup = lib.mkDefault "/sys/fs/cgroup/${cfg.slice}";
 
         backend = lib.mkDefault {

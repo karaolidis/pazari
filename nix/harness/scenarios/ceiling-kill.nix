@@ -5,22 +5,22 @@
 
   breaches = true;
 
-  daemon.policy = {
-    host_floor = "2GiB";
-    grant_min_interval = "2s";
+  daemon.settings.grant = {
+    floor = "2GiB";
+    min_interval = "2s";
   };
 
   guests.main = {
     daemon.ceiling = "1792MiB";
 
     module = { ... }: {
+      services.pazari-agent.settings = {
+        workload.burst_reserve = "512MiB";
+
+        exhaustion.mode.kind = "kill";
+      };
+
       services.pazari-agent.harness = {
-        engine = {
-          burst_reserve = "512MiB";
-
-          exhaustion.kind = "kill";
-        };
-
         workload.phases = [
           "grow=1600MiB,rate=256MiB/s"
           "hold=60s"

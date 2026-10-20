@@ -7,9 +7,9 @@
 
   breaches = true;
 
-  daemon.policy = {
-    host_floor = "2GiB";
-    grant_min_interval = "2s";
+  daemon.settings.grant = {
+    floor = "2GiB";
+    min_interval = "2s";
   };
 
   guests =
@@ -26,18 +26,17 @@
         {
           daemon.ceiling = "1792MiB";
 
-          module = { lib, ... }: {
+          module = { ... }: {
             microvm.hotplugMem = 512;
 
             services.pazari-agent = {
-              settings.tick_interval = lib.mkForce "100ms";
+              settings = {
+                tick.interval = "100ms";
+                workload.burst_reserve = reserve;
+                exhaustion.mode = exhaustion;
+              };
 
               harness = {
-                engine = {
-                  burst_reserve = reserve;
-                  inherit exhaustion;
-                };
-
                 workload.phases = [
                   "grow=400MiB,rate=200MiB/s"
                   "grow=1200MiB,chunk=${chunk}"

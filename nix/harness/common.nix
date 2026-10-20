@@ -76,36 +76,34 @@ rec {
       ) (lib.attrNames scenario.guests)
     );
 
-  settings = scenario: built: qmp: {
-    tick_interval = "500ms";
+  settings =
+    scenario: built: qmp:
+    lib.recursiveUpdate {
+      tick.interval = "500ms";
+      status.interval = "500ms";
+      actuation.deadline = "30s";
 
-    policy = {
-      welcome_status_interval = "500ms";
-      reconcile_deadline = "30s";
-    }
-    // (scenario.daemon.policy or { });
+      metrics.listen = "127.0.0.1:${toString daemonPort}";
 
-    metrics.listen = "127.0.0.1:${toString daemonPort}";
+      guests = lib.mapAttrs (
+        name: guest:
+        {
+          transport = {
+            kind = "vsock";
+            inherit (built.${name}.config.services.pazari-agent.harness) cid;
+            port = built.${name}.config.services.pazari-agent.harness.vsockPort;
+          };
 
-    guests = lib.mapAttrs (
-      name: guest:
-      {
-        transport = {
-          kind = "vsock";
-          inherit (built.${name}.config.services.pazari-agent.harness) cid;
-          port = built.${name}.config.services.pazari-agent.harness.vsockPort;
-        };
-
-        qmp = {
-          path = qmp name;
-          inherit (built.${name}.config.services.pazari-agent.harness.qmp) device;
-          deadline = "5s";
-          mode.kind = "held";
-        };
-      }
-      // (guest.daemon or { })
-    ) scenario.guests;
-  };
+          qmp = {
+            path = qmp name;
+            inherit (built.${name}.config.services.pazari-agent.harness.qmp) device;
+            deadline = "5s";
+            mode.kind = "held";
+          };
+        }
+        // (guest.daemon or { })
+      ) scenario.guests;
+    } (scenario.daemon.settings or { });
 
   entry = scenario: built: parts: {
     inherit (scenario) name description timeout;

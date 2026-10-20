@@ -40,7 +40,7 @@ mod tests {
     fn the_delay_climbs_until_it_reaches_the_cap() {
         let mut backoff = Backoff::new(MIN, MAX);
 
-        assert!(backoff.delay() <= MIN, "the first delay is over the floor");
+        assert_eq!(backoff.delay(), MIN);
 
         for _ in 0..8 {
             backoff.delay();
@@ -75,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn a_handshake_puts_the_next_delay_back_at_the_floor() {
+    fn a_reset_puts_the_next_delay_back_at_the_floor() {
         let mut backoff = Backoff::new(MIN, MAX);
 
         for _ in 0..8 {
@@ -84,10 +84,7 @@ mod tests {
 
         backoff.reset();
 
-        assert!(
-            backoff.delay() <= MIN,
-            "the delay did not go back to the floor"
-        );
+        assert_eq!(backoff.delay(), MIN);
     }
 
     #[test]
@@ -95,7 +92,7 @@ mod tests {
         let mut backoff = Backoff::new(MAX, MAX);
 
         for _ in 0..8 {
-            assert!(backoff.delay() <= MAX);
+            assert_eq!(backoff.delay(), MAX);
         }
     }
 }

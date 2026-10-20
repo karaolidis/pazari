@@ -19,8 +19,8 @@ pub struct Snapshot {
     pub swap_used: u64,
     pub high_events: u64,
     pub max_events: u64,
-    pub psi_some10: f32,
-    pub psi_full10: f32,
+    pub psi_some10: f64,
+    pub psi_full10: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]

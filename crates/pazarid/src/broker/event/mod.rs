@@ -35,7 +35,7 @@ pub enum Event {
         swap_free: u64,
 
         /// Absent where the kernel carries no `/proc/pressure/memory`.
-        psi: Option<f32>,
+        psi: Option<f64>,
     },
 
     Reclaim {

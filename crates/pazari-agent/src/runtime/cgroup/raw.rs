@@ -174,8 +174,8 @@ mod tests {
         assert_eq!(cgroup.swap_current().await.unwrap(), 0);
 
         let pressure = cgroup.pressure().await.unwrap();
-        assert!((pressure.some10 - 12.5).abs() < f32::EPSILON);
-        assert!((pressure.full10 - 0.25).abs() < f32::EPSILON);
+        assert!((pressure.some10 - 12.5).abs() < f64::EPSILON);
+        assert!((pressure.full10 - 0.25).abs() < f64::EPSILON);
     }
 
     #[tokio::test]

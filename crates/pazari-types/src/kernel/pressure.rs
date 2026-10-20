@@ -8,10 +8,10 @@ const PERCENTAGE: &str = "a pressure percentage";
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Pressure {
     /// Time in which some task was stalled on the resource.
-    pub some10: f32,
+    pub some10: f64,
 
     /// Time in which every task was.
-    pub full10: f32,
+    pub full10: f64,
 }
 
 impl Pressure {
@@ -48,8 +48,8 @@ impl Pressure {
     }
 }
 
-fn percent(path: &Path, text: &str) -> Result<f32, KernelFileError> {
-    let value: f32 = text.parse().map_err(|_| KernelFileError::Malformed {
+fn percent(path: &Path, text: &str) -> Result<f64, KernelFileError> {
+    let value: f64 = text.parse().map_err(|_| KernelFileError::Malformed {
         path: path.to_path_buf(),
         value: text.to_owned(),
         expected: PERCENTAGE,
@@ -89,8 +89,8 @@ mod tests {
         for text in [HOST, CGROUP] {
             let pressure = parsed(text);
 
-            assert!((pressure.some10 - 12.5).abs() < f32::EPSILON, "{text}");
-            assert!((pressure.full10 - 0.25).abs() < f32::EPSILON, "{text}");
+            assert!((pressure.some10 - 12.5).abs() < f64::EPSILON, "{text}");
+            assert!((pressure.full10 - 0.25).abs() < f64::EPSILON, "{text}");
         }
     }
 

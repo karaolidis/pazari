@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use pazari_proto::{GuestMessage, HostMessage, PROTOCOL_VERSION};
 use tracing::{info, warn};
 
@@ -5,7 +7,7 @@ use crate::broker::phase::{Negotiated, Phase, State, Step};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Held {
-    block_size: u64,
+    block_size: NonZeroU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,12 +42,12 @@ impl AwaitingHello {
             "sending welcome",
         );
 
-        let status_interval_ms = step.policy().welcome_status_interval.get();
+        let status_interval = step.policy().welcome_status_interval.get();
 
         step.send(HostMessage::Welcome {
             protocol: PROTOCOL_VERSION,
             ceiling: ceiling.get(),
-            status_interval_ms,
+            status_interval,
             hotplugged,
         });
 
@@ -104,7 +106,7 @@ impl State for AwaitingHello {
             return self.reject(step);
         }
 
-        if block_size == 0 || total_mem == 0 {
+        if total_mem == 0 {
             warn!(
                 guest = step.name(),
                 peer = %step.peer,

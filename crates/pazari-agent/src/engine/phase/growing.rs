@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use pazari_proto::{DenyReason, GuestMessage};
+use pazari_proto::{DenyReason, GuestMessage, RequestId};
 use pazari_types::{Deadline, Timestamp};
 use tracing::debug;
 
@@ -9,7 +9,6 @@ use crate::engine::{
     grow::Grow,
     limits::Brake,
     phase::{Phase, State, Step, exhausted::Exhausted, steady::Steady},
-    world::RequestId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +64,7 @@ impl Growing {
         );
 
         step.send(GuestMessage::GrantRequest {
-            id: id.get(),
+            id,
             current,
             target,
         });
@@ -80,15 +79,15 @@ impl Growing {
         })
     }
 
-    pub const fn pending_request(self) -> Option<u64> {
+    pub const fn pending_request(self) -> Option<RequestId> {
         match self.stage {
-            Stage::Requesting { id, .. } => Some(id.get()),
+            Stage::Requesting { id, .. } => Some(id),
             _ => None,
         }
     }
 
-    const fn answers(self, id: u64) -> bool {
-        matches!(self.pending_request(), Some(pending) if pending == id)
+    const fn answers(self, id: RequestId) -> bool {
+        matches!(self.pending_request(), Some(pending) if pending.get() == id.get())
     }
 
     const fn blocked(self) -> Phase {
@@ -146,7 +145,7 @@ impl State for Growing {
         }
     }
 
-    fn on_grant(self, step: &mut Step<'_>, id: u64, target: u64) -> Phase {
+    fn on_grant(self, step: &mut Step<'_>, id: RequestId, target: u64) -> Phase {
         if !self.answers(id) {
             return self.stay();
         }
@@ -160,7 +159,7 @@ impl State for Growing {
     fn on_deny(
         self,
         step: &mut Step<'_>,
-        id: u64,
+        id: RequestId,
         reason: DenyReason,
         retry_after: Option<Duration>,
     ) -> Phase {
@@ -175,7 +174,7 @@ impl State for Growing {
         let backoff = retry_after.unwrap_or_else(|| step.config().deny_backoff.get());
 
         debug!(
-            id,
+            %id,
             ?reason,
             ?backoff,
             "backing off before retrying the request"
@@ -258,7 +257,7 @@ mod tests {
 
         wake(&mut engine, at(100), 1);
 
-        assert_eq!(engine.pending_request(), Some(1));
+        assert_eq!(engine.pending_request(), Some(RequestId(1)));
         assert_eq!(engine.high(), HIGH0);
         assert!(engine.high() < engine.max());
     }
@@ -271,7 +270,7 @@ mod tests {
 
         assert_eq!(wake(&mut engine, at(101), 2), vec![]);
         assert_eq!(wake(&mut engine, at(102), 3), vec![]);
-        assert_eq!(engine.pending_request(), Some(1));
+        assert_eq!(engine.pending_request(), Some(RequestId(1)));
     }
 
     #[test]
@@ -285,7 +284,7 @@ mod tests {
                 &mut engine,
                 at(101),
                 HostMessage::Grant {
-                    id: 1,
+                    id: RequestId(1),
                     target: 2560 * MIB,
                 },
             ),
@@ -313,7 +312,7 @@ mod tests {
             &mut engine,
             at(101),
             HostMessage::Grant {
-                id: 1,
+                id: RequestId(1),
                 target: 2304 * MIB,
             },
         );
@@ -339,7 +338,7 @@ mod tests {
             &mut engine,
             at(101),
             HostMessage::Grant {
-                id: 1,
+                id: RequestId(1),
                 target: 2560 * MIB,
             },
         );
@@ -376,9 +375,9 @@ mod tests {
                 &mut engine,
                 at(101),
                 HostMessage::Deny {
-                    id: 1,
+                    id: RequestId(1),
                     reason: DenyReason::HostPressure,
-                    retry_after_ms: Some(Duration::from_secs(5)),
+                    retry_after: Some(Duration::from_secs(5)),
                 },
             ),
             vec![]
@@ -389,7 +388,7 @@ mod tests {
             tick(&mut engine, at(106), snap(BOOT, BUSY, 1)),
             vec![request(2, BOOT, 2560 * MIB)]
         );
-        assert_eq!(engine.pending_request(), Some(2));
+        assert_eq!(engine.pending_request(), Some(RequestId(2)));
     }
 
     #[test]
@@ -401,9 +400,9 @@ mod tests {
             &mut engine,
             at(100),
             HostMessage::Deny {
-                id: 1,
+                id: RequestId(1),
                 reason: DenyReason::RateLimited,
-                retry_after_ms: None,
+                retry_after: None,
             },
         );
 
@@ -424,17 +423,20 @@ mod tests {
             &mut engine,
             at(101),
             HostMessage::ReclaimRequest {
-                id: 11,
+                id: ReclaimId(11),
                 desired: 128 * MIB,
-                deadline_ms: Duration::from_secs(30),
+                deadline: Duration::from_secs(30),
             },
         );
 
         assert!(matches!(
             actions.as_slice(),
-            [Action::Send(GuestMessage::ReclaimNak { id: 11, .. })]
+            [Action::Send(GuestMessage::ReclaimNak {
+                id: ReclaimId(11),
+                ..
+            })]
         ));
-        assert_eq!(engine.pending_request(), Some(1));
+        assert_eq!(engine.pending_request(), Some(RequestId(1)));
     }
 
     #[test]
@@ -445,7 +447,7 @@ mod tests {
 
         for round in 0..3 {
             let id = engine.pending_request().expect("a request is in flight");
-            assert_eq!(id, round + 1);
+            assert_eq!(id, RequestId(round + 1));
 
             host(
                 &mut engine,
@@ -453,14 +455,14 @@ mod tests {
                 HostMessage::Deny {
                     id,
                     reason: DenyReason::HostPressure,
-                    retry_after_ms: Some(Duration::from_secs(5)),
+                    retry_after: Some(Duration::from_secs(5)),
                 },
             );
 
             tick(&mut engine, at(105 + round * 10), snap(BOOT, BUSY, 1));
         }
 
-        assert_eq!(engine.pending_request(), Some(4));
+        assert_eq!(engine.pending_request(), Some(RequestId(4)));
     }
 
     #[test]
@@ -474,13 +476,13 @@ mod tests {
                 &mut engine,
                 at(101),
                 HostMessage::Grant {
-                    id: 99,
+                    id: RequestId(99),
                     target: 8192 * MIB,
                 },
             ),
             vec![]
         );
-        assert_eq!(engine.pending_request(), Some(1));
+        assert_eq!(engine.pending_request(), Some(RequestId(1)));
         assert!(matches!(engine.phase(), Phase::Growing(_)));
     }
 }

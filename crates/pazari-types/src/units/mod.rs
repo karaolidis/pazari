@@ -5,7 +5,7 @@ pub mod psi;
 pub mod swappiness;
 
 pub use crate::units::{
-    duration::{Delay, Interval, MAX_DURATION},
+    duration::{Delay, Interval},
     psi::Psi,
     swappiness::Swappiness,
 };

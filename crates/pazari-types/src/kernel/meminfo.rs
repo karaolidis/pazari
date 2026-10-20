@@ -17,10 +17,10 @@ pub struct MemInfo {
     /// `MemAvailable`.
     pub available: u64,
 
-    /// `SwapTotal`.
+    /// `SwapTotal`, or 0 on a kernel built without swap.
     pub swap_total: u64,
 
-    /// `SwapFree`.
+    /// `SwapFree`, or 0 on a kernel built without swap.
     pub swap_free: u64,
 }
 

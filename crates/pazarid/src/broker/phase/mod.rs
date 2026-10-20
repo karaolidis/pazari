@@ -4,7 +4,7 @@ mod negotiated;
 use std::num::NonZeroU64;
 
 use enum_dispatch::enum_dispatch;
-use pazari_proto::{GuestMessage, HostMessage, Status};
+use pazari_proto::{GuestMessage, HostMessage, ReclaimId, RequestId, Status};
 use pazari_transport::PeerId;
 use pazari_types::Timestamp;
 
@@ -46,7 +46,7 @@ impl Step<'_> {
         self.fx.send(self.peer, message);
     }
 
-    pub fn answer(&mut self, id: u64, decision: Decision) {
+    pub fn answer(&mut self, id: RequestId, decision: Decision) {
         self.world.answer(self.peer, id, decision, self.fx);
     }
 
@@ -65,19 +65,19 @@ pub trait State: Copy {
         self.refuse(step, "hello")
     }
 
-    fn on_grant_request(self, step: &mut Step<'_>, _id: u64, _target: u64) -> Phase {
+    fn on_grant_request(self, step: &mut Step<'_>, _id: RequestId, _target: u64) -> Phase {
         self.refuse(step, "grant_request")
     }
 
-    fn on_offer_release(self, step: &mut Step<'_>, _id: u64, _releasable: u64) -> Phase {
+    fn on_offer_release(self, step: &mut Step<'_>, _id: RequestId, _releasable: u64) -> Phase {
         self.refuse(step, "offer_release")
     }
 
-    fn on_reclaim_ack(self, step: &mut Step<'_>, _id: u64, _will_release: u64) -> Phase {
+    fn on_reclaim_ack(self, step: &mut Step<'_>, _id: ReclaimId, _will_release: u64) -> Phase {
         self.refuse(step, "reclaim_ack")
     }
 
-    fn on_reclaim_nak(self, step: &mut Step<'_>, _id: u64, _reason: &str) -> Phase {
+    fn on_reclaim_nak(self, step: &mut Step<'_>, _id: ReclaimId, _reason: &str) -> Phase {
         self.refuse(step, "reclaim_nak")
     }
 

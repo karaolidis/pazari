@@ -1,10 +1,58 @@
-use std::{fmt, time::Duration};
+use std::{fmt, num::NonZeroU64, time::Duration};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_with::{DurationMilliSeconds, serde_as};
 
 #[cfg(test)]
 pub(crate) mod fixtures;
+
+/// Names one grant request or release offer, as the guest numbered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RequestId(pub u64);
+
+impl RequestId {
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The id after this one.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+impl fmt::Display for RequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Names one reclaim request, as the host numbered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReclaimId(pub u64);
+
+impl ReclaimId {
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The id after this one.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+impl fmt::Display for ReclaimId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// One reading of the guest's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -13,8 +61,8 @@ pub struct Status {
     pub available: u64,
     pub high_events: u64,
     pub max_events: u64,
-    pub psi_some10: f32,
-    pub psi_full10: f32,
+    pub psi_some10: f64,
+    pub psi_full10: f64,
     pub swap_used: u64,
     pub workload_usage: u64,
 }
@@ -25,29 +73,29 @@ pub enum GuestMessage {
     Hello {
         protocol: u16,
         agent_version: String,
-        block_size: u64,
+        block_size: NonZeroU64,
         total_mem: u64,
     },
 
     GrantRequest {
-        id: u64,
+        id: RequestId,
         current: u64,
         target: u64,
     },
 
     OfferRelease {
-        id: u64,
+        id: RequestId,
         current: u64,
         releasable: u64,
     },
 
     ReclaimAck {
-        id: u64,
+        id: ReclaimId,
         will_release: u64,
     },
 
     ReclaimNak {
-        id: u64,
+        id: ReclaimId,
         reason: String,
     },
 
@@ -79,7 +127,8 @@ pub enum HostMessage {
         protocol: u16,
         ceiling: u64,
         #[serde_as(as = "DurationMilliSeconds<u64>")]
-        status_interval_ms: Duration,
+        #[serde(rename = "status_interval_ms")]
+        status_interval: Duration,
         hotplugged: u64,
     },
 
@@ -92,23 +141,28 @@ pub enum HostMessage {
     },
 
     Grant {
-        id: u64,
+        id: RequestId,
         target: u64,
     },
 
     Deny {
-        id: u64,
+        id: RequestId,
         reason: DenyReason,
         #[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        retry_after_ms: Option<Duration>,
+        #[serde(
+            rename = "retry_after_ms",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        retry_after: Option<Duration>,
     },
 
     ReclaimRequest {
-        id: u64,
+        id: ReclaimId,
         desired: u64,
         #[serde_as(as = "DurationMilliSeconds<u64>")]
-        deadline_ms: Duration,
+        #[serde(rename = "deadline_ms")]
+        deadline: Duration,
     },
 }
 
@@ -164,11 +218,11 @@ impl Peer for Host {
 mod tests {
     use std::time::Duration;
 
-    use super::{
-        DenyReason, GuestMessage, HostMessage,
-        fixtures::{guest_messages, host_messages},
+    use super::{DenyReason, GuestMessage, HostMessage, RequestId};
+    use crate::{
+        Codec, Decoder, JsonLinesCodec,
+        testing::{guest_messages, host_messages},
     };
-    use crate::{Codec, Decoder, JsonLinesCodec};
 
     #[test]
     fn guest_messages_survive_serde() {
@@ -235,6 +289,31 @@ mod tests {
     }
 
     #[test]
+    fn a_deny_reason_spells_itself_as_it_goes_on_the_wire() {
+        for reason in [
+            DenyReason::Ceiling,
+            DenyReason::HostPressure,
+            DenyReason::RateLimited,
+            DenyReason::Policy,
+        ] {
+            assert_eq!(
+                serde_json::to_value(reason).unwrap(),
+                serde_json::Value::from(reason.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn a_guest_message_names_its_kind_as_it_goes_on_the_wire() {
+        for message in guest_messages() {
+            assert_eq!(
+                serde_json::to_value(&message).unwrap()["type"],
+                serde_json::Value::from(message.kind())
+            );
+        }
+    }
+
+    #[test]
     fn unknown_fields_are_ignored() {
         let line = br#"{"type":"grant","id":1,"target":42,"quota":7,"note":{"nested":[1,2]}}
 "#;
@@ -244,12 +323,15 @@ mod tests {
 
         assert_eq!(
             decoder.next_message().unwrap(),
-            Some(HostMessage::Grant { id: 1, target: 42 })
+            Some(HostMessage::Grant {
+                id: RequestId(1),
+                target: 42,
+            })
         );
     }
 
     #[test]
-    fn retry_after_ms_accepts_absent_null_and_present() {
+    fn retry_after_accepts_absent_null_and_present() {
         let cases = [
             (
                 &br#"{"type":"deny","id":1,"reason":"ceiling"}
@@ -268,16 +350,16 @@ mod tests {
             ),
         ];
 
-        for (line, retry_after_ms) in cases {
+        for (line, retry_after) in cases {
             let mut decoder = JsonLinesCodec::decoder::<HostMessage>();
             decoder.push(line).unwrap();
 
             assert_eq!(
                 decoder.next_message().unwrap(),
                 Some(HostMessage::Deny {
-                    id: 1,
+                    id: RequestId(1),
                     reason: DenyReason::Ceiling,
-                    retry_after_ms,
+                    retry_after,
                 })
             );
         }

@@ -1,4 +1,4 @@
-use pazari_proto::GuestMessage;
+use pazari_proto::{GuestMessage, ReclaimId};
 use tracing::debug;
 
 use crate::engine::{
@@ -67,7 +67,7 @@ impl State for Steady {
         self.stay()
     }
 
-    fn on_reclaim_request(self, step: &mut Step<'_>, id: u64, desired: u64) -> Phase {
+    fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, desired: u64) -> Phase {
         if step.world.reclaiming() {
             step.nak(id, "a reclaim has yet to report");
 
@@ -77,7 +77,7 @@ impl State for Steady {
         let will_release = step.world.release_budget(desired).unwrap_or(0);
 
         debug!(
-            id,
+            %id,
             desired,
             will_release,
             usage = step.guest().usage(),
@@ -305,14 +305,14 @@ mod tests {
                 &mut engine,
                 at(141),
                 HostMessage::ReclaimRequest {
-                    id: 7,
+                    id: ReclaimId(7),
                     desired: 512 * MIB,
-                    deadline_ms: Duration::from_secs(30),
+                    deadline: Duration::from_secs(30),
                 },
             ),
             vec![
                 Action::Send(GuestMessage::ReclaimAck {
-                    id: 7,
+                    id: ReclaimId(7),
                     will_release: 512 * MIB,
                 }),
                 Action::StartReclaim {
@@ -334,15 +334,18 @@ mod tests {
             &mut engine,
             at(101),
             HostMessage::ReclaimRequest {
-                id: 9,
+                id: ReclaimId(9),
                 desired: 512 * MIB,
-                deadline_ms: Duration::from_secs(30),
+                deadline: Duration::from_secs(30),
             },
         );
 
         assert!(matches!(
             actions.as_slice(),
-            [Action::Send(GuestMessage::ReclaimNak { id: 9, .. })]
+            [Action::Send(GuestMessage::ReclaimNak {
+                id: ReclaimId(9),
+                ..
+            })]
         ));
         assert!(matches!(engine.phase(), Phase::Steady(_)));
     }

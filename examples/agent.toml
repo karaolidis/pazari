@@ -43,7 +43,7 @@ reconnect_max = "30s"
 #     kind = "vsock"
 #     # The host's context id.
 #     cid = 2
-#     
+#
 #     # The port pazarid listens on.
 #     port = 4650
 # - An `AF_UNIX` socket.
@@ -89,7 +89,7 @@ kind = "grow"
 #     kind = "exponential"
 #     # The first request, and the unit later ones are multiples of.
 #     step = "512MiB"
-#     
+#
 #     # How soon after a grow a brake still doubles the next request.
 #     escalate_within = "10s"
 kind = "exponential"
@@ -102,20 +102,20 @@ kind = "exponential"
 #     kind = "titrate"
 #     # How much one release gives back.
 #     step = "256MiB"
-#     
+#
 #     # Intervals of a spare `step` over the reserves before a release.
 #     after = 3
-#     
+#
 #     # How long after a resize before a release is allowed.
 #     cooldown = "30s"
 # - All the spare at once, once it has held for `hold`.
 #     kind = "sweep"
 #     # The least spare that counts towards the hold.
 #     min = "256MiB"
-#     
+#
 #     # How long the spare must hold before a release.
 #     hold = "5m"
-#     
+#
 #     # How long after a resize before a release is allowed.
 #     cooldown = "30s"
 kind = "titrate"

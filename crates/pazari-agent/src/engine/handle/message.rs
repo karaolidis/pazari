@@ -22,28 +22,28 @@ impl Engine {
             }
             HostMessage::Geometry { hotplugged } => self.world.set_hotplugged(hotplugged),
             HostMessage::Grant { id, target } => {
-                debug!(id, target, "host granted the request");
+                debug!(%id, target, "host granted the request");
 
                 self.transition(now, fx, |phase, step| phase.on_grant(step, id, target));
             }
             HostMessage::Deny {
                 id,
                 reason,
-                retry_after_ms,
+                retry_after,
             } => {
                 debug!(
-                    id,
+                    %id,
                     ?reason,
-                    retry_after = ?retry_after_ms,
+                    ?retry_after,
                     "host denied the request",
                 );
 
                 self.transition(now, fx, |phase, step| {
-                    phase.on_deny(step, id, reason, retry_after_ms)
+                    phase.on_deny(step, id, reason, retry_after)
                 });
             }
             HostMessage::ReclaimRequest { id, desired, .. } => {
-                debug!(id, desired, "host requested memory back");
+                debug!(%id, desired, "host requested memory back");
 
                 self.transition(now, fx, |phase, step| {
                     phase.on_reclaim_request(step, id, desired)

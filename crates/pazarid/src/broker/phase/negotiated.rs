@@ -1,4 +1,6 @@
-use pazari_proto::{DenyReason, Status};
+use std::num::NonZeroU64;
+
+use pazari_proto::{DenyReason, ReclaimId, RequestId, Status};
 use pazari_types::{Deadline, Timestamp};
 use tracing::{debug, info, warn};
 
@@ -9,7 +11,7 @@ use crate::broker::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reclaim {
-    pub id: u64,
+    pub id: ReclaimId,
 
     pub desired: u64,
 
@@ -23,13 +25,13 @@ pub struct Reclaim {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Negotiated {
     /// What the guest said its geometry was in `hello`.
-    pub block_size: u64,
+    pub block_size: NonZeroU64,
 
     /// The last guest-initiated id answered.
-    pub answered: Option<u64>,
+    pub answered: Option<RequestId>,
 
     /// The next host-initiated id.
-    pub next_reclaim: u64,
+    pub next_reclaim: ReclaimId,
 
     pub reclaim: Option<Reclaim>,
 
@@ -43,11 +45,11 @@ pub struct Negotiated {
 
 impl Negotiated {
     #[must_use]
-    pub const fn new(block_size: u64, now: Timestamp) -> Self {
+    pub const fn new(block_size: NonZeroU64, now: Timestamp) -> Self {
         Self {
             block_size,
             answered: None,
-            next_reclaim: 1,
+            next_reclaim: ReclaimId(1),
             reclaim: None,
             status: None,
             heard: now,
@@ -56,14 +58,14 @@ impl Negotiated {
     }
 
     #[must_use]
-    pub const fn accepts(&self, id: u64) -> bool {
+    pub const fn accepts(&self, id: RequestId) -> bool {
         match self.answered {
-            Some(answered) => id > answered,
+            Some(answered) => id.get() > answered.get(),
             None => true,
         }
     }
 
-    pub const fn accept(&mut self, id: u64) -> bool {
+    pub const fn accept(&mut self, id: RequestId) -> bool {
         if !self.accepts(id) {
             return false;
         }
@@ -73,21 +75,21 @@ impl Negotiated {
         true
     }
 
-    pub const fn take_reclaim_id(&mut self) -> u64 {
+    pub const fn take_reclaim_id(&mut self) -> ReclaimId {
         let id = self.next_reclaim;
-        self.next_reclaim = self.next_reclaim.saturating_add(1);
+        self.next_reclaim = id.next();
         id
     }
 
     #[must_use]
-    const fn answers_reclaim(&self, id: u64) -> bool {
+    const fn answers_reclaim(&self, id: ReclaimId) -> bool {
         match self.reclaim {
-            Some(reclaim) => reclaim.id == id,
+            Some(reclaim) => reclaim.id.get() == id.get(),
             None => false,
         }
     }
 
-    fn accepted(mut self, step: &mut Step<'_>, id: u64) -> Option<Self> {
+    fn accepted(mut self, step: &mut Step<'_>, id: RequestId) -> Option<Self> {
         if self.accept(id) {
             return Some(self);
         }
@@ -95,7 +97,7 @@ impl Negotiated {
         warn!(
             guest = step.name(),
             peer = %step.peer,
-            id,
+            %id,
             "out-of-sequence request id",
         );
         step.close();
@@ -105,18 +107,18 @@ impl Negotiated {
 
     #[must_use]
     const fn blocks(&self, size: u64, wanted: u64, ceiling: u64) -> u64 {
-        let blocks = wanted.saturating_sub(size).div_ceil(self.block_size);
+        let blocks = wanted.saturating_sub(size).div_ceil(self.block_size.get());
 
-        let target = size.saturating_add(blocks.saturating_mul(self.block_size));
+        let target = size.saturating_add(blocks.saturating_mul(self.block_size.get()));
 
         if target < ceiling { target } else { ceiling }
     }
 
-    fn stray_reclaim(self, step: &mut Step<'_>, id: u64) -> Phase {
+    fn stray_reclaim(self, step: &mut Step<'_>, id: ReclaimId) -> Phase {
         warn!(
             guest = step.name(),
             peer = %step.peer,
-            id,
+            %id,
             "reply to a reclaim that was never requested",
         );
         step.close();
@@ -124,7 +126,7 @@ impl Negotiated {
         self.stay()
     }
 
-    fn request(step: &mut Step<'_>, id: u64, ask: Result<Ask, Decision>) {
+    fn request(step: &mut Step<'_>, id: RequestId, ask: Result<Ask, Decision>) {
         let ask = match ask {
             Ok(ask) => ask,
             Err(decision) => return step.answer(id, decision),
@@ -166,14 +168,14 @@ impl State for Negotiated {
         self.stay()
     }
 
-    fn on_grant_request(self, step: &mut Step<'_>, id: u64, target: u64) -> Phase {
+    fn on_grant_request(self, step: &mut Step<'_>, id: RequestId, target: u64) -> Phase {
         let Some(next) = self.accepted(step, id) else {
             return self.stay();
         };
 
         debug!(
             guest = step.name(),
-            id,
+            %id,
             target,
             size = ?step.size(),
             "a guest asked to grow",
@@ -206,14 +208,14 @@ impl State for Negotiated {
         next.stay()
     }
 
-    fn on_offer_release(self, step: &mut Step<'_>, id: u64, releasable: u64) -> Phase {
+    fn on_offer_release(self, step: &mut Step<'_>, id: RequestId, releasable: u64) -> Phase {
         let Some(next) = self.accepted(step, id) else {
             return self.stay();
         };
 
         debug!(
             guest = step.name(),
-            id,
+            %id,
             releasable,
             size = ?step.size(),
             "guest offered memory back",
@@ -236,7 +238,7 @@ impl State for Negotiated {
         next.stay()
     }
 
-    fn on_reclaim_ack(mut self, step: &mut Step<'_>, id: u64, will_release: u64) -> Phase {
+    fn on_reclaim_ack(mut self, step: &mut Step<'_>, id: ReclaimId, will_release: u64) -> Phase {
         if !self.answers_reclaim(id) {
             return self.stray_reclaim(step, id);
         }
@@ -247,13 +249,13 @@ impl State for Negotiated {
 
         info!(
             guest = step.name(),
-            id, will_release, "guest accepted the release"
+            %id, will_release, "guest accepted the release"
         );
 
         self.stay()
     }
 
-    fn on_reclaim_nak(mut self, step: &mut Step<'_>, id: u64, reason: &str) -> Phase {
+    fn on_reclaim_nak(mut self, step: &mut Step<'_>, id: ReclaimId, reason: &str) -> Phase {
         if !self.answers_reclaim(id) {
             return self.stray_reclaim(step, id);
         }
@@ -262,7 +264,7 @@ impl State for Negotiated {
             reclaim.refused = true;
         }
 
-        info!(guest = step.name(), id, reason, "guest refused the release");
+        info!(guest = step.name(), %id, reason, "guest refused the release");
 
         self.stay()
     }
@@ -296,38 +298,38 @@ impl State for Negotiated {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::testing::{BLOCK, at};
+    use crate::broker::testing::{BLOCK, at, bytes};
 
     fn negotiated() -> Negotiated {
-        Negotiated::new(BLOCK, at(0))
+        Negotiated::new(bytes(BLOCK), at(0))
     }
 
     #[test]
     fn guest_ids_must_climb() {
         let mut session = negotiated();
 
-        assert!(session.accepts(0));
-        assert!(session.accepts(9));
+        assert!(session.accepts(RequestId(0)));
+        assert!(session.accepts(RequestId(9)));
 
-        assert!(session.accept(4));
-        assert_eq!(session.answered, Some(4));
+        assert!(session.accept(RequestId(4)));
+        assert_eq!(session.answered, Some(RequestId(4)));
 
-        assert!(!session.accepts(3));
-        assert!(!session.accept(4));
-        assert!(session.accepts(5));
-        assert_eq!(session.answered, Some(4));
+        assert!(!session.accepts(RequestId(3)));
+        assert!(!session.accept(RequestId(4)));
+        assert!(session.accepts(RequestId(5)));
+        assert_eq!(session.answered, Some(RequestId(4)));
 
-        assert!(session.accept(5));
-        assert_eq!(session.answered, Some(5));
+        assert!(session.accept(RequestId(5)));
+        assert_eq!(session.answered, Some(RequestId(5)));
     }
 
     #[test]
     fn host_ids_start_at_one_and_climb() {
         let mut session = negotiated();
 
-        assert_eq!(session.take_reclaim_id(), 1);
-        assert_eq!(session.take_reclaim_id(), 2);
-        assert_eq!(session.take_reclaim_id(), 3);
+        assert_eq!(session.take_reclaim_id(), ReclaimId(1));
+        assert_eq!(session.take_reclaim_id(), ReclaimId(2));
+        assert_eq!(session.take_reclaim_id(), ReclaimId(3));
     }
 
     #[test]

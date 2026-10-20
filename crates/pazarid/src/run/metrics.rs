@@ -150,7 +150,7 @@ impl Observer {
             .host
             .swap_free
             .set_saturating(host.swap_free.unwrap_or(0));
-        series.host.psi.set(host.psi.unwrap_or(0.0).into());
+        series.host.psi.set(host.psi.unwrap_or(0.0));
     }
 }
 
@@ -343,7 +343,7 @@ mod tests {
     use std::time::Duration;
 
     use pazari_metrics::Encoded;
-    use pazari_proto::DenyReason;
+    use pazari_proto::{DenyReason, ReclaimId};
 
     use super::*;
     use crate::broker::{
@@ -368,9 +368,9 @@ mod tests {
         Action::Send {
             peer: vsock(cid),
             message: HostMessage::ReclaimRequest {
-                id: 1,
+                id: ReclaimId(1),
                 desired: 256 * MIB,
-                deadline_ms: Duration::from_secs(30),
+                deadline: Duration::from_secs(30),
             },
         }
     }

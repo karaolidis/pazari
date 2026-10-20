@@ -25,7 +25,7 @@ impl Broker {
             return;
         };
 
-        if f64::from(psi) < revocation.psi.get() {
+        if psi < revocation.psi.get() {
             return;
         }
 
@@ -111,14 +111,14 @@ impl Broker {
         session.reclaim = None;
 
         if reclaim.refused {
-            debug!(guest = name, id = reclaim.id, "guest left reclaim backoff");
+            debug!(guest = name, id = %reclaim.id, "guest left reclaim backoff");
 
             return;
         }
 
         warn!(
             guest = name,
-            id = reclaim.id,
+            id = %reclaim.id,
             desired = reclaim.desired,
             committed = ?reclaim.committed,
             "reclaim timed out",

@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub const MAX_DURATION: Duration = Duration::from_hours(24);
+const MAX_DURATION: Duration = Duration::from_hours(24);
 
-crate::bounded! {
+crate::bounded::bounded! {
     /// A recurring, strictly positive period.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     #[serde(try_from = "Duration", into = "Duration")]
@@ -17,7 +17,7 @@ crate::bounded! {
     fn display(shown, formatter) -> fmt::Result { write!(formatter, "{shown:?}") }
 }
 
-crate::bounded! {
+crate::bounded::bounded! {
     /// A one-shot wait.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     #[serde(try_from = "Duration", into = "Duration")]

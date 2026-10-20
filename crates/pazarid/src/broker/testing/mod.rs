@@ -6,6 +6,7 @@ use std::{
 };
 
 use pazari_proto::{DenyReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status};
+pub use pazari_proto::{ReclaimId, RequestId};
 use pazari_transport::PeerId;
 use pazari_types::{Interval, Psi, Timestamp};
 
@@ -124,7 +125,7 @@ pub const fn available(now: Timestamp, bytes: u64) -> Event {
     }
 }
 
-pub const fn pressured(now: Timestamp, bytes: u64, swap_free: u64, psi: f32) -> Event {
+pub const fn pressured(now: Timestamp, bytes: u64, swap_free: u64, psi: f64) -> Event {
     Event::HostAvailable {
         now,
         bytes,
@@ -224,14 +225,14 @@ pub fn hello_at(total_mem: u64) -> GuestMessage {
     GuestMessage::Hello {
         protocol: PROTOCOL_VERSION,
         agent_version: "0.1.0".to_owned(),
-        block_size: BLOCK,
+        block_size: bytes(BLOCK),
         total_mem,
     }
 }
 
 pub const fn ask(id: u64, current: u64, target: u64) -> GuestMessage {
     GuestMessage::GrantRequest {
-        id,
+        id: RequestId(id),
         current,
         target,
     }
@@ -239,7 +240,7 @@ pub const fn ask(id: u64, current: u64, target: u64) -> GuestMessage {
 
 pub const fn release(id: u64, current: u64, releasable: u64) -> GuestMessage {
     GuestMessage::OfferRelease {
-        id,
+        id: RequestId(id),
         current,
         releasable,
     }
@@ -268,7 +269,7 @@ pub fn welcome(cid: u32, ceiling: u64, hotplugged: u64) -> Action {
         message: HostMessage::Welcome {
             protocol: PROTOCOL_VERSION,
             ceiling,
-            status_interval_ms: policy().welcome_status_interval.get(),
+            status_interval: policy().welcome_status_interval.get(),
             hotplugged,
         },
     }
@@ -284,7 +285,10 @@ pub fn geometry(cid: u32, hotplugged: u64) -> Action {
 pub const fn grant(cid: u32, id: u64, target: u64) -> Action {
     Action::Send {
         peer: vsock(cid),
-        message: HostMessage::Grant { id, target },
+        message: HostMessage::Grant {
+            id: RequestId(id),
+            target,
+        },
     }
 }
 
@@ -292,9 +296,9 @@ pub const fn deny(cid: u32, id: u64, reason: DenyReason) -> Action {
     Action::Send {
         peer: vsock(cid),
         message: HostMessage::Deny {
-            id,
+            id: RequestId(id),
             reason,
-            retry_after_ms: None,
+            retry_after: None,
         },
     }
 }
@@ -303,9 +307,9 @@ pub const fn retry(cid: u32, id: u64, reason: DenyReason, after: Duration) -> Ac
     Action::Send {
         peer: vsock(cid),
         message: HostMessage::Deny {
-            id,
+            id: RequestId(id),
             reason,
-            retry_after_ms: Some(after),
+            retry_after: Some(after),
         },
     }
 }

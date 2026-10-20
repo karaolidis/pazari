@@ -16,7 +16,9 @@ use pazari_agent::{
     },
     session::{Geometry, Outbound, Session, SessionConfig},
 };
-use pazari_proto::{DenyReason, GuestMessage, HostMessage, PROTOCOL_VERSION, Status};
+use pazari_proto::{
+    DenyReason, GuestMessage, HostMessage, PROTOCOL_VERSION, ReclaimId, RequestId, Status,
+};
 use pazari_transport::{
     AnyConnection, AnyConnector, AnyListener, Listener, PeerId, UnixConnector, UnixListener,
 };
@@ -57,7 +59,7 @@ const REGROWN: u64 = 3072 * MIB;
 const RELEASE: u64 = 256 * MIB;
 
 const REVOKE_PSI: f64 = 20.0;
-const PRESSED: f32 = 25.0;
+const PRESSED: f64 = 25.0;
 
 const STEP: Duration = Duration::from_secs(1);
 
@@ -136,7 +138,7 @@ fn engine_config() -> EngineConfig {
 
 const fn request(id: u64, current: u64, target: u64) -> GuestMessage {
     GuestMessage::GrantRequest {
-        id,
+        id: RequestId(id),
         current,
         target,
     }
@@ -506,7 +508,7 @@ impl Harness {
         .await;
     }
 
-    async fn pressured(&mut self, bytes: u64, psi: f32) {
+    async fn pressured(&mut self, bytes: u64, psi: f64) {
         let now = self.now();
 
         self.host(Event::HostAvailable {
@@ -668,8 +670,8 @@ impl Harness {
             .filter(|message| {
                 matches!(
                     message,
-                    HostMessage::Grant { id: answered, .. }
-                    | HostMessage::Deny { id: answered, .. } if *answered == id
+                    HostMessage::Grant { id: RequestId(answered), .. }
+                    | HostMessage::Deny { id: RequestId(answered), .. } if *answered == id
                 )
             })
             .collect()
@@ -725,7 +727,8 @@ async fn a_guest_that_says_hello_is_welcomed_with_its_ceiling() {
     let negotiated = harness.negotiated().expect("a welcomed guest");
 
     assert_eq!(
-        negotiated.block_size, BLOCK,
+        negotiated.block_size.get(),
+        BLOCK,
         "the guest's geometry did not reach the host"
     );
 
@@ -735,7 +738,7 @@ async fn a_guest_that_says_hello_is_welcomed_with_its_ceiling() {
             HostMessage::Welcome {
                 protocol: PROTOCOL_VERSION,
                 ceiling: CEILING,
-                status_interval_ms: Duration::from_secs(1),
+                status_interval: Duration::from_secs(1),
                 hotplugged: 0,
             },
             HostMessage::Geometry { hotplugged: 0 },
@@ -814,7 +817,7 @@ async fn a_throttled_guest_is_grown_and_recomputes_its_limits() {
     assert_eq!(
         harness.answers(mark, 1),
         vec![HostMessage::Grant {
-            id: 1,
+            id: RequestId(1),
             target: GROWN,
         }]
     );
@@ -869,9 +872,9 @@ async fn a_grow_the_host_cannot_afford_is_denied_and_asked_for_again() {
     assert_eq!(
         harness.answers(mark, 1),
         vec![HostMessage::Deny {
-            id: 1,
+            id: RequestId(1),
             reason: DenyReason::HostPressure,
-            retry_after_ms: Some(Duration::from_millis(1)),
+            retry_after: Some(Duration::from_millis(1)),
         }]
     );
     assert_eq!(harness.actuated(mark), Vec::<u64>::new());
@@ -893,7 +896,7 @@ async fn a_grow_the_host_cannot_afford_is_denied_and_asked_for_again() {
     assert_eq!(
         harness.answers(mark, 2),
         vec![HostMessage::Grant {
-            id: 2,
+            id: RequestId(2),
             target: GROWN,
         }]
     );
@@ -925,7 +928,7 @@ async fn an_idle_guest_offers_memory_back_and_is_shrunk() {
     assert_eq!(
         harness.asked(mark),
         vec![GuestMessage::OfferRelease {
-            id: 2,
+            id: RequestId(2),
             current: GROWN,
             releasable: RELEASE,
         }]
@@ -933,7 +936,7 @@ async fn an_idle_guest_offers_memory_back_and_is_shrunk() {
     assert_eq!(
         harness.answers(mark, 2),
         vec![HostMessage::Grant {
-            id: 2,
+            id: RequestId(2),
             target: SHRUNK,
         }]
     );
@@ -979,9 +982,9 @@ async fn a_host_under_pressure_takes_memory_back() {
     assert_eq!(
         harness.sent(mark).first(),
         Some(&HostMessage::ReclaimRequest {
-            id: 1,
+            id: ReclaimId(1),
             desired: RELEASE,
-            deadline_ms: Duration::from_secs(30),
+            deadline: Duration::from_secs(30),
         }),
         "the host never asked for its memory back",
     );
@@ -995,7 +998,7 @@ async fn a_host_under_pressure_takes_memory_back() {
             })
             .collect::<Vec<_>>(),
         vec![GuestMessage::ReclaimAck {
-            id: 1,
+            id: ReclaimId(1),
             will_release: RELEASE,
         }]
     );
@@ -1003,7 +1006,7 @@ async fn a_host_under_pressure_takes_memory_back() {
     assert_eq!(
         harness.asked(mark),
         vec![GuestMessage::OfferRelease {
-            id: 2,
+            id: RequestId(2),
             current: GROWN,
             releasable: RELEASE,
         }]
@@ -1052,7 +1055,7 @@ async fn a_connection_that_drops_is_rebuilt_and_the_next_grow_still_works() {
     assert_eq!(
         harness.answers(mark, 1),
         vec![HostMessage::Grant {
-            id: 1,
+            id: RequestId(1),
             target: REGROWN,
         }],
         "the host did not answer the restarted id space exactly once"

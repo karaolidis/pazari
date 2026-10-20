@@ -161,7 +161,7 @@ impl Broker {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{num::NonZeroU64, time::Duration};
 
     use pazari_proto::{DenyReason, HostMessage, PROTOCOL_VERSION};
     use pazari_types::Timestamp;
@@ -184,7 +184,7 @@ mod tests {
                 message: HostMessage::Welcome {
                     protocol: PROTOCOL_VERSION,
                     ceiling: CEILING,
-                    status_interval_ms: Duration::from_secs(1),
+                    status_interval: Duration::from_secs(1),
                     hotplugged: 0,
                 },
             }]
@@ -201,7 +201,7 @@ mod tests {
         let wrong = GuestMessage::Hello {
             protocol: PROTOCOL_VERSION + 1,
             agent_version: "0.1.0".to_owned(),
-            block_size: BLOCK,
+            block_size: bytes(BLOCK),
             total_mem: BOOT,
         };
 
@@ -218,8 +218,8 @@ mod tests {
         let wrong = GuestMessage::Hello {
             protocol: PROTOCOL_VERSION,
             agent_version: "0.1.0".to_owned(),
-            block_size: 0,
-            total_mem: BOOT,
+            block_size: bytes(BLOCK),
+            total_mem: 0,
         };
 
         assert_eq!(message(&mut broker, at(0), ONE, wrong), vec![closed(ONE)]);
@@ -705,9 +705,9 @@ mod tests {
             vec![Action::Send {
                 peer: vsock(ONE),
                 message: HostMessage::ReclaimRequest {
-                    id: 1,
+                    id: ReclaimId(1),
                     desired: 512 * MIB,
-                    deadline_ms: Duration::from_secs(30),
+                    deadline: Duration::from_secs(30),
                 },
             }]
         );
@@ -726,7 +726,7 @@ mod tests {
             at(12),
             ONE,
             GuestMessage::ReclaimNak {
-                id: 1,
+                id: ReclaimId(1),
                 reason: "the workload is pinned".to_owned(),
             },
         );
@@ -752,9 +752,9 @@ mod tests {
             vec![Action::Send {
                 peer: vsock(ONE),
                 message: HostMessage::ReclaimRequest {
-                    id: 2,
+                    id: ReclaimId(2),
                     desired: 256 * MIB,
-                    deadline_ms: Duration::from_secs(30),
+                    deadline: Duration::from_secs(30),
                 },
             }]
         );
@@ -776,7 +776,7 @@ mod tests {
                 at(11),
                 ONE,
                 GuestMessage::ReclaimAck {
-                    id: 1,
+                    id: ReclaimId(1),
                     will_release: 256 * MIB,
                 }
             ),
@@ -836,7 +836,7 @@ mod tests {
                 at(10),
                 ONE,
                 GuestMessage::ReclaimAck {
-                    id: 7,
+                    id: ReclaimId(7),
                     will_release: 256 * MIB,
                 }
             ),
@@ -857,7 +857,7 @@ mod tests {
                 at(11),
                 ONE,
                 GuestMessage::ReclaimNak {
-                    id: 2,
+                    id: ReclaimId(2),
                     reason: "not mine".to_owned(),
                 }
             ),
@@ -925,9 +925,9 @@ mod tests {
             vec![Action::Send {
                 peer: vsock(ONE),
                 message: HostMessage::ReclaimRequest {
-                    id: 1,
+                    id: ReclaimId(1),
                     desired: 512 * MIB,
-                    deadline_ms: Duration::from_secs(30),
+                    deadline: Duration::from_secs(30),
                 },
             }]
         );
@@ -995,9 +995,9 @@ mod tests {
         Action::Send {
             peer: vsock(cid),
             message: HostMessage::ReclaimRequest {
-                id,
+                id: ReclaimId(id),
                 desired,
-                deadline_ms: Duration::from_secs(30),
+                deadline: Duration::from_secs(30),
             },
         }
     }
@@ -1107,7 +1107,7 @@ mod tests {
             at(4),
             TWO,
             GuestMessage::ReclaimNak {
-                id: 1,
+                id: ReclaimId(1),
                 reason: "the workload is pinned".to_owned(),
             },
         );
@@ -1146,7 +1146,7 @@ mod tests {
         Hello {
             cid: u32,
             protocol: u16,
-            block_size: u64,
+            block_size: NonZeroU64,
         },
         Ask {
             cid: u32,
@@ -1184,7 +1184,7 @@ mod tests {
         Available {
             bytes: u64,
             swap_free: u64,
-            psi: Option<f32>,
+            psi: Option<f64>,
         },
         Reclaim {
             slot: usize,
@@ -1276,9 +1276,12 @@ mod tests {
                 Self::Offer { id, releasable, .. } => release(id, BOOT, releasable),
                 Self::Ack {
                     id, will_release, ..
-                } => GuestMessage::ReclaimAck { id, will_release },
+                } => GuestMessage::ReclaimAck {
+                    id: ReclaimId(id),
+                    will_release,
+                },
                 Self::Nak { id, .. } => GuestMessage::ReclaimNak {
-                    id,
+                    id: ReclaimId(id),
                     reason: "no".to_owned(),
                 },
                 Self::Report { total_mem, .. } => report(total_mem, total_mem / 2),
@@ -1296,10 +1299,10 @@ mod tests {
         ]
     }
 
-    fn pressure() -> impl Strategy<Value = Option<f32>> {
+    fn pressure() -> impl Strategy<Value = Option<f64>> {
         prop_oneof![
             1 => Just(None),
-            4 => (0.0_f32..=100.0).prop_map(Some),
+            4 => (0.0_f64..=100.0).prop_map(Some),
         ]
     }
 
@@ -1314,7 +1317,7 @@ mod tests {
     fn step() -> impl Strategy<Value = Step> {
         prop_oneof![
             3 => cid().prop_map(|cid| Step::Connect { cid }),
-            4 => (cid(), prop_oneof![9 => Just(PROTOCOL_VERSION), 1 => 0_u16..4], prop_oneof![9 => Just(BLOCK), 1 => Just(0_u64)])
+            4 => (cid(), prop_oneof![9 => Just(PROTOCOL_VERSION), 1 => 0_u16..4], prop_oneof![9 => Just(bytes(BLOCK)), 1 => Just(bytes(4096))])
                 .prop_map(|(cid, protocol, block_size)| Step::Hello { cid, protocol, block_size }),
             8 => (cid(), 0_u64..6, byte_count())
                 .prop_map(|(cid, id, target)| Step::Ask { cid, id, target }),
@@ -1351,7 +1354,7 @@ mod tests {
                 Action::Send {
                     peer: target,
                     message: HostMessage::Grant { id, .. } | HostMessage::Deny { id, .. },
-                } if target == peer => Some(*id),
+                } if target == peer => Some(id.0),
                 _ => None,
             })
             .collect()
@@ -1380,12 +1383,12 @@ mod tests {
                             .index();
 
                         prop_assert!(
-                            *id > model.reclaims[slot],
+                            id.0 > model.reclaims[slot],
                             "reclaim id {id} does not follow {}",
                             model.reclaims[slot],
                         );
 
-                        model.reclaims[slot] = *id;
+                        model.reclaims[slot] = id.0;
                     }
                 }
 

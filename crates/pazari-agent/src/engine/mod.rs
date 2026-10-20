@@ -18,6 +18,7 @@ mod world;
 #[cfg(test)]
 pub(crate) mod testing;
 
+use pazari_proto::RequestId;
 use pazari_types::Timestamp;
 use tracing::debug;
 
@@ -183,7 +184,7 @@ impl Engine {
     }
 
     #[must_use]
-    pub const fn pending_request(&self) -> Option<u64> {
+    pub const fn pending_request(&self) -> Option<RequestId> {
         self.phase.pending_request()
     }
 }
@@ -242,7 +243,7 @@ mod tests {
         let actions = wake(&mut engine, at(100), 1);
 
         assert_eq!(actions, vec![request(1, BOOT, 2560 * MIB)]);
-        assert_eq!(engine.pending_request(), Some(1));
+        assert_eq!(engine.pending_request(), Some(RequestId(1)));
         assert_eq!(engine.high(), HIGH0);
         assert_eq!(engine.max(), MAX0);
     }
@@ -339,7 +340,7 @@ mod tests {
         let mut engine = started();
 
         wake(&mut engine, at(100), 1);
-        assert_eq!(engine.pending_request(), Some(1));
+        assert_eq!(engine.pending_request(), Some(RequestId(1)));
 
         engine.handle(Event::Disconnected { now: at(101) });
         assert_eq!(engine.pending_request(), None);
@@ -351,7 +352,7 @@ mod tests {
             [Action::Send(GuestMessage::Status(..)), _]
         ));
         assert_eq!(actions[1], request(1, BOOT, 2560 * MIB));
-        assert_eq!(engine.pending_request(), Some(1));
+        assert_eq!(engine.pending_request(), Some(RequestId(1)));
     }
 
     #[test]
@@ -618,7 +619,7 @@ mod tests {
             free: u64,
             available: u64,
             high_events: u64,
-            psi: f32,
+            psi: f64,
         },
         Wake {
             high_events: u64,
@@ -688,7 +689,7 @@ mod tests {
                 byte_count(),
                 byte_count(),
                 0_u64..8,
-                0.0_f32..100.0
+                0.0_f64..100.0
             )
                 .prop_map(|(total_mem, usage, free, available, high_events, psi)| {
                     Move::Tick {
@@ -723,7 +724,7 @@ mod tests {
 
     struct Model {
         connected: bool,
-        last_id: u64,
+        last_id: RequestId,
         reclaiming: bool,
     }
 
@@ -763,7 +764,7 @@ mod tests {
             };
 
             prop_assert!(
-                *id > model.last_id,
+                id.0 > model.last_id.0,
                 "id {id} does not follow {}",
                 model.last_id
             );
@@ -794,7 +795,7 @@ mod tests {
         let mut now = Timestamp::START;
         let mut model = Model {
             connected: false,
-            last_id: 0,
+            last_id: RequestId(0),
             reclaiming: false,
         };
 
@@ -837,7 +838,7 @@ mod tests {
                 }
                 Move::Connect { ceiling } => {
                     model.connected = true;
-                    model.last_id = 0;
+                    model.last_id = RequestId(0);
 
                     Event::Connected {
                         now,
@@ -859,14 +860,14 @@ mod tests {
                     target,
                     reason,
                 } => {
-                    let id = engine.pending_request().unwrap_or(0);
+                    let id = engine.pending_request().unwrap_or(RequestId(0));
                     let message = if grant {
                         HostMessage::Grant { id, target }
                     } else {
                         HostMessage::Deny {
                             id,
                             reason,
-                            retry_after_ms: None,
+                            retry_after: None,
                         }
                     };
 
@@ -875,9 +876,9 @@ mod tests {
                 Move::Reclaim { id, desired } => Event::Host {
                     now,
                     message: HostMessage::ReclaimRequest {
-                        id,
+                        id: ReclaimId(id),
                         desired,
-                        deadline_ms: Duration::from_secs(30),
+                        deadline: Duration::from_secs(30),
                     },
                 },
             };

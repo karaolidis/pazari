@@ -4,6 +4,7 @@ use std::{
 };
 
 use pazari_proto::{DenyReason, GuestMessage, HostMessage};
+pub use pazari_proto::{ReclaimId, RequestId};
 use pazari_types::{Delay, Interval, Swappiness, Timestamp};
 
 use crate::engine::{
@@ -154,7 +155,7 @@ pub fn host(engine: &mut Engine, now: Timestamp, message: HostMessage) -> Vec<Ac
 
 pub const fn request(id: u64, current: u64, target: u64) -> Action {
     Action::Send(GuestMessage::GrantRequest {
-        id,
+        id: RequestId(id),
         current,
         target,
     })
@@ -167,11 +168,11 @@ pub const fn reclaim(bytes: u64) -> Action {
     }
 }
 
-pub const fn deny(id: u64) -> HostMessage {
+pub const fn deny(id: RequestId) -> HostMessage {
     HostMessage::Deny {
         id,
         reason: DenyReason::Ceiling,
-        retry_after_ms: None,
+        retry_after: None,
     }
 }
 
@@ -221,7 +222,7 @@ pub fn grown(engine: &mut Engine) {
         engine,
         at(101),
         HostMessage::Grant {
-            id: 1,
+            id: RequestId(1),
             target: 2560 * MIB,
         },
     );

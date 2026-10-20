@@ -37,15 +37,6 @@ impl Settings for Config {
     fn resolve(file: File) -> Result<Self, ConfigError> {
         file.resolve()
     }
-
-    fn polish(template: String) -> String {
-        // doku pads the blank comment lines between enum variant fields.
-        let mut lines = template.lines().map(str::trim_end).collect::<Vec<_>>();
-
-        spaced(&mut lines);
-
-        lines.join("\n")
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,41 +69,16 @@ pub struct Qmp {
     pub retry_max: Interval,
 }
 
-/// Puts a table's own comment under the blank line that separates it from the
-/// field before it, rather than over it, which doku does for optional tables
-/// and which reads as though the comment belonged to that field.
-fn spaced(lines: &mut Vec<&str>) {
-    let mut index = 1;
-
-    while index + 1 < lines.len() {
-        let header = lines[index].is_empty()
-            && lines[index + 1].starts_with('[')
-            && lines[index - 1].starts_with('#');
-
-        if header {
-            let start = lines[..index]
-                .iter()
-                .rposition(|line| !line.starts_with('#'))
-                .map_or(0, |last| last + 1);
-
-            if start > 0 {
-                lines.remove(index);
-                lines.insert(start, "");
-            }
-        }
-
-        index += 1;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use std::{net::Ipv4Addr, time::Duration};
 
-    use pazari_proto::DEFAULT_VSOCK_PORT;
-    use pazari_transport::{Listener, PeerId, adapter::vsock::VMADDR_CID_ANY};
+    use pazari_transport::{
+        Listener, PeerId,
+        adapter::vsock::{DEFAULT_VSOCK_PORT, VMADDR_CID_ANY},
+    };
     use pazari_types::Psi;
     use tempfile::TempDir;
 

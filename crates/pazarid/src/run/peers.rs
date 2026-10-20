@@ -153,7 +153,7 @@ async fn pump(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{num::NonZeroU64, time::Duration};
 
     use pazari_proto::PROTOCOL_VERSION;
     use pazari_transport::{AnyConnector, Connector, Listener, UnixConnector, UnixListener};
@@ -174,7 +174,7 @@ mod tests {
         GuestMessage::Hello {
             protocol: PROTOCOL_VERSION,
             agent_version: "0.1.0".to_owned(),
-            block_size: 1 << 27,
+            block_size: NonZeroU64::new(1 << 27).expect("a positive block size"),
             total_mem: 1 << 31,
         }
     }

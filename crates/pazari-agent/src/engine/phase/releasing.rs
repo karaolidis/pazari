@@ -1,20 +1,19 @@
 use std::time::Duration;
 
-use pazari_proto::{DenyReason, GuestMessage};
+use pazari_proto::{DenyReason, GuestMessage, ReclaimId, RequestId};
 use pazari_types::Deadline;
 use tracing::debug;
 
 use crate::engine::{
     counters::Pressure,
     phase::{Phase, State, Step, steady::Steady},
-    world::RequestId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Owed(u64);
+pub struct Owed(ReclaimId);
 
 impl Owed {
-    pub const fn new(id: u64) -> Self {
+    pub const fn new(id: ReclaimId) -> Self {
         Self(id)
     }
 }
@@ -77,15 +76,15 @@ impl Releasing {
         Phase::Releasing(releasing)
     }
 
-    pub const fn pending_request(self) -> Option<u64> {
+    pub const fn pending_request(self) -> Option<RequestId> {
         match self.stage {
-            Stage::Offering { id, .. } => Some(id.get()),
+            Stage::Offering { id, .. } => Some(id),
             _ => None,
         }
     }
 
-    const fn answers(self, id: u64) -> bool {
-        matches!(self.pending_request(), Some(pending) if pending == id)
+    const fn answers(self, id: RequestId) -> bool {
+        matches!(self.pending_request(), Some(pending) if pending.get() == id.get())
     }
 
     fn answer(self, step: &mut Step<'_>, outcome: Outcome) {
@@ -163,7 +162,7 @@ impl State for Releasing {
         }
     }
 
-    fn on_grant(self, step: &mut Step<'_>, id: u64, target: u64) -> Phase {
+    fn on_grant(self, step: &mut Step<'_>, id: RequestId, target: u64) -> Phase {
         if !self.answers(id) {
             return self.stay();
         }
@@ -176,7 +175,7 @@ impl State for Releasing {
     fn on_deny(
         self,
         step: &mut Step<'_>,
-        id: u64,
+        id: RequestId,
         _reason: DenyReason,
         _retry_after: Option<Duration>,
     ) -> Phase {
@@ -220,7 +219,7 @@ impl State for Releasing {
         );
 
         step.send(GuestMessage::OfferRelease {
-            id: id.get(),
+            id,
             current,
             releasable,
         });
@@ -267,14 +266,14 @@ mod tests {
                 &mut engine,
                 at(141),
                 HostMessage::ReclaimRequest {
-                    id: 7,
+                    id: ReclaimId(7),
                     desired: 512 * MIB,
-                    deadline_ms: Duration::from_secs(30),
+                    deadline: Duration::from_secs(30),
                 },
             ),
             vec![
                 Action::Send(GuestMessage::ReclaimAck {
-                    id: 7,
+                    id: ReclaimId(7),
                     will_release: 512 * MIB,
                 }),
                 Action::StartReclaim {
@@ -298,7 +297,10 @@ mod tests {
                         reclaimed: 0,
                     })
                     .as_slice(),
-                [Action::Send(GuestMessage::ReclaimNak { id: 7, .. })]
+                [Action::Send(GuestMessage::ReclaimNak {
+                    id: ReclaimId(7),
+                    ..
+                })]
             ),
             "the guest acked a release and then went quiet on it",
         );
@@ -316,9 +318,9 @@ mod tests {
             &mut engine,
             at(141),
             HostMessage::ReclaimRequest {
-                id: 7,
+                id: ReclaimId(7),
                 desired: 512 * MIB,
-                deadline_ms: Duration::from_secs(30),
+                deadline: Duration::from_secs(30),
             },
         );
 
@@ -327,7 +329,10 @@ mod tests {
         assert!(
             actions.iter().any(|action| matches!(
                 action,
-                Action::Send(GuestMessage::ReclaimNak { id: 7, .. })
+                Action::Send(GuestMessage::ReclaimNak {
+                    id: ReclaimId(7),
+                    ..
+                })
             )),
             "the guest acked a release, braked out of it, and went quiet: {actions:?}",
         );
@@ -348,7 +353,7 @@ mod tests {
             &mut engine,
             at(145),
             HostMessage::Grant {
-                id: 2,
+                id: RequestId(2),
                 target: 3072 * MIB,
             },
         );
@@ -359,21 +364,30 @@ mod tests {
         assert!(matches!(engine.phase(), Phase::Steady(_)));
 
         let request = HostMessage::ReclaimRequest {
-            id: 7,
+            id: ReclaimId(7),
             desired: 512 * MIB,
-            deadline_ms: Duration::from_secs(30),
+            deadline: Duration::from_secs(30),
         };
 
         assert!(matches!(
             host(&mut engine, at(147), request.clone()).as_slice(),
-            [Action::Send(GuestMessage::ReclaimNak { id: 7, .. })]
+            [Action::Send(GuestMessage::ReclaimNak {
+                id: ReclaimId(7),
+                ..
+            })]
         ));
 
         reclaimed(&mut engine, at(148), 0);
 
         assert!(matches!(
             host(&mut engine, at(149), request).as_slice(),
-            [Action::Send(GuestMessage::ReclaimAck { id: 7, .. }), ..]
+            [
+                Action::Send(GuestMessage::ReclaimAck {
+                    id: ReclaimId(7),
+                    ..
+                }),
+                ..
+            ]
         ));
     }
 
@@ -400,7 +414,7 @@ mod tests {
                 reclaimed: 256 * MIB,
             }),
             vec![Action::Send(GuestMessage::OfferRelease {
-                id: 2,
+                id: RequestId(2),
                 current: 2560 * MIB,
                 releasable: 256 * MIB,
             })],
@@ -424,7 +438,7 @@ mod tests {
                 snap_free(2560 * MIB, CALM, 1024 * MIB, 1)
             ),
             vec![Action::Send(GuestMessage::OfferRelease {
-                id: 2,
+                id: RequestId(2),
                 current: 2560 * MIB,
                 releasable: 256 * MIB,
             })],
@@ -497,7 +511,7 @@ mod tests {
                 reclaimed: 256 * MIB,
             }),
             vec![Action::Send(GuestMessage::OfferRelease {
-                id: 2,
+                id: RequestId(2),
                 current: 2560 * MIB,
                 releasable: 256 * MIB,
             })]
@@ -508,7 +522,7 @@ mod tests {
                 &mut engine,
                 at(145),
                 HostMessage::Grant {
-                    id: 2,
+                    id: RequestId(2),
                     target: 2304 * MIB,
                 },
             ),
@@ -543,9 +557,9 @@ mod tests {
                 &mut engine,
                 at(145),
                 HostMessage::Deny {
-                    id: 2,
+                    id: RequestId(2),
                     reason: DenyReason::Policy,
-                    retry_after_ms: None,
+                    retry_after: None,
                 },
             ),
             vec![]

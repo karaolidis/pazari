@@ -290,7 +290,7 @@ impl Reading {
         self.swap_used.set_saturating(snapshot.swap_used);
         self.high_events.set_saturating(snapshot.high_events);
         self.max_events.set_saturating(snapshot.max_events);
-        self.psi_some10.set(snapshot.psi_some10.into());
+        self.psi_some10.set(snapshot.psi_some10);
     }
 
     fn register(&self, registry: &mut Registry) {
@@ -428,18 +428,18 @@ mod tests {
 
         observer.observe_event(&connected());
         observer.observe_event(&answered(HostMessage::Grant {
-            id: 1,
+            id: RequestId(1),
             target: 2560 * MIB,
         }));
         observer.observe_event(&answered(HostMessage::Deny {
-            id: 2,
+            id: RequestId(2),
             reason: DenyReason::HostPressure,
-            retry_after_ms: Some(Duration::from_secs(5)),
+            retry_after: Some(Duration::from_secs(5)),
         }));
         observer.observe_event(&answered(HostMessage::Deny {
-            id: 3,
+            id: RequestId(3),
             reason: DenyReason::Ceiling,
-            retry_after_ms: None,
+            retry_after: None,
         }));
         observer.observe_event(&Event::ThrottleWake {
             now: at(2),
@@ -483,7 +483,7 @@ mod tests {
             },
         ]);
         observer.observe_actions(&[Action::Send(GuestMessage::OfferRelease {
-            id: 2,
+            id: RequestId(2),
             current: BOOT,
             releasable: BURST,
         })]);
@@ -512,9 +512,9 @@ mod tests {
             &mut engine,
             at(101),
             HostMessage::Deny {
-                id: 1,
+                id: RequestId(1),
                 reason: DenyReason::Ceiling,
-                retry_after_ms: None,
+                retry_after: None,
             },
         );
         observer.refresh(&engine);

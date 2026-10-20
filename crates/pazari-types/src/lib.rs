@@ -16,4 +16,4 @@ pub use error::{KernelFileError, RangeError};
 pub use kernel::{MemInfo, Pressure};
 pub use scale::Scale;
 pub use time::{Clock, Timestamp};
-pub use units::{Delay, Interval, MAX_DURATION, Psi, Swappiness};
+pub use units::{Delay, Interval, Psi, Swappiness};

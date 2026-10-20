@@ -183,13 +183,16 @@ mod tests {
                 &mut engine,
                 at(101),
                 HostMessage::ReclaimRequest {
-                    id: 7,
+                    id: ReclaimId(7),
                     desired: 512 * MIB,
-                    deadline_ms: Duration::from_secs(30),
+                    deadline: Duration::from_secs(30),
                 },
             )
             .as_slice(),
-            [Action::Send(GuestMessage::ReclaimNak { id: 7, .. })]
+            [Action::Send(GuestMessage::ReclaimNak {
+                id: ReclaimId(7),
+                ..
+            })]
         ));
     }
 

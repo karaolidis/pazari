@@ -1,6 +1,6 @@
 use std::num::NonZeroU64;
 
-use pazari_proto::{DenyReason, HostMessage};
+use pazari_proto::{DenyReason, HostMessage, RequestId};
 use pazari_transport::PeerId;
 use pazari_types::{Deadline, Timestamp};
 use tracing::debug;
@@ -81,12 +81,12 @@ impl World {
             .unwrap_or(0)
     }
 
-    pub fn answer(&self, peer: &PeerId, id: u64, decision: Decision, fx: &mut Effects) {
+    pub fn answer(&self, peer: &PeerId, id: RequestId, decision: Decision, fx: &mut Effects) {
         let guest = self.guests.lookup(peer).map(|guest| self.name(guest));
 
         let message = match decision {
             Decision::Grant { target } => {
-                debug!(?guest, id, target, "granting memory");
+                debug!(?guest, %id, target, "granting memory");
 
                 HostMessage::Grant { id, target }
             }
@@ -96,7 +96,7 @@ impl World {
             } => {
                 debug!(
                     ?guest,
-                    id,
+                    %id,
                     ?reason,
                     ?retry_after,
                     available = ?self.host.available,
@@ -107,7 +107,7 @@ impl World {
                 HostMessage::Deny {
                     id,
                     reason,
-                    retry_after_ms: retry_after,
+                    retry_after,
                 }
             }
         };

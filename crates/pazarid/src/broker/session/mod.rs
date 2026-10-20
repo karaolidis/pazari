@@ -32,7 +32,7 @@ mod tests {
     use super::*;
     use crate::broker::{
         phase::AwaitingHello,
-        testing::{BLOCK, at, vsock},
+        testing::{BLOCK, at, bytes, vsock},
     };
 
     #[test]
@@ -43,7 +43,7 @@ mod tests {
         assert_eq!(session.negotiated(), None);
         assert_eq!(session.negotiated_mut(), None);
 
-        session.phase = Phase::Negotiated(Negotiated::new(BLOCK, at(0)));
+        session.phase = Phase::Negotiated(Negotiated::new(bytes(BLOCK), at(0)));
 
         assert!(session.negotiated().is_some());
     }

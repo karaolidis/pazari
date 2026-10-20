@@ -150,9 +150,9 @@ mod tests {
             &mut engine,
             at(100),
             HostMessage::Deny {
-                id: 1,
+                id: RequestId(1),
                 reason: DenyReason::Ceiling,
-                retry_after_ms: None,
+                retry_after: None,
             },
         );
 
@@ -172,7 +172,7 @@ mod tests {
                     HostMessage::Deny {
                         id,
                         reason: DenyReason::Ceiling,
-                        retry_after_ms: None,
+                        retry_after: None,
                     },
                 );
             } else if second == 112 {
@@ -197,9 +197,9 @@ mod tests {
             &mut engine,
             at(100),
             HostMessage::Deny {
-                id: 1,
+                id: RequestId(1),
                 reason: DenyReason::Ceiling,
-                retry_after_ms: None,
+                retry_after: None,
             },
         );
 
@@ -219,7 +219,7 @@ mod tests {
             &mut engine,
             at(201),
             HostMessage::Grant {
-                id: 2,
+                id: RequestId(2),
                 target: 2560 * MIB,
             },
         );
@@ -243,9 +243,9 @@ mod tests {
             &mut engine,
             at(100),
             HostMessage::Deny {
-                id: 1,
+                id: RequestId(1),
                 reason: DenyReason::Ceiling,
-                retry_after_ms: None,
+                retry_after: None,
             },
         );
         assert!(matches!(engine.phase(), Phase::Exhausted(_)));
@@ -278,9 +278,9 @@ mod tests {
             &mut engine,
             at(100),
             HostMessage::Deny {
-                id: 1,
+                id: RequestId(1),
                 reason: DenyReason::Ceiling,
-                retry_after_ms: None,
+                retry_after: None,
             },
         );
 
@@ -509,9 +509,9 @@ mod tests {
             &mut engine,
             at(100),
             HostMessage::Deny {
-                id: 1,
+                id: RequestId(1),
                 reason: DenyReason::Ceiling,
-                retry_after_ms: None,
+                retry_after: None,
             },
         );
         assert!(matches!(engine.phase(), Phase::Exhausted(_)));

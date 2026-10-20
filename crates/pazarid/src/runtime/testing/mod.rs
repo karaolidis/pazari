@@ -189,7 +189,7 @@ impl MockMemory {
     }
 
     #[must_use]
-    pub const fn pressured(mut self, some10: f32) -> Self {
+    pub const fn pressured(mut self, some10: f64) -> Self {
         self.pressure = Some(Pressure {
             some10,
             full10: 0.0,

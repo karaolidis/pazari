@@ -2,31 +2,35 @@ use std::fmt;
 
 use crate::error::RangeError;
 
+pub(crate) mod sealed {
+    /// Builds the newtype without checking its range, for [`super::Bounded::try_new`] only.
+    pub trait Wrap {
+        type Raw;
+
+        fn wrap(value: Self::Raw) -> Self;
+    }
+}
+
 /// A newtype over a raw scalar that only admits part of its range.
-pub trait Bounded: Copy + Sized {
+pub trait Bounded: sealed::Wrap<Raw = <Self as Bounded>::Raw> + Copy + Sized {
     type Raw: Copy + fmt::Debug;
 
     const NAME: &'static str;
 
     const BOUNDS: &'static str;
 
-    fn contains(value: Self::Raw) -> bool;
+    fn contains(value: <Self as Bounded>::Raw) -> bool;
 
-    fn wrap(value: Self::Raw) -> Self;
-
-    fn get(self) -> Self::Raw;
-
-    fn try_new(value: Self::Raw) -> Result<Self, RangeError> {
+    fn try_new(value: <Self as Bounded>::Raw) -> Result<Self, RangeError> {
         if !Self::contains(value) {
             return Err(RangeError::new(Self::NAME, &value, Self::BOUNDS));
         }
 
-        Ok(Self::wrap(value))
+        Ok(<Self as sealed::Wrap>::wrap(value))
     }
 }
 
 /// Declares a [`Bounded`] newtype.
-#[macro_export]
 macro_rules! bounded {
     (
         $(#[$attr:meta])*
@@ -61,13 +65,13 @@ macro_rules! bounded {
             const BOUNDS: &'static str = $bounds;
 
             fn contains($value: $raw) -> bool $contains
+        }
+
+        impl $crate::bounded::sealed::Wrap for $name {
+            type Raw = $raw;
 
             fn wrap(value: $raw) -> Self {
                 Self(value)
-            }
-
-            fn get(self) -> $raw {
-                self.0
             }
         }
 
@@ -94,6 +98,8 @@ macro_rules! bounded {
     };
 }
 
+pub(crate) use bounded;
+
 #[cfg(test)]
 mod tests {
     use std::{fmt, time::Duration};
@@ -102,7 +108,7 @@ mod tests {
 
     use crate::{Bounded, Delay, Interval, Psi, Swappiness};
 
-    fn round_trips<T>(raw: T::Raw)
+    fn round_trips<T>(raw: <T as Bounded>::Raw)
     where
         T: Bounded + Serialize + DeserializeOwned + PartialEq + fmt::Debug,
     {
@@ -114,7 +120,7 @@ mod tests {
         assert_eq!(back, value, "{} lost {raw:?} in a round trip", T::NAME);
     }
 
-    fn rejects<T>(raw: T::Raw)
+    fn rejects<T>(raw: <T as Bounded>::Raw)
     where
         T: Bounded + fmt::Debug,
     {
@@ -145,9 +151,5 @@ mod tests {
     fn the_range_agrees_with_what_it_admits() {
         assert!(Interval::contains(Duration::from_secs(1)));
         assert!(!Interval::contains(Duration::ZERO));
-        assert_eq!(
-            Interval::wrap(Duration::from_secs(1)).get(),
-            Duration::from_secs(1)
-        );
     }
 }

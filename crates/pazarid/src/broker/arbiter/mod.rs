@@ -73,7 +73,7 @@ pub struct HostView {
     pub swap_free: Option<u64>,
 
     /// The `some avg10` of `/proc/pressure/memory`, in percent.
-    pub psi: Option<f32>,
+    pub psi: Option<f64>,
 }
 
 impl HostView {

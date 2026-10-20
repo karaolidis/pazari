@@ -1,8 +1,10 @@
-use pazari_proto::DEFAULT_VSOCK_PORT;
 pub use tokio_vsock::{VMADDR_CID_ANY, VMADDR_CID_HOST, VMADDR_CID_LOCAL};
 use tokio_vsock::{VsockAddr, VsockStream};
 
 use crate::{Connector, Listener, PeerId, TransportError};
+
+/// The port pazarid listens on unless told otherwise.
+pub const DEFAULT_VSOCK_PORT: u32 = 4650;
 
 #[derive(Debug)]
 pub struct VsockListener {
@@ -88,7 +90,10 @@ impl Connector for VsockConnector {
 mod tests {
     use std::time::Duration;
 
-    use pazari_proto::{GuestMessage, HostMessage, PROTOCOL_VERSION};
+    use pazari_proto::{
+        GuestMessage, HostMessage,
+        testing::{guest_messages, host_messages},
+    };
 
     use super::*;
     use crate::testing::{GuestStream, HostStream};
@@ -100,21 +105,11 @@ mod tests {
     }
 
     fn hello() -> GuestMessage {
-        GuestMessage::Hello {
-            protocol: PROTOCOL_VERSION,
-            agent_version: "0.1.0".to_owned(),
-            block_size: 2_097_152,
-            total_mem: 0,
-        }
+        guest_messages().swap_remove(0)
     }
 
-    const fn welcome() -> HostMessage {
-        HostMessage::Welcome {
-            protocol: PROTOCOL_VERSION,
-            ceiling: 4_294_967_296,
-            status_interval_ms: Duration::from_secs(1),
-            hotplugged: 0,
-        }
+    fn welcome() -> HostMessage {
+        host_messages().swap_remove(0)
     }
 
     #[test]

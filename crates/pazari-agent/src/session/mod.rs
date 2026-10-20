@@ -41,7 +41,7 @@ impl Geometry {
         GuestMessage::Hello {
             protocol: PROTOCOL_VERSION,
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
-            block_size: self.block_size.get(),
+            block_size: self.block_size,
             total_mem: *self.total_mem.borrow(),
         }
     }
@@ -219,7 +219,7 @@ async fn welcome(stream: &mut Stream, within: Duration) -> Option<(u64, Duration
     let HostMessage::Welcome {
         protocol,
         ceiling,
-        status_interval_ms,
+        status_interval,
         hotplugged,
     } = first
     else {
@@ -236,7 +236,7 @@ async fn welcome(stream: &mut Stream, within: Duration) -> Option<(u64, Duration
         return None;
     }
 
-    Some((ceiling, status_interval_ms, hotplugged))
+    Some((ceiling, status_interval, hotplugged))
 }
 
 async fn pump(
@@ -280,7 +280,7 @@ async fn pump(
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use pazari_proto::DenyReason;
+    use pazari_proto::{DenyReason, ReclaimId, RequestId};
     use pazari_transport::{Listener, UnixConnector, UnixListener};
     use tempfile::TempDir;
     use tokio::{io::AsyncReadExt as _, net::UnixStream};
@@ -315,7 +315,7 @@ mod tests {
         HostMessage::Welcome {
             protocol,
             ceiling: CEILING,
-            status_interval_ms: Duration::from_millis(2_500),
+            status_interval: Duration::from_millis(2_500),
             hotplugged: 0,
         }
     }
@@ -441,7 +441,7 @@ mod tests {
             GuestMessage::Hello {
                 protocol: PROTOCOL_VERSION,
                 agent_version: env!("CARGO_PKG_VERSION").to_owned(),
-                block_size: BLOCK,
+                block_size: bytes(BLOCK),
                 total_mem: BOOT + 512 * MIB,
             }
         );
@@ -516,12 +516,12 @@ mod tests {
 
         let sent = vec![
             GuestMessage::GrantRequest {
-                id: 1,
+                id: RequestId(1),
                 current: BOOT,
                 target: BOOT + 512 * MIB,
             },
             GuestMessage::ReclaimAck {
-                id: 4,
+                id: ReclaimId(4),
                 will_release: 256 * MIB,
             },
             GuestMessage::Bye {},
@@ -552,9 +552,9 @@ mod tests {
         assert!(matches!(next(&mut session).await, Event::Connected { .. }));
 
         let deny = HostMessage::Deny {
-            id: 1,
+            id: RequestId(1),
             reason: DenyReason::HostPressure,
-            retry_after_ms: Some(Duration::from_millis(750)),
+            retry_after: Some(Duration::from_millis(750)),
         };
 
         host.send(&deny).await.expect("a writable connection");

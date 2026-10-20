@@ -7,7 +7,7 @@ mod steady;
 use std::{fmt, time::Duration};
 
 use enum_dispatch::enum_dispatch;
-use pazari_proto::{DenyReason, GuestMessage};
+use pazari_proto::{DenyReason, GuestMessage, ReclaimId, RequestId};
 use pazari_types::Timestamp;
 
 pub use crate::engine::phase::{
@@ -55,7 +55,7 @@ impl Step<'_> {
         self.world.send(message, self.fx);
     }
 
-    pub fn nak(&mut self, id: u64, reason: &str) {
+    pub fn nak(&mut self, id: ReclaimId, reason: &str) {
         self.world.nak(id, reason, self.fx);
     }
 }
@@ -86,21 +86,21 @@ pub trait State: Copy {
         self.stay()
     }
 
-    fn on_grant(self, _step: &mut Step<'_>, _id: u64, _target: u64) -> Phase {
+    fn on_grant(self, _step: &mut Step<'_>, _id: RequestId, _target: u64) -> Phase {
         self.stay()
     }
 
     fn on_deny(
         self,
         _step: &mut Step<'_>,
-        _id: u64,
+        _id: RequestId,
         _reason: DenyReason,
         _retry_after: Option<Duration>,
     ) -> Phase {
         self.stay()
     }
 
-    fn on_reclaim_request(self, step: &mut Step<'_>, id: u64, _desired: u64) -> Phase {
+    fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, _desired: u64) -> Phase {
         step.nak(id, self.busy());
 
         self.stay()
@@ -172,7 +172,7 @@ impl Phase {
     }
 
     #[must_use]
-    pub const fn pending_request(self) -> Option<u64> {
+    pub const fn pending_request(self) -> Option<RequestId> {
         match self {
             Self::Growing(growing) => growing.pending_request(),
             Self::Releasing(releasing) => releasing.pending_request(),

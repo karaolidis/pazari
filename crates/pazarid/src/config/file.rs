@@ -14,8 +14,10 @@ use std::{
 use bytesize::ByteSize;
 use doku::Document;
 use pazari_config::{Positive, Ranged, ordered};
-use pazari_proto::DEFAULT_VSOCK_PORT;
-use pazari_transport::{PeerId, adapter::vsock::VMADDR_CID_ANY};
+use pazari_transport::{
+    PeerId,
+    adapter::vsock::{DEFAULT_VSOCK_PORT, VMADDR_CID_ANY},
+};
 use pazari_types::{Interval, Psi};
 use serde::Deserialize;
 use serde_inline_default::serde_inline_default;

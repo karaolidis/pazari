@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-crate::bounded! {
+crate::bounded::bounded! {
     /// A `swappiness=` argument for `memory.reclaim`.
     ///
     /// The kernel accepts `0..=200` and rejects anything else with `EINVAL`.

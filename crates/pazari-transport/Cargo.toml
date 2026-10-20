@@ -16,4 +16,5 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync"
 tokio-vsock.workspace = true
 
 [dev-dependencies]
+pazari-proto = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "io-util", "rt"] }

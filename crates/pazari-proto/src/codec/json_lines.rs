@@ -165,15 +165,16 @@ mod tests {
 
     use super::*;
     use crate::{
-        GuestMessage, HostMessage,
-        message::fixtures::{guest_message, guest_messages, host_message, host_messages},
+        GuestMessage, HostMessage, ReclaimId, RequestId,
+        message::fixtures::{guest_message, host_message},
+        testing::{guest_messages, host_messages},
     };
 
     const CAP: usize = JsonLinesCodec::MAX_FRAME_BYTES;
 
     const fn request() -> GuestMessage {
         GuestMessage::GrantRequest {
-            id: 1,
+            id: RequestId(1),
             current: 2_147_483_648,
             target: 4_294_967_296,
         }
@@ -248,7 +249,7 @@ mod tests {
             GuestMessage::Bye {},
             request(),
             GuestMessage::OfferRelease {
-                id: 2,
+                id: RequestId(2),
                 current: 4_294_967_296,
                 releasable: 1_073_741_824,
             },
@@ -310,7 +311,7 @@ mod tests {
     #[test]
     fn encoding_an_over_long_message_fails_and_leaves_the_buffer_untouched() {
         let message = GuestMessage::ReclaimNak {
-            id: 1,
+            id: ReclaimId(1),
             reason: "x".repeat(CAP),
         };
 

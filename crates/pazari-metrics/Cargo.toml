@@ -13,9 +13,10 @@ bytes.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
+pazari-types.workspace = true
 prometheus-client.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net", "rt"] }
+tokio = { workspace = true, features = ["net", "rt", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]

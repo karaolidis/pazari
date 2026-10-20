@@ -375,7 +375,7 @@ mod tests {
         host.send(&HostMessage::Welcome {
             protocol: PROTOCOL_VERSION,
             ceiling: CEILING,
-            status_interval_ms: Duration::from_millis(1),
+            status_interval: Duration::from_millis(1),
             hotplugged: 0,
         })
         .await

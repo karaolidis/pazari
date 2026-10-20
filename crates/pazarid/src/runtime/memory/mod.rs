@@ -161,7 +161,7 @@ mod tests {
 
         let pressure = memory.pressure().await.unwrap().expect("a pressure file");
 
-        assert!((pressure.some10 - 12.5).abs() < f32::EPSILON);
+        assert!((pressure.some10 - 12.5).abs() < f64::EPSILON);
 
         assert_eq!(
             memory.swaps().await.unwrap(),

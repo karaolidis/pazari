@@ -35,9 +35,9 @@ mod tests {
         time::Duration,
     };
 
-    use pazari_proto::DEFAULT_VSOCK_PORT;
     use pazari_transport::{
-        AnyConnector, UnixConnector, VsockConnector, adapter::vsock::VMADDR_CID_HOST,
+        AnyConnector, UnixConnector, VsockConnector,
+        adapter::vsock::{DEFAULT_VSOCK_PORT, VMADDR_CID_HOST},
     };
     use pazari_types::{Delay, Interval, Swappiness};
 

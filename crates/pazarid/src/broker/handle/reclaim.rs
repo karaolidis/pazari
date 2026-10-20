@@ -35,7 +35,7 @@ impl Broker {
         if let Some(reclaim) = negotiated.reclaim {
             warn!(
                 guest = self.world.name(guest),
-                outstanding = reclaim.id,
+                outstanding = %reclaim.id,
                 refused = reclaim.refused,
                 "guest is still in reclaim backoff",
             );
@@ -43,7 +43,7 @@ impl Broker {
             return;
         }
 
-        let deadline_ms = self.world.policy().reclaim_deadline.get();
+        let answer_within = self.world.policy().reclaim_deadline.get();
 
         let Some(session) = self.world.guests_mut().negotiated_mut(guest) else {
             return;
@@ -54,14 +54,14 @@ impl Broker {
         session.reclaim = Some(Reclaim {
             id,
             desired,
-            deadline: Deadline::after(now, deadline_ms),
+            deadline: Deadline::after(now, answer_within),
             committed: None,
             refused: false,
         });
 
         info!(
             guest = self.world.name(guest),
-            id, desired, "requesting memory back from a guest"
+            %id, desired, "requesting memory back from a guest"
         );
 
         fx.send(
@@ -69,7 +69,7 @@ impl Broker {
             HostMessage::ReclaimRequest {
                 id,
                 desired,
-                deadline_ms,
+                deadline: answer_within,
             },
         );
     }

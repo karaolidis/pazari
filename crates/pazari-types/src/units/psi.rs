@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-crate::bounded! {
+crate::bounded::bounded! {
     /// A pressure-stall percentage, in `(0, 100]`.
     #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
     #[serde(try_from = "f64", into = "f64")]

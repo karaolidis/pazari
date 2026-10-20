@@ -1,6 +1,6 @@
 use std::{num::NonZeroU64, time::Duration};
 
-use pazari_proto::GuestMessage;
+use pazari_proto::{GuestMessage, ReclaimId, RequestId};
 use pazari_types::{Deadline, Timestamp};
 use tracing::debug;
 
@@ -15,15 +15,6 @@ use crate::engine::{
     release::{Release, ReleaseStrategy},
     streak::Streak,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RequestId(u64);
-
-impl RequestId {
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Guest {
@@ -76,7 +67,7 @@ impl Guest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Link {
     connected: bool,
-    next_id: u64,
+    next_id: RequestId,
     status_interval: Duration,
     next_status: Option<Deadline>,
 }
@@ -85,7 +76,7 @@ impl Link {
     const fn closed() -> Self {
         Self {
             connected: false,
-            next_id: 1,
+            next_id: RequestId(1),
             status_interval: Duration::ZERO,
             next_status: None,
         }
@@ -95,7 +86,7 @@ impl Link {
         self.connected = true;
         self.status_interval = status_interval;
         self.next_status = None;
-        self.next_id = 1;
+        self.next_id = RequestId(1);
     }
 
     const fn close(&mut self) {
@@ -104,8 +95,8 @@ impl Link {
     }
 
     const fn take_id(&mut self) -> RequestId {
-        let id = RequestId(self.next_id);
-        self.next_id = self.next_id.saturating_add(1);
+        let id = self.next_id;
+        self.next_id = id.next();
         id
     }
 
@@ -175,7 +166,7 @@ impl World {
         }
     }
 
-    pub fn nak(&self, id: u64, reason: &str, fx: &mut Effects) {
+    pub fn nak(&self, id: ReclaimId, reason: &str, fx: &mut Effects) {
         self.send(
             GuestMessage::ReclaimNak {
                 id,

@@ -1,4 +1,4 @@
-use std::{fmt, io, net::SocketAddr, sync::Arc};
+use std::{fmt, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use http_body_util::Full;
@@ -10,8 +10,9 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
+use pazari_types::Backoff;
 use prometheus_client::registry::Registry;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, time::sleep};
 use tracing::{debug, warn};
 
 use crate::{Encoded, error::MetricsError};
@@ -19,6 +20,11 @@ use crate::{Encoded, error::MetricsError};
 const CONTENT: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
 
 const HEAD_LIMIT: usize = 8 << 10;
+
+/// The first wait after a failed accept, which doubles while accepts keep failing.
+const ACCEPT_RETRY_MIN: Duration = Duration::from_millis(10);
+
+const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub struct Exposition {
@@ -43,9 +49,13 @@ impl Exposition {
     }
 
     pub async fn serve(self) {
+        let mut backoff = Backoff::new(ACCEPT_RETRY_MIN, ACCEPT_RETRY_MAX);
+
         loop {
             match self.listener.accept().await {
                 Ok((connection, _)) => {
+                    backoff.reset();
+
                     let registry = Arc::clone(&self.registry);
 
                     tokio::spawn(async move {
@@ -65,7 +75,11 @@ impl Exposition {
                         }
                     });
                 }
-                Err(error) => warn!(%error, "failed to accept a scrape connection"),
+                Err(error) => {
+                    warn!(%error, "failed to accept a scrape connection");
+
+                    sleep(backoff.delay()).await;
+                }
             }
         }
     }

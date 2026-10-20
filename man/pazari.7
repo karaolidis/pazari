@@ -1,4 +1,4 @@
-.Dd September 25, 2026
+.Dd October 20, 2026
 .Dt PAZARI 7
 .Os
 .Sh NAME
@@ -215,6 +215,8 @@ How long guests spend in
 .Cm awaiting_grant .
 .It Va pazari_agent_max_events
 Should stay at 0.
+An exhaustion that releases the brake is the exception; see
+.Xr pazari-agent 1 .
 Anything else means a workload reached
 .Va memory.max
 despite the brake.

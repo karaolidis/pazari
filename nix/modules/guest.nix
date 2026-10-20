@@ -80,7 +80,7 @@ in
         type = lib.types.bool;
         default = true;
         description = ''
-          Whether hot-plugged memory is onlined to `ZONE_MOVABLE`.
+          Whether hot-plugged memory is onlined to `ZONE_MOVABLE`. This also caps the guest's dirty page limits, so writeback cannot pin that memory.
         '';
       };
 
@@ -88,7 +88,7 @@ in
         type = lib.types.bool;
         default = false;
         description = ''
-          Whether to patch the guest kernel so that hot-plugged memory hosts its own memmap, and inodes cached in `ZONE_MOVABLE` can be reclaimed.
+          Whether to patch the guest kernel. Hot-plugged memory then hosts its own memmap. Inodes cached in `ZONE_MOVABLE` can then be reclaimed.
         '';
       };
     };

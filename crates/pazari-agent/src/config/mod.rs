@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn the_example_file_carries_the_defaults_it_stands_in_for() {
+    fn the_example_file_differs_from_the_defaults_only_in_its_optional_keys() {
         let defaults = parse(MINIMAL);
 
         assert_eq!(
@@ -156,7 +156,7 @@ mod tests {
                 metrics: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9651))),
                 ..defaults
             },
-            "the template's example values have drifted from the defaults they print"
+            "the template sets a key away from its default that is not optional"
         );
     }
 

@@ -53,6 +53,8 @@ In the guest:
 
 ```nix
 {
+  nixpkgs.overlays = [ inputs.pazari.overlays.default ];
+
   imports = [ inputs.pazari.nixosModules.guest ];
 
   services.pazari-agent = {

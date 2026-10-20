@@ -5,7 +5,7 @@ use pazari_types::Clock;
 use tracing::{debug, trace};
 
 use crate::{
-    engine::{Action, Event},
+    engine::Action,
     runtime::{
         cgroup::{Cgroup, Limit},
         error::RuntimeError,
@@ -48,22 +48,17 @@ impl<C: Cgroup + 'static> Applier<C> {
                 Action::StartReclaim { bytes, swappiness } => {
                     self.reclaimer.start(bytes, swappiness)?;
                 }
+                Action::CancelReclaim => {
+                    if let Some(reclaim) = self.reclaimer.handle() {
+                        debug!("cancelling the in-flight reclaim");
+                        reclaim.cancel();
+                    }
+                }
                 Action::Send(message) => send(message),
             }
         }
 
         Ok(())
-    }
-
-    pub fn stop_releasing(&mut self, event: &Event) {
-        if !matches!(event, Event::ThrottleWake { .. }) {
-            return;
-        }
-
-        if let Some(reclaim) = self.reclaimer().handle() {
-            debug!("cancelling the in-flight release");
-            reclaim.cancel();
-        }
     }
 }
 
@@ -195,5 +190,58 @@ mod tests {
             "unexpected error: {error}"
         );
         assert_eq!(sent, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_stops_the_reclaim_that_is_running() {
+        let cgroup = Arc::new(FakeCgroup::default());
+        let mut applier = applier(&cgroup);
+        let mut sent = Vec::new();
+
+        applier
+            .apply(
+                vec![Action::StartReclaim {
+                    bytes: 1024 * MIB,
+                    swappiness: None,
+                }],
+                &mut |message| sent.push(message),
+            )
+            .await
+            .unwrap();
+        applier
+            .apply(vec![Action::CancelReclaim], &mut |message| {
+                sent.push(message);
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            applier
+                .reclaimer()
+                .handle()
+                .expect("a running reclaim")
+                .is_cancelled()
+        );
+
+        applier.reclaimer().finished().await.unwrap();
+
+        assert_eq!(cgroup.calls(), Vec::new());
+        assert_eq!(sent, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_with_nothing_running_does_nothing() {
+        let cgroup = Arc::new(FakeCgroup::default());
+        let mut applier = applier(&cgroup);
+
+        applier
+            .apply(vec![Action::CancelReclaim], &mut |_| {
+                panic!("a cancel sends nothing")
+            })
+            .await
+            .unwrap();
+
+        assert!(!applier.reclaimer().is_running());
+        assert_eq!(cgroup.calls(), Vec::new());
     }
 }

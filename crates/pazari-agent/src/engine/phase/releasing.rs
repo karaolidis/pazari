@@ -116,6 +116,8 @@ impl State for Releasing {
 
         self.answer(step, Outcome::Braked);
 
+        step.emit(Action::CancelReclaim);
+
         Growing::braked(step)
     }
 
@@ -310,6 +312,10 @@ mod tests {
                 Action::Send(GuestMessage::ReclaimNak { id: 7, .. })
             )),
             "the guest acked a release, braked out of it, and went quiet: {actions:?}",
+        );
+        assert!(
+            actions.contains(&Action::CancelReclaim),
+            "the guest braked out of a release and left the reclaim running: {actions:?}",
         );
         assert!(matches!(engine.phase(), Phase::Growing(_)));
     }

@@ -12,5 +12,7 @@ pub enum Action {
         swappiness: Option<Swappiness>,
     },
 
+    CancelReclaim,
+
     Send(GuestMessage),
 }

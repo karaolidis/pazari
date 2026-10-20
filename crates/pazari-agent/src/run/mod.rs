@@ -147,8 +147,6 @@ pub async fn run(config: Config) -> Result<(), RunError> {
 
         observer.observe_event(&event);
 
-        applier.stop_releasing(&event);
-
         let actions = engine.handle(event);
 
         observer.refresh(&engine);
@@ -212,8 +210,8 @@ mod tests {
     use super::*;
     use crate::{
         engine::{
-            Action, EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig,
-            Snapshot, TitrateConfig,
+            EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, Snapshot,
+            TitrateConfig,
         },
         runtime::{cgroup::MEMORY_HIGH, testing::cgroup_dir},
         session::SessionConfig,
@@ -310,62 +308,6 @@ mod tests {
             error.to_string().contains("memory.high"),
             "unexpected error: {error}"
         );
-    }
-
-    #[tokio::test]
-    async fn a_brake_stops_the_release_that_is_taking_the_memory_away() {
-        let clock = Clock::start();
-        let dir = cgroup_dir();
-        let runtime = RuntimeConfig::new(dir.path());
-
-        let cgroup = Arc::new(AnyCgroup::open(&runtime).await.expect("a cgroupfs adapter"));
-        let mut applier = Applier::new(cgroup, runtime.reclaim_chunk, clock);
-
-        applier
-            .apply(
-                vec![Action::StartReclaim {
-                    bytes: 1024 * MIB,
-                    swappiness: None,
-                }],
-                &mut |_| panic!("a release sends nothing"),
-            )
-            .await
-            .expect("the release starts");
-
-        applier.stop_releasing(&Event::Tick {
-            now: clock.now(),
-            snapshot: Snapshot::default(),
-        });
-
-        assert!(
-            !applier
-                .reclaimer()
-                .handle()
-                .expect("a running release")
-                .is_cancelled(),
-            "a tick stopped the release"
-        );
-
-        applier.stop_releasing(&Event::ThrottleWake {
-            now: clock.now(),
-            high_events: 1,
-            max_events: 0,
-        });
-
-        assert!(
-            applier
-                .reclaimer()
-                .handle()
-                .expect("a running release")
-                .is_cancelled(),
-            "the brake let the release carry on taking memory away"
-        );
-
-        applier
-            .reclaimer()
-            .finished()
-            .await
-            .expect("the release stops");
     }
 
     #[tokio::test]

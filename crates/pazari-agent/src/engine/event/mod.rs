@@ -14,6 +14,7 @@ pub struct BootInfo {
 pub struct Snapshot {
     pub total_mem: u64,
     pub workload_usage: u64,
+    pub free: u64,
     pub available: u64,
     pub swap_used: u64,
     pub high_events: u64,

@@ -871,7 +871,8 @@ mod tests {
         let guest = Guest::new();
         Guest::write(
             &guest.config.paths.meminfo,
-            "MemTotal:       2096756 kB\nMemAvailable:   1729396 kB\nSwapTotal:            0 kB\n",
+            "MemTotal:       2096756 kB\nMemFree:         131072 kB\nMemAvailable:   1729396 kB\n\
+             SwapTotal:            0 kB\n",
         );
 
         let report = Preflight::new(&guest.config).run(None);

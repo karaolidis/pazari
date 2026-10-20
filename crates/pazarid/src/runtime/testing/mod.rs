@@ -164,6 +164,7 @@ impl Actuator for MockActuator {
 pub const fn meminfo(total: u64, available: u64, swap_total: u64) -> MemInfo {
     MemInfo {
         total,
+        free: available,
         available,
         swap_total,
         swap_free: swap_total,

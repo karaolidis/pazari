@@ -609,6 +609,7 @@ mod tests {
         Tick {
             total_mem: u64,
             usage: u64,
+            free: u64,
             available: u64,
             high_events: u64,
             psi: f32,
@@ -659,15 +660,24 @@ mod tests {
 
     fn step() -> impl Strategy<Value = Move> {
         prop_oneof![
-            8 => (byte_count(), byte_count(), byte_count(), 0_u64..8, 0.0_f32..100.0).prop_map(
-                |(total_mem, usage, available, high_events, psi)| Move::Tick {
-                    total_mem,
-                    usage,
-                    available,
-                    high_events,
-                    psi,
-                }
-            ),
+            8 => (
+                byte_count(),
+                byte_count(),
+                byte_count(),
+                byte_count(),
+                0_u64..8,
+                0.0_f32..100.0
+            )
+                .prop_map(|(total_mem, usage, free, available, high_events, psi)| {
+                    Move::Tick {
+                        total_mem,
+                        usage,
+                        free,
+                        available,
+                        high_events,
+                        psi,
+                    }
+                }),
             4 => (0_u64..8).prop_map(|high_events| Move::Wake { high_events }),
             3 => byte_count().prop_map(|total_mem| Move::Plug { total_mem }),
             2 => byte_count().prop_map(|reclaimed| Move::Reclaimed { reclaimed }),
@@ -764,6 +774,7 @@ mod tests {
                 Move::Tick {
                     total_mem,
                     usage,
+                    free,
                     available,
                     high_events,
                     psi,
@@ -772,6 +783,7 @@ mod tests {
                     snapshot: Snapshot {
                         total_mem,
                         workload_usage: usage,
+                        free,
                         available,
                         swap_used: 0,
                         high_events,

@@ -29,6 +29,7 @@ impl<C: Cgroup> Snapshots<C> {
 
         Ok(Snapshot {
             total_mem: meminfo.total,
+            free: meminfo.free,
             available: meminfo.available,
             workload_usage: self.cgroup.current().await?,
             swap_used: self.cgroup.swap_current().await?,
@@ -117,6 +118,7 @@ mod tests {
             snapshot,
             Snapshot {
                 total_mem: 2_096_756 * 1024,
+                free: 131_072 * 1024,
                 available: 1_729_396 * 1024,
                 workload_usage: 1_610_612_736,
                 swap_used: 65_536,

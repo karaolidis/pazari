@@ -83,6 +83,7 @@ pub const fn snap(total_mem: u64, usage: u64, high_events: u64) -> Snapshot {
     Snapshot {
         total_mem,
         workload_usage: usage,
+        free: 0,
         available: total_mem.saturating_sub(usage),
         swap_used: 0,
         high_events,
@@ -95,6 +96,13 @@ pub const fn snap(total_mem: u64, usage: u64, high_events: u64) -> Snapshot {
 pub const fn snap_breached(total_mem: u64, usage: u64, high_events: u64) -> Snapshot {
     Snapshot {
         max_events: 1,
+        ..snap(total_mem, usage, high_events)
+    }
+}
+
+pub const fn snap_free(total_mem: u64, usage: u64, free: u64, high_events: u64) -> Snapshot {
+    Snapshot {
+        free,
         ..snap(total_mem, usage, high_events)
     }
 }

@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn a_parse_failure_reaches_the_caller_naming_the_file() {
-        let error = MemInfo::parse(Path::new(MEMINFO), "MemTotal:  1024 kB\n")
+        let error = MemInfo::parse(Path::new(MEMINFO), "MemTotal:  1024 kB\nMemFree:  256 kB\n")
             .expect_err("no MemAvailable");
 
         assert_eq!(

@@ -49,6 +49,10 @@ impl Guest {
         self.reading.map_or(0, |reading| reading.workload_usage)
     }
 
+    pub fn free(self) -> Option<u64> {
+        Some(self.reading?.free)
+    }
+
     pub fn available(self) -> Option<u64> {
         Some(self.reading?.available)
     }
@@ -271,6 +275,15 @@ impl World {
         }
 
         (target > total_mem).then_some(target)
+    }
+
+    /// What a release needs reclaimed beyond free memory.
+    pub fn reclaim_for(&self, bytes: u64) -> Option<NonZeroU64> {
+        NonZeroU64::new(
+            self.guest
+                .free()
+                .map_or(bytes, |free| bytes.saturating_sub(free)),
+        )
     }
 
     pub fn release_budget(&self, desired: u64) -> Option<u64> {

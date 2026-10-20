@@ -52,15 +52,36 @@ pub struct Releasing {
 
 impl Releasing {
     pub fn begin(step: &mut Step<'_>, bytes: u64, owed: Option<Owed>) -> Phase {
+        let releasing = Self {
+            stage: Stage::Reclaiming { bytes, owed },
+        };
+
+        let Some(reclaim) = step.world.reclaim_for(bytes) else {
+            debug!(
+                bytes,
+                free = ?step.guest().free(),
+                "free memory already covers the release",
+            );
+
+            return releasing.on_reclaim_finished(step, 0);
+        };
+
         let swappiness = step.config().reclaim_swappiness;
 
-        debug!(bytes, ?swappiness, "reclaiming from the workload cgroup");
+        debug!(
+            bytes,
+            reclaim = reclaim.get(),
+            free = ?step.guest().free(),
+            ?swappiness,
+            "reclaiming from the workload cgroup",
+        );
 
-        step.emit(Action::StartReclaim { bytes, swappiness });
+        step.emit(Action::StartReclaim {
+            bytes: reclaim.get(),
+            swappiness,
+        });
 
-        Phase::Releasing(Self {
-            stage: Stage::Reclaiming { bytes, owed },
-        })
+        Phase::Releasing(releasing)
     }
 
     pub const fn pending_request(self) -> Option<u64> {
@@ -349,6 +370,52 @@ mod tests {
             })],
         );
         assert!(matches!(engine.phase(), Phase::Releasing(_)));
+    }
+
+    #[test]
+    fn free_memory_that_covers_the_release_skips_the_reclaim() {
+        let mut engine = started();
+        grown(&mut engine);
+
+        for second in 140..=142 {
+            tick(&mut engine, at(second), snap(2560 * MIB, CALM, 1));
+        }
+
+        assert_eq!(
+            tick(
+                &mut engine,
+                at(143),
+                snap_free(2560 * MIB, CALM, 1024 * MIB, 1)
+            ),
+            vec![Action::Send(GuestMessage::OfferRelease {
+                id: 2,
+                current: 2560 * MIB,
+                releasable: 256 * MIB,
+            })],
+        );
+        assert!(matches!(engine.phase(), Phase::Releasing(_)));
+    }
+
+    #[test]
+    fn free_memory_that_covers_part_of_the_release_leaves_the_rest_to_reclaim() {
+        let mut engine = started();
+        grown(&mut engine);
+
+        for second in 140..=142 {
+            tick(&mut engine, at(second), snap(2560 * MIB, CALM, 1));
+        }
+
+        assert_eq!(
+            tick(
+                &mut engine,
+                at(143),
+                snap_free(2560 * MIB, CALM, 192 * MIB, 1)
+            ),
+            vec![Action::StartReclaim {
+                bytes: 64 * MIB,
+                swappiness: Some(Swappiness::NONE),
+            }],
+        );
     }
 
     #[test]

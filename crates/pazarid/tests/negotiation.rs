@@ -532,6 +532,7 @@ impl Harness {
             snapshot: Snapshot {
                 total_mem,
                 workload_usage,
+                free: 0,
                 available: total_mem.saturating_sub(workload_usage),
                 swap_used: 0,
                 high_events,

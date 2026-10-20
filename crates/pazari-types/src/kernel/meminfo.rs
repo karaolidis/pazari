@@ -11,6 +11,9 @@ pub struct MemInfo {
     /// `MemTotal`.
     pub total: u64,
 
+    /// `MemFree`.
+    pub free: u64,
+
     /// `MemAvailable`.
     pub available: u64,
 
@@ -24,6 +27,7 @@ pub struct MemInfo {
 impl MemInfo {
     pub fn parse(path: &Path, text: &str) -> Result<Self, KernelFileError> {
         let mut total = None;
+        let mut free = None;
         let mut available = None;
         let mut swap_total = None;
         let mut swap_free = None;
@@ -35,6 +39,7 @@ impl MemInfo {
 
             let slot = match key {
                 "MemTotal" => &mut total,
+                "MemFree" => &mut free,
                 "MemAvailable" => &mut available,
                 "SwapTotal" => &mut swap_total,
                 "SwapFree" => &mut swap_free,
@@ -58,6 +63,10 @@ impl MemInfo {
             total: total.ok_or_else(|| KernelFileError::Absent {
                 path: path.to_path_buf(),
                 key: "MemTotal",
+            })?,
+            free: free.ok_or_else(|| KernelFileError::Absent {
+                path: path.to_path_buf(),
+                key: "MemFree",
             })?,
             available: available.ok_or_else(|| KernelFileError::Absent {
                 path: path.to_path_buf(),
@@ -88,11 +97,12 @@ mod tests {
     }
 
     #[test]
-    fn meminfo_reads_the_four_fields_in_bytes() {
+    fn meminfo_reads_the_five_fields_in_bytes() {
         assert_eq!(
             MemInfo::parse(path(), MEMINFO).expect("a real /proc/meminfo"),
             MemInfo {
                 total: 2_096_756 * KB,
+                free: 131_072 * KB,
                 available: 1_729_396 * KB,
                 swap_total: 1_048_572 * KB,
                 swap_free: 1_048_572 * KB,
@@ -102,8 +112,11 @@ mod tests {
 
     #[test]
     fn a_host_without_swap_has_no_swap_lines() {
-        let info = MemInfo::parse(path(), "MemTotal:       1024 kB\nMemAvailable:    512 kB\n")
-            .expect("swap is optional");
+        let info = MemInfo::parse(
+            path(),
+            "MemTotal:       1024 kB\nMemFree:    256 kB\nMemAvailable:    512 kB\n",
+        )
+        .expect("swap is optional");
 
         assert_eq!(info.swap_total, 0);
         assert_eq!(info.swap_free, 0);
@@ -114,7 +127,7 @@ mod tests {
     fn a_swap_that_is_partly_in_use_keeps_the_two_counts_apart() {
         let info = MemInfo::parse(
             path(),
-            "MemTotal: 1024 kB\nMemAvailable: 512 kB\n\
+            "MemTotal: 1024 kB\nMemFree: 256 kB\nMemAvailable: 512 kB\n\
              SwapTotal: 2048 kB\nSwapFree: 512 kB\n",
         )
         .expect("a host with swap");
@@ -129,12 +142,18 @@ mod tests {
 
         assert_eq!(error.to_string(), "/proc/meminfo carries no MemTotal line");
 
-        let error = MemInfo::parse(path(), "MemTotal:  1024 kB\n").expect_err("no MemAvailable");
+        let error = MemInfo::parse(path(), "MemTotal:  1024 kB\nMemFree:  256 kB\n")
+            .expect_err("no MemAvailable");
 
         assert_eq!(
             error.to_string(),
             "/proc/meminfo carries no MemAvailable line"
         );
+
+        let error = MemInfo::parse(path(), "MemTotal:  1024 kB\nMemAvailable:  512 kB\n")
+            .expect_err("no MemFree");
+
+        assert_eq!(error.to_string(), "/proc/meminfo carries no MemFree line");
 
         assert!(MemInfo::parse(path(), "").is_err());
     }

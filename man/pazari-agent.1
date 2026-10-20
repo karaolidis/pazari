@@ -168,9 +168,9 @@ the host raises the ceiling;
 .Va MemTotal
 rises for any reason;
 .It
-the
-.Cm engine.release
-strategy finds the guest has had memory to spare for long enough;
+the workload stays calm for
+.Cm engine.recovery_intervals
+ticks;
 .It
 the connection to the host is re-established; or
 .It

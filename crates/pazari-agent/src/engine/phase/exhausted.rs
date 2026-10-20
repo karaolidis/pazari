@@ -6,7 +6,6 @@ use crate::engine::{
     counters::Pressure,
     limits::Brake,
     phase::{Phase, State, Step, growing::Growing, steady::Steady},
-    release::Release,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,7 +120,7 @@ impl State for Exhausted {
     }
 
     fn on_interval(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
-        if !step.world.release.spared() {
+        if !step.world.calm() {
             return self.stay();
         }
 
@@ -137,7 +136,10 @@ impl State for Exhausted {
 mod tests {
     use pazari_proto::{DenyReason, HostMessage};
 
-    use crate::engine::{Action, EngineConfig, Event, ExhaustionMode, Phase, testing::*};
+    use crate::engine::{
+        Action, EngineConfig, Event, ExhaustionMode, Phase, ReleaseConfig, TitrateConfig,
+        testing::*,
+    };
 
     #[test]
     fn a_ceiling_deny_stalls_under_the_brake_and_stops_asking() {
@@ -327,6 +329,48 @@ mod tests {
         assert!(matches!(engine.phase(), Phase::Steady(_)));
         assert!(!engine.brake_released());
         assert_eq!(engine.high(), HIGH0);
+    }
+
+    #[test]
+    fn recovery_does_not_wait_for_the_release_strategy_to_see_a_step_spare() {
+        let config = EngineConfig {
+            release: ReleaseConfig::Titrate(TitrateConfig {
+                step: bytes(4096 * MIB),
+                ..titrate()
+            }),
+            ..config()
+        };
+        let mut engine = started_with(config, BOOT);
+
+        wake(&mut engine, at(100), 1);
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
+
+        for second in 101..=103 {
+            tick(&mut engine, at(second), snap(BOOT, CALM, 1));
+        }
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
+
+        tick(&mut engine, at(104), snap(BOOT, CALM, 1));
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
+    }
+
+    #[test]
+    fn recovery_waits_for_the_intervals_it_is_configured_with() {
+        let config = EngineConfig {
+            recovery_intervals: count(5),
+            ..config()
+        };
+        let mut engine = started_with(config, BOOT);
+
+        wake(&mut engine, at(100), 1);
+
+        for second in 101..=105 {
+            tick(&mut engine, at(second), snap(BOOT, CALM, 1));
+        }
+        assert!(matches!(engine.phase(), Phase::Exhausted(_)));
+
+        tick(&mut engine, at(106), snap(BOOT, CALM, 1));
+        assert!(matches!(engine.phase(), Phase::Steady(_)));
     }
 
     #[test]

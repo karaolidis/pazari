@@ -43,6 +43,7 @@ pub struct EngineConfig {
 
     pub deny_backoff: Interval,
     pub settle_grace: Interval,
+    pub recovery_intervals: NonZeroU32,
 
     pub reclaim_swappiness: Option<Swappiness>,
 

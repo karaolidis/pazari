@@ -246,6 +246,7 @@ mod tests {
             }),
             deny_backoff: interval(5),
             settle_grace: interval(10),
+            recovery_intervals: NonZeroU32::new(3).expect("a positive count"),
             release: ReleaseConfig::Titrate(TitrateConfig {
                 step: bytes(256 * MIB),
                 intervals: NonZeroU32::new(3).expect("a positive count"),

@@ -14,10 +14,6 @@ pub trait Release {
     /// One interval's worth of what the guest has to spare.
     fn observe(&mut self, slack: Option<u64>, pressure: Pressure);
 
-    /// Whether the guest has had memory to spare for long enough to give some
-    /// back.
-    fn spared(&self) -> bool;
-
     /// How much to give back this interval, if anything.
     fn due(&mut self, now: Timestamp, pressure: Pressure) -> Option<NonZeroU64>;
 

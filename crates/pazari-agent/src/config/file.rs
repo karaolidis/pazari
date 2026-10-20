@@ -31,6 +31,7 @@ use crate::{
 };
 
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+const RECOVERY_INTERVALS: u32 = 3;
 
 const GROW_STEP: ByteSize = ByteSize::mib(512);
 const ESCALATE_WITHIN: Duration = Duration::from_secs(10);
@@ -108,6 +109,11 @@ pub struct EngineSection {
     #[doku(as = "String", example = "10s")]
     settle_grace: Duration,
 
+    /// Intervals of calm that end an exhaustion.
+    #[serde_inline_default(RECOVERY_INTERVALS)]
+    #[doku(example = "3")]
+    recovery_intervals: u32,
+
     /// The `swappiness=` argument for `memory.reclaim`. Leave the key out to
     /// reclaim at the guest's own `vm.swappiness`.
     #[serde_inline_default(None)]
@@ -148,6 +154,8 @@ impl EngineSection {
             grow: self.grow.resolve()?,
             deny_backoff: Interval::try_new(self.deny_backoff).at("engine.deny_backoff")?,
             settle_grace: Interval::try_new(self.settle_grace).at("engine.settle_grace")?,
+            recovery_intervals: NonZeroU32::new(self.recovery_intervals)
+                .positive("engine.recovery_intervals", "count of intervals")?,
             release: self.release.resolve()?,
 
             reclaim_swappiness: self

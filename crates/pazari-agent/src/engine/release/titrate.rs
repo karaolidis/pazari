@@ -26,6 +26,10 @@ impl Titrate {
         Deadline::after(now, self.config.cooldown.get())
     }
 
+    const fn spared(&self) -> bool {
+        self.spare.reached(self.config.intervals)
+    }
+
     fn cooling(&self, now: Timestamp) -> bool {
         self.cooldown.is_some_and(|until| !until.reached(now))
     }
@@ -38,10 +42,6 @@ impl Release for Titrate {
             && slack.is_some_and(|slack| slack >= self.config.step.get());
 
         self.spare = self.spare.then(sparing);
-    }
-
-    fn spared(&self) -> bool {
-        self.spare.reached(self.config.intervals)
     }
 
     fn due(&mut self, now: Timestamp, pressure: Pressure) -> Option<NonZeroU64> {

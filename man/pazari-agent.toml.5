@@ -75,6 +75,12 @@ How long to wait for granted memory to arrive before accepting the size the
 guest has.
 Default
 .Cm 10s .
+.It Cm recovery_intervals No = Ar count
+Consecutive calm ticks that end an exhaustion.
+A tick is calm when the workload neither throttles nor breaches, and the guest
+has a memory block to spare.
+Default
+.Cm 3 .
 .It Cm reclaim_swappiness No = Ar integer
 The
 .Va swappiness

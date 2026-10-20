@@ -13,6 +13,7 @@ use crate::engine::{
     grow::{Grow, GrowStrategy},
     limits::{Brake, Limits},
     release::{Release, ReleaseStrategy},
+    streak::Streak,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -123,6 +124,7 @@ pub struct World {
     link: Link,
     pub grow: GrowStrategy,
     pub release: ReleaseStrategy,
+    calm: Streak,
 }
 
 impl World {
@@ -133,6 +135,7 @@ impl World {
             link: Link::closed(),
             grow: GrowStrategy::from(config.grow),
             release: ReleaseStrategy::from(config.release),
+            calm: Streak::BROKEN,
             config,
         }
     }
@@ -222,8 +225,21 @@ impl World {
         self.link.status_due(now)
     }
 
-    pub fn note_spare(&mut self, pressure: Pressure) {
-        self.release.observe(self.slack(), pressure);
+    pub fn note_interval(&mut self, pressure: Pressure) {
+        let slack = self.slack();
+
+        self.calm = self.calm.then(
+            !pressure.throttled
+                && !pressure.breached
+                && slack.is_some_and(|slack| slack >= self.guest.block_size.get()),
+        );
+
+        self.release.observe(slack, pressure);
+    }
+
+    /// Whether the workload has been calm long enough to end an exhaustion.
+    pub const fn calm(&self) -> bool {
+        self.calm.reached(self.config.recovery_intervals)
     }
 
     pub fn slack(&self) -> Option<u64> {

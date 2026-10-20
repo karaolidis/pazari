@@ -61,6 +61,7 @@ mod tests {
         burst_reserve = "192MiB"
         deny_backoff = "2s 500ms"
         settle_grace = "15s"
+        recovery_intervals = 5
         reclaim_swappiness = 0
 
         [engine.exhaustion]
@@ -206,6 +207,7 @@ mod tests {
                 }),
                 deny_backoff: interval(Duration::from_millis(2_500)),
                 settle_grace: interval(Duration::from_secs(15)),
+                recovery_intervals: count(5),
                 release: ReleaseConfig::Titrate(TitrateConfig {
                     step: bytes(128 * MIB),
                     intervals: count(5),
@@ -263,6 +265,7 @@ mod tests {
                 }),
                 deny_backoff: interval(Duration::from_secs(5)),
                 settle_grace: interval(Duration::from_secs(10)),
+                recovery_intervals: count(3),
                 release: ReleaseConfig::Titrate(TitrateConfig {
                     step: bytes(256 * MIB),
                     intervals: count(3),

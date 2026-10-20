@@ -16,6 +16,9 @@ deny_backoff = "5s"
 # How long a resize is left to settle.
 settle_grace = "10s"
 
+# Intervals of calm that end an exhaustion.
+recovery_intervals = 3
+
 # The `swappiness=` argument for `memory.reclaim`. Leave the key out to
 # reclaim at the guest's own `vm.swappiness`.
 reclaim_swappiness = 0

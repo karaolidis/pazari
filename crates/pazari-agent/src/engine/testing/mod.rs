@@ -62,6 +62,7 @@ pub fn config() -> EngineConfig {
         }),
         deny_backoff: interval(5),
         settle_grace: interval(10),
+        recovery_intervals: count(3),
         release: ReleaseConfig::Titrate(titrate()),
         reclaim_swappiness: Some(Swappiness::NONE),
         exhaustion: ExhaustionMode::Stall {

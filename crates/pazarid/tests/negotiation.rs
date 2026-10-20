@@ -120,6 +120,7 @@ fn engine_config() -> EngineConfig {
         }),
         deny_backoff: brief(),
         settle_grace: patient(),
+        recovery_intervals: count(3),
         release: ReleaseConfig::Titrate(TitrateConfig {
             step: bytes(RELEASE),
             intervals: count(3),

@@ -1,5 +1,6 @@
 use std::{
     io::{self, StdoutLock},
+    path::PathBuf,
     process::ExitCode,
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
@@ -40,11 +41,16 @@ struct Cli {
     #[arg(long, default_value = "index", value_name = "index|random")]
     fill: Fill,
 
+    /// Where cache phases write. Use a disk-backed filesystem.
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
+
     /// The phases to run, in order:
     /// `grow=SIZE[,rate=SIZE/s][,chunk=SIZE]`,
     /// `churn=TIME,rate=SIZE/s[,chunk=SIZE]`,
-    /// `hold=TIME`, or
-    /// `release=SIZE[,rate=SIZE/s][,chunk=SIZE]`.
+    /// `hold=TIME`,
+    /// `release=SIZE[,rate=SIZE/s][,chunk=SIZE]`, or
+    /// `cache=SIZE[,rate=SIZE/s][,chunk=SIZE]`.
     #[arg(required = true, value_name = "PHASE")]
     phases: Vec<String>,
 }
@@ -79,6 +85,7 @@ fn stress(cli: &Cli, out: &mut Reporter<StdoutLock<'static>>) -> Result<()> {
         no_reserve: cli.no_reserve,
         no_thp: cli.no_thp,
         fill: cli.fill,
+        cache_dir: plan.cache_dir(cli.cache_dir.clone())?,
         plan,
     };
 

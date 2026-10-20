@@ -34,6 +34,8 @@ Move the frontier back, dropping pages with
 Rewrite resident pages without moving the frontier.
 .It Cm hold
 Do nothing for a time.
+.It Cm cache
+Grow the page cache by writing a scratch file.
 .El
 .Pp
 The tool is single-threaded and allocates nothing beyond the plan, so a phase
@@ -44,6 +46,15 @@ that stops progressing is being held back by the kernel.
 Size of the arena.
 Defaults to the plan's peak frontier.
 Required if the plan never grows.
+.It Fl -cache-dir Ar dir
+Where
+.Cm cache
+phases write.
+Required if the plan has a
+.Cm cache
+phase.
+Use a disk-backed filesystem: on tmpfs the file is shared memory, not page
+cache.
 .It Fl -fill Cm index | random
 What to write into each page.
 .Cm index ,
@@ -76,6 +87,7 @@ grow=SIZE[,rate=SIZE/s][,chunk=SIZE]
 release=SIZE[,rate=SIZE/s][,chunk=SIZE]
 churn=DURATION,rate=SIZE/s[,chunk=SIZE]
 hold=DURATION
+cache=SIZE[,rate=SIZE/s][,chunk=SIZE]
 .Ed
 .Pp
 Phases run in order.
@@ -86,9 +98,10 @@ Without it, a phase runs as fast as it can.
 .Cm chunk
 is how much memory is moved between rate checks.
 It defaults to 1MiB for
-.Cm grow
+.Cm grow ,
+.Cm churn
 and
-.Cm churn ,
+.Cm cache ,
 and 64MiB for
 .Cm release .
 .Pp
@@ -107,6 +120,9 @@ A
 .Cm release
 drops only whole pages, so a range that ends mid-page leaves that page
 resident.
+A
+.Cm cache
+syncs what it writes, so the page cache it leaves is clean.
 .Sh OUTPUT
 Events are written to standard output as one JSON object per line; logs go to
 standard error.
@@ -140,6 +156,8 @@ An interruption or failure ends the stream early.
 .Va no_reserve ,
 .Va no_thp ,
 .Va fill ,
+.Va cache_dir
+if set,
 and
 .Va plan ,
 an array of the parsed phases.

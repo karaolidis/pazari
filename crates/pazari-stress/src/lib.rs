@@ -5,6 +5,7 @@ pub mod plan;
 pub mod region;
 pub mod report;
 pub mod run;
+pub mod scratch;
 
 pub use crate::{
     pace::Pacer,
@@ -12,4 +13,5 @@ pub use crate::{
     region::{Fill, FillError, Region, RegionError},
     report::{Event, ReportError, Reporter, Started},
     run::{Options, Outcome, RunError},
+    scratch::{Scratch, ScratchError},
 };

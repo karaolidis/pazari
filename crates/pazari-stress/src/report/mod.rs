@@ -1,6 +1,7 @@
 use std::{
     io::{self, Write},
     num::NonZeroU64,
+    path::Path,
     time::Duration,
 };
 
@@ -22,6 +23,10 @@ pub struct Started<'a> {
     pub no_reserve: bool,
     pub no_thp: bool,
     pub fill: Fill,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<&'a Path>,
+
     pub plan: &'a Plan,
 }
 
@@ -223,6 +228,7 @@ mod tests {
             no_reserve: false,
             no_thp: true,
             fill: Fill::Random,
+            cache_dir: None,
             plan: &plan,
         })
         .expect("a writable stream");

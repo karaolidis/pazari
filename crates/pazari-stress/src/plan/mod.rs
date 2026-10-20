@@ -1,4 +1,4 @@
-use std::{num::NonZeroU64, str::FromStr, time::Duration};
+use std::{num::NonZeroU64, path::PathBuf, str::FromStr, time::Duration};
 
 use bytesize::ByteSize;
 use serde::Serialize;
@@ -57,6 +57,16 @@ pub enum Kind {
 
         chunk: NonZeroU64,
     },
+
+    /// Grows the page cache without moving the frontier.
+    Cache {
+        target_bytes: NonZeroU64,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rate_bps: Option<NonZeroU64>,
+
+        chunk: NonZeroU64,
+    },
 }
 
 impl Kind {
@@ -67,15 +77,16 @@ impl Kind {
             Self::Churn { .. } => Name::Churn.as_str(),
             Self::Hold { .. } => Name::Hold.as_str(),
             Self::Release { .. } => Name::Release.as_str(),
+            Self::Cache { .. } => Name::Cache.as_str(),
         }
     }
 
     #[must_use]
     pub const fn target_bytes(&self) -> Option<NonZeroU64> {
         match *self {
-            Self::Grow { target_bytes, .. } | Self::Release { target_bytes, .. } => {
-                Some(target_bytes)
-            }
+            Self::Grow { target_bytes, .. }
+            | Self::Release { target_bytes, .. }
+            | Self::Cache { target_bytes, .. } => Some(target_bytes),
             Self::Churn { .. } | Self::Hold { .. } => None,
         }
     }
@@ -84,7 +95,7 @@ impl Kind {
     pub const fn target_time(&self) -> Option<Duration> {
         match *self {
             Self::Churn { target, .. } | Self::Hold { target } => Some(target),
-            Self::Grow { .. } | Self::Release { .. } => None,
+            Self::Grow { .. } | Self::Release { .. } | Self::Cache { .. } => None,
         }
     }
 
@@ -93,7 +104,7 @@ impl Kind {
         match *self {
             Self::Grow { target_bytes, .. } => frontier.saturating_add(target_bytes.get()),
             Self::Release { target_bytes, .. } => frontier.saturating_sub(target_bytes.get()),
-            Self::Churn { .. } | Self::Hold { .. } => frontier,
+            Self::Churn { .. } | Self::Hold { .. } | Self::Cache { .. } => frontier,
         }
     }
 }
@@ -169,6 +180,23 @@ impl Plan {
         self.peak
     }
 
+    /// Where cache phases write, if the plan has any.
+    pub fn cache_dir(&self, requested: Option<PathBuf>) -> Result<Option<PathBuf>, PlanError> {
+        let Some((index, phase)) = self
+            .phases
+            .iter()
+            .enumerate()
+            .find(|(_, phase)| matches!(phase.kind, Kind::Cache { .. }))
+        else {
+            return Ok(None);
+        };
+
+        requested.map(Some).ok_or_else(|| PlanError::Scratchless {
+            index,
+            spec: phase.spec.clone(),
+        })
+    }
+
     pub fn arena(&self, requested: Option<u64>) -> Result<NonZeroU64, PlanError> {
         let Some(requested) = requested else {
             return NonZeroU64::new(self.peak).ok_or(PlanError::Groundless);
@@ -197,7 +225,7 @@ impl Plan {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PlanError {
-    #[error("{spec:?} is not a phase: expected grow=, churn=, hold=, or release=")]
+    #[error("{spec:?} is not a phase: expected grow=, churn=, hold=, release=, or cache=")]
     Kind { spec: String },
 
     #[error("{spec:?} carries {part:?}, which is not key=value")]
@@ -257,6 +285,9 @@ pub enum PlanError {
         arena: u64,
     },
 
+    #[error("phase {index} {spec:?} writes page cache, but no --cache-dir names where")]
+    Scratchless { index: usize, spec: String },
+
     #[error("the plan never grows, so there is nothing to map: name an --arena")]
     Groundless,
 
@@ -271,6 +302,7 @@ enum Name {
     Churn,
     Hold,
     Release,
+    Cache,
 }
 
 impl Name {
@@ -280,6 +312,7 @@ impl Name {
             "churn" => Some(Self::Churn),
             "hold" => Some(Self::Hold),
             "release" => Some(Self::Release),
+            "cache" => Some(Self::Cache),
             _ => None,
         }
     }
@@ -290,6 +323,7 @@ impl Name {
             Self::Churn => "churn",
             Self::Hold => "hold",
             Self::Release => "release",
+            Self::Cache => "cache",
         }
     }
 
@@ -366,6 +400,11 @@ impl Spec<'_> {
                 target_bytes: self.size(name.as_str(), target)?,
                 rate_bps: rate,
                 chunk: chunk.unwrap_or(DEFAULT_RELEASE_CHUNK),
+            }),
+            Name::Cache => Ok(Kind::Cache {
+                target_bytes: self.size(name.as_str(), target)?,
+                rate_bps: rate,
+                chunk: chunk.unwrap_or(DEFAULT_CHUNK),
             }),
         }
     }
@@ -488,6 +527,49 @@ mod tests {
                 chunk: bytes(8 * MIB),
             }
         );
+        assert_eq!(
+            phase("cache=3GiB,rate=256MiB/s,chunk=16MiB"),
+            Kind::Cache {
+                target_bytes: bytes(3 * GIB),
+                rate_bps: Some(bytes(256 * MIB)),
+                chunk: bytes(16 * MIB),
+            }
+        );
+    }
+
+    #[test]
+    fn a_cache_phase_leaves_the_frontier_where_it_was() {
+        assert_eq!(
+            plan(&["grow=1GiB", "cache=4GiB", "grow=1GiB"]).peak(),
+            2 * GIB
+        );
+    }
+
+    #[test]
+    fn a_plan_that_writes_page_cache_needs_somewhere_to_write_it() {
+        let plan = plan(&["grow=1GiB", "cache=4GiB"]);
+
+        assert_eq!(
+            plan.cache_dir(None)
+                .expect_err("there is nowhere to write")
+                .to_string(),
+            "phase 1 \"cache=4GiB\" writes page cache, but no --cache-dir names where"
+        );
+        assert_eq!(
+            plan.cache_dir(Some(PathBuf::from("/var/cache/stress"))),
+            Ok(Some(PathBuf::from("/var/cache/stress")))
+        );
+    }
+
+    #[test]
+    fn a_plan_without_cache_phases_has_no_use_for_a_cache_dir() {
+        let plan = plan(&["grow=1GiB"]);
+
+        assert_eq!(plan.cache_dir(None), Ok(None));
+        assert_eq!(
+            plan.cache_dir(Some(PathBuf::from("/var/cache/stress"))),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -544,11 +626,11 @@ mod tests {
     fn an_unknown_phase_names_the_spec() {
         assert_eq!(
             rejects(&["sprint=2GiB"]),
-            "\"sprint=2GiB\" is not a phase: expected grow=, churn=, hold=, or release="
+            "\"sprint=2GiB\" is not a phase: expected grow=, churn=, hold=, release=, or cache="
         );
         assert_eq!(
             rejects(&["grow"]),
-            "\"grow\" is not a phase: expected grow=, churn=, hold=, or release="
+            "\"grow\" is not a phase: expected grow=, churn=, hold=, release=, or cache="
         );
     }
 

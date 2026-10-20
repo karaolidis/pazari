@@ -1,6 +1,7 @@
 use std::{
     io::Write,
     num::NonZeroU64,
+    path::PathBuf,
     process,
     sync::atomic::{AtomicBool, Ordering},
     thread,
@@ -16,6 +17,7 @@ use crate::{
     plan::{Kind, Plan},
     region::{Fill, Region, RegionError},
     report::{ReportError, Reporter, Started},
+    scratch::{Scratch, ScratchError},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +28,7 @@ pub struct Options {
     pub no_reserve: bool,
     pub no_thp: bool,
     pub fill: Fill,
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,11 +66,19 @@ pub fn run<W: Write>(
         no_reserve: options.no_reserve,
         no_thp: options.no_thp,
         fill: options.fill,
+        cache_dir: options.cache_dir.as_deref(),
         plan: &options.plan,
     })?;
 
+    let scratch = options
+        .cache_dir
+        .as_deref()
+        .map(Scratch::create)
+        .transpose()?;
+
     let mut walk = Walk {
         region,
+        scratch,
         out,
         interrupt,
         interval: options.interval.get(),
@@ -112,6 +123,7 @@ enum Flow {
 
 struct Walk<'a, W> {
     region: Region,
+    scratch: Option<Scratch>,
     out: &'a mut Reporter<W>,
     interrupt: &'a AtomicBool,
     interval: Duration,
@@ -152,6 +164,12 @@ impl<W: Write> Walk<'_, W> {
                 rate_bps,
                 chunk,
             } => self.retreat(target_bytes.get(), Pacer::new(rate_bps, chunk)),
+
+            Kind::Cache {
+                target_bytes,
+                rate_bps,
+                chunk,
+            } => self.cache(target_bytes.get(), Pacer::new(rate_bps, chunk)),
         }
     }
 
@@ -222,6 +240,25 @@ impl<W: Write> Walk<'_, W> {
         Ok(Flow::Go)
     }
 
+    fn cache(&mut self, target: u64, pacer: Pacer) -> Result<Flow, RunError> {
+        while self.touched < target {
+            if self.wait(pacer.deadline(self.touched))? == Flow::Stop {
+                return Ok(Flow::Stop);
+            }
+
+            let step = pacer.step(target.saturating_sub(self.touched));
+
+            self.scratch
+                .as_mut()
+                .ok_or(ScratchError::Missing { index: self.index })?
+                .fill(step)?;
+
+            self.touched = self.touched.saturating_add(step);
+        }
+
+        Ok(Flow::Go)
+    }
+
     fn wait(&mut self, deadline: Duration) -> Result<Flow, RunError> {
         loop {
             if self.interrupt.load(Ordering::Relaxed) {
@@ -267,6 +304,9 @@ pub enum RunError {
 
     #[error(transparent)]
     Report(#[from] ReportError),
+
+    #[error(transparent)]
+    Scratch(#[from] ScratchError),
 }
 
 fn due(interval: Duration, elapsed: Duration) -> Duration {
@@ -278,6 +318,8 @@ fn due(interval: Duration, elapsed: Duration) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use serde_json::Value;
 
     use super::*;
@@ -294,6 +336,7 @@ mod tests {
             no_reserve: false,
             no_thp: false,
             fill: Fill::Index,
+            cache_dir: None,
             plan,
         }
     }
@@ -371,6 +414,51 @@ mod tests {
         assert_eq!(started["fill"], "index");
         assert_eq!(started["plan"][0]["spec"], "grow=2MiB");
         assert!(field(started, "page_size") >= 4096);
+    }
+
+    #[test]
+    fn a_cache_phase_runs_and_cleans_up_after_itself() {
+        let dir = tempfile::TempDir::new().expect("a temporary directory");
+        let options = Options {
+            cache_dir: Some(dir.path().to_owned()),
+            ..options(&["grow=1MiB", "cache=3MiB,chunk=1MiB"], 10)
+        };
+
+        let (outcome, events) = walk(&options, &AtomicBool::new(false));
+
+        assert_eq!(outcome, Outcome::Done);
+        assert_eq!(
+            of_kind(&events, "phase")
+                .iter()
+                .map(|event| event["kind"].as_str().expect("a named kind"))
+                .collect::<Vec<_>>(),
+            vec!["grow", "cache"]
+        );
+        assert_eq!(
+            fs::read_dir(dir.path())
+                .expect("a readable directory")
+                .count(),
+            0,
+            "the scratch file outlived the run"
+        );
+    }
+
+    #[test]
+    fn a_cache_phase_without_a_cache_dir_fails_loudly() {
+        let mut reported = Vec::new();
+        let mut out = Reporter::new(&mut reported);
+
+        let error = run(
+            &options(&["grow=1MiB", "cache=1MiB"], 10),
+            &mut out,
+            &AtomicBool::new(false),
+        )
+        .expect_err("there is nowhere to write");
+
+        assert_eq!(
+            error.to_string(),
+            "phase 1 writes page cache, but the run has no cache directory"
+        );
     }
 
     #[test]

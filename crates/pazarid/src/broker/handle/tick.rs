@@ -1,7 +1,16 @@
 use pazari_types::Timestamp;
 use tracing::{debug, info, warn};
 
-use crate::broker::{Broker, action::Action, effects::Effects, registry::GuestId};
+use crate::broker::{
+    Broker,
+    action::Action,
+    effects::Effects,
+    guest::Entry,
+    phase::{Reply, Reporting},
+    policy::StalledShrinks,
+    registry::GuestId,
+    session::Session,
+};
 
 impl Broker {
     pub(in crate::broker) fn on_tick(&mut self, now: Timestamp, fx: &mut Effects) {
@@ -44,11 +53,9 @@ impl Broker {
     }
 
     fn tick_reconcile(&mut self, now: Timestamp, guest: GuestId, fx: &mut Effects) {
-        let revert = self.world.policy().shrink_revert;
-        let ceiling = self.world.ceiling(guest);
-        let name = self.world.name(guest).to_owned();
+        let stalled_shrinks = self.world.policy().stalled_shrinks;
 
-        let Some(state) = self.world.guests_mut().state_mut(guest) else {
+        let Some(Entry { spec, state }) = self.world.guests_mut().get_mut(guest) else {
             return;
         };
 
@@ -68,7 +75,7 @@ impl Broker {
 
         if !reconcile.is_shrink() {
             info!(
-                guest = name,
+                guest = spec.name,
                 target = reconcile.target,
                 size,
                 "grow timed out; accepting the size it reached",
@@ -77,26 +84,28 @@ impl Broker {
             return;
         }
 
-        if revert && let Some(ceiling) = ceiling {
+        if stalled_shrinks == StalledShrinks::Revert {
             fx.emit(Action::SetRequested {
                 guest,
-                bytes: size.min(ceiling.get()),
+                bytes: size.min(spec.ceiling.get()),
             });
         }
 
         warn!(
-            guest = name,
+            guest = spec.name,
             target = reconcile.target,
             size,
-            reverted = revert,
+            ?stalled_shrinks,
             "shrink timed out",
         );
     }
 
     fn tick_reclaim(&mut self, now: Timestamp, guest: GuestId) {
-        let name = self.world.name(guest).to_owned();
+        let Some(Entry { spec, state }) = self.world.guests_mut().get_mut(guest) else {
+            return;
+        };
 
-        let Some(session) = self.world.guests_mut().negotiated_mut(guest) else {
+        let Some(session) = state.session.as_mut().and_then(Session::negotiated_mut) else {
             return;
         };
 
@@ -110,35 +119,38 @@ impl Broker {
 
         session.reclaim = None;
 
-        if reclaim.refused {
-            debug!(guest = name, id = %reclaim.id, "guest left reclaim backoff");
-
-            return;
+        match reclaim.reply {
+            Reply::Refused => {
+                debug!(guest = spec.name, id = %reclaim.id, "guest left reclaim backoff");
+            }
+            Reply::Pending | Reply::Committed(_) => {
+                warn!(
+                    guest = spec.name,
+                    id = %reclaim.id,
+                    desired = reclaim.desired,
+                    reply = ?reclaim.reply,
+                    "reclaim timed out",
+                );
+            }
         }
-
-        warn!(
-            guest = name,
-            id = %reclaim.id,
-            desired = reclaim.desired,
-            committed = ?reclaim.committed,
-            "reclaim timed out",
-        );
     }
 
     fn tick_staleness(&mut self, now: Timestamp, guest: GuestId) {
         let policy = self.world.policy();
         let window = policy
-            .welcome_status_interval
+            .status_interval
             .get()
             .saturating_mul(policy.stale_after.get());
 
-        let name = self.world.name(guest).to_owned();
-
-        let Some(session) = self.world.guests_mut().negotiated_mut(guest) else {
+        let Some(Entry { spec, state }) = self.world.guests_mut().get_mut(guest) else {
             return;
         };
 
-        if session.stale {
+        let Some(session) = state.session.as_mut().and_then(Session::negotiated_mut) else {
+            return;
+        };
+
+        if session.reporting == Reporting::Stale {
             return;
         }
 
@@ -148,8 +160,8 @@ impl Broker {
             return;
         }
 
-        session.stale = true;
+        session.reporting = Reporting::Stale;
 
-        warn!(guest = name, ?quiet, "guest stopped sending status");
+        warn!(guest = spec.name, ?quiet, "guest stopped sending status");
     }
 }

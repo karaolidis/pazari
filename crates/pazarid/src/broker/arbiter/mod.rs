@@ -2,12 +2,14 @@ mod fcfs;
 
 use std::{fmt, time::Duration};
 
-use pazari_proto::{DenyReason, Status};
+use pazari_proto::DenyReason;
 use pazari_types::Timestamp;
 
 pub use crate::broker::arbiter::fcfs::Fcfs;
 use crate::broker::{
-    policy::{Policy, Revocation},
+    guest::Geometry,
+    phase::Negotiated,
+    policy::{Grantable, Policy, Revocation},
     registry::{GuestId, GuestSpec},
 };
 
@@ -27,7 +29,7 @@ impl Ask {
     #[must_use]
     pub const fn target(self) -> u64 {
         match self {
-            Self::Grow { target, .. } | Self::Release { target } => target,
+            Self::Grow { target } | Self::Release { target } => target,
         }
     }
 }
@@ -38,18 +40,12 @@ pub struct GuestView<'a> {
 
     pub spec: &'a GuestSpec,
 
-    pub hotplugged: Option<u64>,
-
-    pub size: u64,
+    pub geometry: Geometry,
 
     pub requested: Option<u64>,
 
-    pub status: Option<Status>,
-
-    pub stale: bool,
-
-    /// Connected and past the handshake.
-    pub connected: bool,
+    /// Absent until the guest is connected and past the handshake.
+    pub session: Option<&'a Negotiated>,
 
     pub granted: Option<Timestamp>,
 }
@@ -58,7 +54,7 @@ impl GuestView<'_> {
     #[must_use]
     pub const fn outstanding(&self) -> u64 {
         match self.requested {
-            Some(target) => target.saturating_sub(self.size),
+            Some(target) => target.saturating_sub(self.geometry.size),
             None => 0,
         }
     }
@@ -78,14 +74,13 @@ pub struct HostView {
 
 impl HostView {
     #[must_use]
-    pub fn grantable(&self, grant_swap: bool) -> Option<u64> {
+    pub fn grantable(&self, grantable: Grantable) -> Option<u64> {
         let available = self.available?;
 
-        if !grant_swap {
-            return Some(available);
+        match grantable {
+            Grantable::Ram => Some(available),
+            Grantable::RamAndSwap => Some(available.saturating_add(self.swap_free?)),
         }
-
-        Some(available.saturating_add(self.swap_free?))
     }
 }
 
@@ -167,8 +162,8 @@ mod tests {
             psi: None,
         };
 
-        assert_eq!(host.grantable(false), Some(4 * GIB));
-        assert_eq!(HostView::default().grantable(false), None);
+        assert_eq!(host.grantable(Grantable::Ram), Some(4 * GIB));
+        assert_eq!(HostView::default().grantable(Grantable::Ram), None);
     }
 
     #[test]
@@ -179,18 +174,18 @@ mod tests {
             psi: None,
         };
 
-        assert_eq!(host.grantable(true), Some(12 * GIB));
+        assert_eq!(host.grantable(Grantable::RamAndSwap), Some(12 * GIB));
     }
 
     #[test]
-    fn a_host_granting_swap_it_has_not_read_gives_nothing_away() {
+    fn swap_the_host_has_not_read_leaves_nothing_to_grant_out_of_swap() {
         let host = HostView {
             available: Some(4 * GIB),
             swap_free: None,
             psi: None,
         };
 
-        assert_eq!(host.grantable(true), None);
-        assert_eq!(host.grantable(false), Some(4 * GIB));
+        assert_eq!(host.grantable(Grantable::RamAndSwap), None);
+        assert_eq!(host.grantable(Grantable::Ram), Some(4 * GIB));
     }
 }

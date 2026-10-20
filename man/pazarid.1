@@ -48,7 +48,7 @@ Grants are capped at the guest's ceiling and may be smaller than requested.
 A refusal gives one of these reasons, which the guest receives:
 .Bl -tag -width "host_pressure"
 .It Cm ceiling
-The guest is already at its ceiling.
+The guest is less than one of its memory blocks below its ceiling.
 Retrying will not help until the ceiling is raised.
 .It Cm host_pressure
 The host does not have the memory, or has not yet read its memory figures.

@@ -25,8 +25,8 @@ use pazari_transport::{
 use pazari_types::{Clock, Delay, Interval, Psi, Timestamp};
 use pazarid::{
     broker::{
-        Action, Broker, Event, Guest, GuestId, GuestSpec, Negotiated, Policy, Registry, Revocation,
-        Session as BrokerSession,
+        Action, Broker, Event, Grantable, Guest, GuestId, GuestSpec, Negotiated, Policy, Registry,
+        Revocation, StalledShrinks,
     },
     run::{Peers, Report},
     runtime::{Actuator, Driver, Reading, RuntimeError},
@@ -91,14 +91,14 @@ fn seconds(value: u64) -> Interval {
 
 fn policy() -> Policy {
     Policy {
-        welcome_status_interval: seconds(1),
-        host_floor: FLOOR,
-        grant_min_interval: brief(),
-        reconcile_deadline: seconds(30),
-        shrink_revert: true,
+        status_interval: seconds(1),
         stale_after: count(3),
+        grant_floor: FLOOR,
+        grant_min_interval: brief(),
+        grantable: Grantable::Ram,
+        actuation_deadline: seconds(30),
+        stalled_shrinks: StalledShrinks::Revert,
         reclaim_deadline: seconds(30),
-        grant_swap: false,
         revocation: None,
     }
 }
@@ -453,8 +453,7 @@ impl Harness {
                 self.accepted = self.accepted.saturating_add(1);
                 self.peers.accept(connection, peer.clone());
 
-                let now = self.now();
-                self.host(Event::Connected { now, peer }).await;
+                self.host(Event::Connected { peer }).await;
             }
             Step::Reported(report) => {
                 let now = self.now();
@@ -500,10 +499,7 @@ impl Harness {
     }
 
     async fn available(&mut self, bytes: u64) {
-        let now = self.now();
-
         self.host(Event::HostAvailable {
-            now,
             bytes,
             swap_free: 0,
             psi: None,
@@ -512,10 +508,7 @@ impl Harness {
     }
 
     async fn pressured(&mut self, bytes: u64, psi: f64) {
-        let now = self.now();
-
         self.host(Event::HostAvailable {
-            now,
             bytes,
             swap_free: 0,
             psi: Some(psi),
@@ -616,8 +609,7 @@ impl Harness {
 
         self.peers.close(&peer);
 
-        let now = self.now();
-        self.host(Event::Disconnected { now, peer }).await;
+        self.host(Event::Disconnected { peer }).await;
     }
 
     fn welcomed(&self) -> bool {
@@ -625,20 +617,15 @@ impl Harness {
     }
 
     fn negotiated(&self) -> Option<&Negotiated> {
-        self.broker
-            .guest(self.guest)
-            .and_then(|guest| guest.session.as_ref())
-            .and_then(BrokerSession::negotiated)
+        self.broker.negotiated(self.guest)
     }
 
     fn status(&self) -> Option<Status> {
-        self.negotiated().and_then(|session| session.status)
+        self.negotiated().and_then(Negotiated::status)
     }
 
     fn size(&self) -> Option<u64> {
-        self.broker
-            .guest(self.guest)
-            .and_then(pazarid::broker::Guest::size)
+        self.broker.guest(self.guest).and_then(Guest::size)
     }
 
     fn requested(&self) -> Option<u64> {
@@ -730,7 +717,7 @@ async fn a_guest_that_says_hello_is_welcomed_with_its_ceiling() {
     let negotiated = harness.negotiated().expect("a welcomed guest");
 
     assert_eq!(
-        negotiated.block_size.get(),
+        negotiated.block_size().get(),
         BLOCK,
         "the guest's geometry did not reach the host"
     );

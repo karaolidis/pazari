@@ -33,7 +33,12 @@ impl Broker {
         };
 
         let next = self.transition(now, guest, peer, fx, |step| match message {
-            GuestMessage::Hello { .. } => phase.on_hello(step, message),
+            GuestMessage::Hello {
+                protocol,
+                agent_version,
+                block_size,
+                total_mem,
+            } => phase.on_hello(step, protocol, &agent_version, block_size, total_mem),
 
             GuestMessage::GrantRequest { id, target, .. } => {
                 phase.on_grant_request(step, id, target)

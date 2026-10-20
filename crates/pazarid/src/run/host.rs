@@ -1,8 +1,8 @@
-use pazari_types::{MemInfo, Timestamp};
+use pazari_types::MemInfo;
 use tracing::{info, warn};
 
 use crate::{
-    broker::{Event, Policy, Registry},
+    broker::{Event, Grantable, Policy, Registry},
     run::error::RunError,
     runtime::{
         HostMemory, RuntimeError,
@@ -25,9 +25,11 @@ impl Demand {
     #[must_use]
     pub fn of(policy: &Policy, registry: &Registry, info: &MemInfo) -> Self {
         Self {
-            asked: registry.iter().fold(policy.host_floor, |total, (_, spec)| {
-                total.saturating_add(spec.ceiling.get())
-            }),
+            asked: registry
+                .iter()
+                .fold(policy.grant_floor, |total, (_, spec)| {
+                    total.saturating_add(spec.ceiling.get())
+                }),
             have: info.total.saturating_add(info.swap_total),
         }
     }
@@ -64,19 +66,18 @@ pub async fn survey<M: HostMemory>(
         return Err(RunError::Pressureless { path: PRESSURE });
     }
 
-    if policy.grant_swap {
+    if policy.grantable == Grantable::RamAndSwap {
         zram(memory).await;
     }
 
     Ok(())
 }
 
-pub async fn reading<M: HostMemory>(memory: &M, now: Timestamp) -> Result<Event, RuntimeError> {
+pub async fn reading<M: HostMemory>(memory: &M) -> Result<Event, RuntimeError> {
     let info = memory.meminfo().await?;
     let pressure = memory.pressure().await?;
 
     Ok(Event::HostAvailable {
-        now,
         bytes: info.available,
         swap_free: info.swap_free,
         psi: pressure.map(|pressure| pressure.some10),
@@ -175,7 +176,7 @@ mod tests {
     #[test]
     fn two_guests_that_may_each_burst_to_the_whole_host_are_an_ordinary_deployment() {
         let policy = Policy {
-            host_floor: 0,
+            grant_floor: 0,
             ..policy()
         };
 
@@ -269,15 +270,12 @@ mod tests {
     async fn a_reading_carries_the_whole_host_at_one_instant() {
         let memory = MockMemory::new(meminfo(8 << 30, 4 << 30, 2 << 30)).pressured(12.5);
 
-        let event = reading(&memory, Timestamp::START)
-            .await
-            .expect("the mock answers");
+        let event = reading(&memory).await.expect("the mock answers");
 
         let Event::HostAvailable {
             bytes,
             swap_free,
             psi,
-            ..
         } = event
         else {
             panic!("the daemon read {event:?}");
@@ -291,9 +289,7 @@ mod tests {
     async fn a_host_without_pressure_accounting_reads_as_much_as_it_can() {
         let memory = unmeasured(8 << 30, 0);
 
-        let event = reading(&memory, Timestamp::START)
-            .await
-            .expect("the mock answers");
+        let event = reading(&memory).await.expect("the mock answers");
 
         assert!(matches!(event, Event::HostAvailable { psi: None, .. }));
     }

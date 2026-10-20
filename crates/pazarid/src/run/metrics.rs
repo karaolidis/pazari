@@ -4,7 +4,7 @@ use pazari_metrics::{
 };
 use pazari_proto::HostMessage;
 
-use crate::broker::{Action, Broker, Event};
+use crate::broker::{Action, Broker, Event, Negotiated};
 
 const PREFIX: &str = "pazarid";
 
@@ -102,42 +102,40 @@ impl Observer {
             return;
         };
 
-        let guests = broker.guests();
-
-        for (id, entry) in guests.iter() {
-            let view = entry.view(id);
+        for (id, entry) in broker.guests().iter() {
             let label = GuestLabel {
-                guest: view.spec.name.clone(),
+                guest: entry.spec.name.clone(),
             };
-            let reclaiming = guests
-                .negotiated(id)
-                .is_some_and(|session| session.reclaim.is_some());
+            let session = broker.negotiated(id);
 
-            series
-                .guests
-                .size
-                .get_or_create(&label)
-                .set_saturating(view.size);
+            if let Some(size) = entry.state.size() {
+                series
+                    .guests
+                    .size
+                    .get_or_create(&label)
+                    .set_saturating(size);
+            }
+
             series
                 .guests
                 .ceiling
                 .get_or_create(&label)
-                .set_saturating(view.spec.ceiling.get());
+                .set_saturating(entry.spec.ceiling.get());
             series
                 .guests
                 .connected
                 .get_or_create(&label)
-                .set(i64::from(view.connected));
+                .set(i64::from(session.is_some()));
             series
                 .guests
                 .stale
                 .get_or_create(&label)
-                .set(i64::from(view.stale));
+                .set(i64::from(broker.is_stale(id)));
             series
                 .guests
                 .reclaiming
                 .get_or_create(&label)
-                .set(i64::from(reclaiming));
+                .set(i64::from(session.and_then(Negotiated::reclaim).is_some()));
         }
 
         let host = broker.host();
@@ -254,7 +252,7 @@ impl Guests {
     fn register(&self, registry: &mut Registry) {
         registry.register_with_unit(
             "guest_size",
-            "What the guest's memory device holds, 0 until it has reported",
+            "What the guest's memory device holds",
             Unit::Bytes,
             self.size.clone(),
         );
@@ -349,8 +347,8 @@ mod tests {
     use crate::broker::{
         Broker,
         testing::{
-            BOOT, CEILING, GIB, HOST, MIB, ONE, TWO, at, closed, deny, grant, hello, id, pressured,
-            report, requested, tick, vsock, welcomed,
+            BOOT, CEILING, GIB, HOST, MIB, ONE, TWO, at, closed, deny, grant, hello, pressured,
+            reclaim, report, requested, tick, vsock, welcomed,
         },
     };
 
@@ -410,10 +408,7 @@ mod tests {
     fn what_a_guest_says_is_counted_by_kind() {
         let (observer, registry) = Observer::new();
 
-        observer.observe_event(&Event::Connected {
-            now: at(0),
-            peer: vsock(ONE),
-        });
+        observer.observe_event(&Event::Connected { peer: vsock(ONE) });
         observer.observe_event(&Event::Message {
             now: at(1),
             peer: vsock(ONE),
@@ -424,10 +419,7 @@ mod tests {
             peer: vsock(ONE),
             message: report(BOOT, GIB),
         });
-        observer.observe_event(&Event::Disconnected {
-            now: at(3),
-            peer: vsock(ONE),
-        });
+        observer.observe_event(&Event::Disconnected { peer: vsock(ONE) });
         observer.observe_event(&Event::Tick { now: at(4) });
 
         carries(&registry, "pazarid_connections_total 1");
@@ -440,7 +432,7 @@ mod tests {
     fn a_tick_publishes_every_guest_and_the_host_it_shares() {
         let (observer, registry, mut broker) = watched();
 
-        let _ = broker.handle(pressured(at(1), HOST, GIB, 12.5));
+        let _ = broker.handle(pressured(HOST, GIB, 12.5));
 
         observer.refresh(&broker);
 
@@ -464,11 +456,7 @@ mod tests {
     fn a_guest_that_goes_quiet_or_is_asked_for_memory_says_so() {
         let (observer, registry, mut broker) = watched();
 
-        let _ = broker.handle(Event::Reclaim {
-            now: at(1),
-            guest: id(ONE),
-            desired: 256 * MIB,
-        });
+        reclaim(&mut broker, at(1), ONE, 256 * MIB);
         tick(&mut broker, at(4));
 
         observer.refresh(&broker);
@@ -519,10 +507,7 @@ mod tests {
         let observer = Observer::default();
         let broker = welcomed(ONE);
 
-        observer.observe_event(&Event::Connected {
-            now: at(0),
-            peer: vsock(ONE),
-        });
+        observer.observe_event(&Event::Connected { peer: vsock(ONE) });
         observer.observe_actions(&[grant(ONE, 1, 3072 * MIB)]);
         observer.refresh(&broker);
         observer.device("one").reconnected();

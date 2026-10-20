@@ -84,7 +84,7 @@ mod tests {
 
     use super::*;
     use crate::broker::{
-        GuestSpec, Revocation,
+        Grantable, GuestSpec, Revocation, StalledShrinks,
         testing::{bytes, count},
     };
 
@@ -224,14 +224,14 @@ mod tests {
         assert_eq!(
             config.policy,
             Policy {
-                welcome_status_interval: interval(Duration::from_secs(2)),
-                host_floor: 3 * GIB,
-                grant_min_interval: interval(Duration::from_secs(10)),
-                reconcile_deadline: interval(Duration::from_secs(45)),
-                shrink_revert: false,
+                status_interval: interval(Duration::from_secs(2)),
                 stale_after: count(5),
+                grant_floor: 3 * GIB,
+                grant_min_interval: interval(Duration::from_secs(10)),
+                grantable: Grantable::RamAndSwap,
+                actuation_deadline: interval(Duration::from_secs(45)),
+                stalled_shrinks: StalledShrinks::Leave,
                 reclaim_deadline: interval(Duration::from_secs(20)),
-                grant_swap: true,
                 revocation: Some(Revocation {
                     psi: Psi::try_new(30.0).expect("30% is a psi"),
                     step: bytes(512 * MIB),
@@ -281,14 +281,14 @@ mod tests {
         assert_eq!(
             config.policy,
             Policy {
-                welcome_status_interval: interval(Duration::from_secs(1)),
-                host_floor: 2 * GIB,
-                grant_min_interval: interval(Duration::from_secs(5)),
-                reconcile_deadline: interval(Duration::from_secs(30)),
-                shrink_revert: true,
+                status_interval: interval(Duration::from_secs(1)),
                 stale_after: count(3),
+                grant_floor: 2 * GIB,
+                grant_min_interval: interval(Duration::from_secs(5)),
+                grantable: Grantable::Ram,
+                actuation_deadline: interval(Duration::from_secs(30)),
+                stalled_shrinks: StalledShrinks::Revert,
                 reclaim_deadline: interval(Duration::from_secs(30)),
-                grant_swap: false,
                 revocation: None,
             }
         );
@@ -550,7 +550,6 @@ mod tests {
     #[test]
     fn a_file_that_asks_for_no_revocation_gets_none() {
         assert_eq!(parse(MINIMAL).policy.revocation, None);
-        assert!(!parse(MINIMAL).policy.grant_swap);
     }
 
     #[test]

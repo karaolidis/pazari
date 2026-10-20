@@ -87,10 +87,7 @@ impl Peers {
             Said::Gone => {
                 self.links.remove(&report.peer);
 
-                Some(Event::Disconnected {
-                    now,
-                    peer: report.peer,
-                })
+                Some(Event::Disconnected { peer: report.peer })
             }
         }
     }
@@ -254,10 +251,7 @@ mod tests {
 
         assert_eq!(
             peers.digest(next(&mut reports).await, at(2)),
-            Some(Event::Disconnected {
-                now: at(2),
-                peer: peer.clone(),
-            })
+            Some(Event::Disconnected { peer: peer.clone() })
         );
 
         peers.send(&peer, HostMessage::Ceiling { ceiling: 42 });

@@ -11,8 +11,8 @@ use pazari_transport::PeerId;
 use pazari_types::{Interval, Psi, Timestamp};
 
 use crate::broker::{
-    Action, Ask, Broker, Event, GuestId, GuestSpec, GuestView, HostView, Policy, Registry, Request,
-    Revocation,
+    Action, Ask, Broker, Effects, Event, Geometry, Grantable, GuestId, GuestSpec, GuestView,
+    HostView, Policy, Registry, Request, Revocation, StalledShrinks,
 };
 
 pub const MIB: u64 = 1 << 20;
@@ -27,6 +27,9 @@ pub const HOST: u64 = 8 * GIB;
 
 pub const ONE: u32 = 3;
 pub const TWO: u32 = 4;
+
+/// What the guest's kernel keeps for itself out of the device's size.
+pub const RESERVED: u64 = 136 * MIB;
 
 pub const REVOKE_PSI: f64 = 20.0;
 pub const REVOKE_STEP: u64 = 256 * MIB;
@@ -63,21 +66,21 @@ pub fn unix(path: &str) -> PeerId {
 
 pub fn policy() -> Policy {
     Policy {
-        welcome_status_interval: interval(1),
-        host_floor: FLOOR,
-        grant_min_interval: interval(5),
-        reconcile_deadline: interval(30),
-        shrink_revert: true,
+        status_interval: interval(1),
         stale_after: count(3),
+        grant_floor: FLOOR,
+        grant_min_interval: interval(5),
+        grantable: Grantable::Ram,
+        actuation_deadline: interval(30),
+        stalled_shrinks: StalledShrinks::Revert,
         reclaim_deadline: interval(30),
-        grant_swap: false,
         revocation: None,
     }
 }
 
 pub fn granting() -> Policy {
     Policy {
-        grant_swap: true,
+        grantable: Grantable::RamAndSwap,
         ..policy()
     }
 }
@@ -116,18 +119,16 @@ pub fn id(cid: u32) -> GuestId {
     registry().lookup(&vsock(cid)).expect("a registered guest")
 }
 
-pub const fn available(now: Timestamp, bytes: u64) -> Event {
+pub const fn available(bytes: u64) -> Event {
     Event::HostAvailable {
-        now,
         bytes,
         swap_free: 0,
         psi: None,
     }
 }
 
-pub const fn pressured(now: Timestamp, bytes: u64, swap_free: u64, psi: f64) -> Event {
+pub const fn pressured(bytes: u64, swap_free: u64, psi: f64) -> Event {
     Event::HostAvailable {
-        now,
         bytes,
         swap_free,
         psi: Some(psi),
@@ -141,7 +142,7 @@ pub fn sized() -> Broker {
 pub fn sized_with(policy: Policy) -> Broker {
     let mut broker = Broker::new(policy, registry());
 
-    let _ = broker.handle(available(at(0), HOST));
+    let _ = broker.handle(available(HOST));
 
     for cid in [ONE, TWO] {
         let _ = broker.handle(Event::Size {
@@ -160,7 +161,7 @@ pub fn greet(broker: &mut Broker, now: Timestamp, cid: u32) {
 }
 
 pub fn greet_at(broker: &mut Broker, now: Timestamp, cid: u32, total_mem: u64, hotplugged: u64) {
-    connect(broker, now, cid);
+    connect(broker, cid);
 
     assert_eq!(
         message(broker, now, cid, hello_at(total_mem)),
@@ -184,11 +185,81 @@ pub fn plugged(cid: u32) -> Broker {
     broker
 }
 
-pub fn connect(broker: &mut Broker, now: Timestamp, cid: u32) -> Vec<Action> {
-    broker.handle(Event::Connected {
-        now,
-        peer: vsock(cid),
-    })
+/// A lone guest welcomed at its boot memory under `ceiling`.
+pub fn ceilinged(ceiling: u64) -> Broker {
+    let mut registry = Registry::new();
+
+    registry
+        .insert(vsock(ONE), guest("one", ceiling))
+        .expect("the only guest");
+
+    let mut broker = Broker::new(policy(), registry);
+
+    let _ = broker.handle(available(HOST));
+    sizes(&mut broker, at(0), ONE, BOOT);
+    connect(&mut broker, ONE);
+
+    assert_eq!(
+        message(&mut broker, at(0), ONE, hello()),
+        vec![welcome(ONE, ceiling, 0)],
+    );
+
+    broker
+}
+
+/// A guest whose kernel keeps [`RESERVED`] of its device for itself.
+pub fn reserving() -> Broker {
+    let mut broker = sized();
+
+    greet_at(&mut broker, at(0), ONE, BOOT - RESERVED, 0);
+
+    broker
+}
+
+/// A guest whose hello waits on its device, which has not reported.
+pub fn held(total_mem: u64) -> Broker {
+    let mut broker = Broker::new(policy(), registry());
+
+    let _ = broker.handle(available(HOST));
+
+    connect(&mut broker, ONE);
+
+    assert_eq!(
+        message(&mut broker, at(0), ONE, hello_at(total_mem)),
+        vec![],
+        "the host answered before it knew how much of the guest was plugged in",
+    );
+
+    broker
+}
+
+/// Both guests welcomed, under revocation, at the sizes given.
+pub fn holding(one: u64, two: u64) -> Broker {
+    let mut broker = sized_with(revoking());
+
+    greet(&mut broker, at(0), ONE);
+    greet(&mut broker, at(0), TWO);
+
+    sizes(&mut broker, at(1), ONE, one);
+    sizes(&mut broker, at(1), TWO, two);
+
+    broker
+}
+
+pub fn connect(broker: &mut Broker, cid: u32) -> Vec<Action> {
+    broker.handle(Event::Connected { peer: vsock(cid) })
+}
+
+pub fn disconnect(broker: &mut Broker, cid: u32) -> Vec<Action> {
+    broker.handle(Event::Disconnected { peer: vsock(cid) })
+}
+
+pub fn reclaim(broker: &mut Broker, now: Timestamp, cid: u32, desired: u64) -> Vec<Action> {
+    let mut fx = Effects::default();
+
+    broker.on_reclaim(now, id(cid), desired, &mut fx);
+
+    fx.drain()
 }
 
 pub fn message(
@@ -246,6 +317,20 @@ pub const fn release(id: u64, current: u64, releasable: u64) -> GuestMessage {
     }
 }
 
+pub const fn ack(id: u64, will_release: u64) -> GuestMessage {
+    GuestMessage::ReclaimAck {
+        id: ReclaimId(id),
+        will_release,
+    }
+}
+
+pub fn nak(id: u64) -> GuestMessage {
+    GuestMessage::ReclaimNak {
+        id: ReclaimId(id),
+        reason: "the workload is pinned".to_owned(),
+    }
+}
+
 pub const fn report(total_mem: u64, available: u64) -> GuestMessage {
     GuestMessage::Status(status(total_mem, available))
 }
@@ -269,7 +354,7 @@ pub fn welcome(cid: u32, ceiling: u64, hotplugged: u64) -> Action {
         message: HostMessage::Welcome {
             protocol: PROTOCOL_VERSION,
             ceiling,
-            status_interval: policy().welcome_status_interval.get(),
+            status_interval: policy().status_interval.get(),
             hotplugged,
         },
     }
@@ -314,6 +399,17 @@ pub const fn retry(cid: u32, id: u64, reason: DenyReason, after: Duration) -> Ac
     }
 }
 
+pub fn reclaimed(cid: u32, id: u64, desired: u64) -> Action {
+    Action::Send {
+        peer: vsock(cid),
+        message: HostMessage::ReclaimRequest {
+            id: ReclaimId(id),
+            desired,
+            deadline: policy().reclaim_deadline.get(),
+        },
+    }
+}
+
 pub fn requested(cid: u32, bytes: u64) -> Action {
     Action::SetRequested {
         guest: id(cid),
@@ -329,12 +425,13 @@ pub fn view(spec: &GuestSpec, size: u64, requested: Option<u64>) -> GuestView<'_
     GuestView {
         id: GuestId::from_index(0),
         spec,
-        hotplugged: Some(0),
-        size,
+        geometry: Geometry {
+            size,
+            hotplugged: 0,
+            offset: None,
+        },
         requested,
-        status: None,
-        stale: false,
-        connected: true,
+        session: None,
         granted: None,
     }
 }
@@ -343,45 +440,28 @@ pub const fn offer(target: u64) -> Ask {
     Ask::Release { target }
 }
 
-pub fn request<'a>(
-    now: Timestamp,
-    guest: GuestView<'a>,
-    ask: Ask,
-    others: &'a [GuestView<'a>],
-    available: Option<u64>,
-) -> Request<'a> {
-    Request {
-        now,
-        guest,
-        ask,
-        others,
-        host: HostView {
-            available,
-            swap_free: None,
-            psi: None,
-        },
-        policy: &POLICY,
+pub const fn host(available: Option<u64>, swap_free: Option<u64>) -> HostView {
+    HostView {
+        available,
+        swap_free,
+        psi: None,
     }
 }
 
-pub fn credited<'a>(
+pub const fn request<'a>(
     now: Timestamp,
     guest: GuestView<'a>,
     ask: Ask,
     others: &'a [GuestView<'a>],
-    available: Option<u64>,
-    swap_free: Option<u64>,
+    host: HostView,
+    policy: &'a Policy,
 ) -> Request<'a> {
     Request {
         now,
         guest,
         ask,
         others,
-        host: HostView {
-            available,
-            swap_free,
-            psi: None,
-        },
-        policy: &GRANTING,
+        host,
+        policy,
     }
 }

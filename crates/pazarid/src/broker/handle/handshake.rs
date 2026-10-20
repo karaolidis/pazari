@@ -2,7 +2,13 @@ use pazari_transport::PeerId;
 use pazari_types::Timestamp;
 use tracing::{debug, info, warn};
 
-use crate::broker::{Broker, action::Action, effects::Effects, phase::Phase, registry::GuestId};
+use crate::broker::{
+    Broker,
+    action::Action,
+    effects::Effects,
+    phase::{Phase, State},
+    registry::GuestId,
+};
 
 impl Broker {
     pub(in crate::broker) fn on_connected(&mut self, peer: PeerId, fx: &mut Effects) {
@@ -42,7 +48,9 @@ impl Broker {
         let phase = session.phase;
 
         let next = self.transition(now, guest, &peer, fx, |step| match phase {
-            Phase::AwaitingHello(awaiting) => awaiting.welcome(step),
+            Phase::AwaitingHello(awaiting) => awaiting
+                .welcome(step)
+                .map_or_else(|| awaiting.stay(), Phase::Negotiated),
             Phase::Negotiated(negotiated) => {
                 step.world.tell_geometry(step.guest, step.peer, step.fx);
 

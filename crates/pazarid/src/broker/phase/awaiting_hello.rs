@@ -1,6 +1,6 @@
 use std::num::NonZeroU64;
 
-use pazari_proto::{GuestMessage, HostMessage, PROTOCOL_VERSION};
+use pazari_proto::{HostMessage, PROTOCOL_VERSION};
 use tracing::{info, warn};
 
 use crate::broker::phase::{Negotiated, Phase, State, Step};
@@ -8,6 +8,9 @@ use crate::broker::phase::{Negotiated, Phase, State, Step};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Held {
     block_size: NonZeroU64,
+
+    /// What the guest read as `MemTotal` when it said hello.
+    total_mem: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -21,18 +24,13 @@ impl AwaitingHello {
         Self { held: None }
     }
 
-    pub fn welcome(self, step: &mut Step<'_>) -> Phase {
-        let Some(held) = self.held else {
-            return self.stay();
-        };
+    /// Absent while there is no hello to answer or the device has not reported.
+    pub fn welcome(self, step: &mut Step<'_>) -> Option<Negotiated> {
+        let held = self.held?;
+        let ceiling = step.ceiling()?;
+        let hotplugged = step.geometry()?.hotplugged;
 
-        let Some(ceiling) = step.ceiling() else {
-            return self.stay();
-        };
-
-        let Some(hotplugged) = step.world.hotplugged(step.guest) else {
-            return self.stay();
-        };
+        step.world.observe_total_mem(step.guest, held.total_mem);
 
         info!(
             guest = step.name(),
@@ -42,7 +40,7 @@ impl AwaitingHello {
             "sending welcome",
         );
 
-        let status_interval = step.policy().welcome_status_interval.get();
+        let status_interval = step.policy().status_interval.get();
 
         step.send(HostMessage::Welcome {
             protocol: PROTOCOL_VERSION,
@@ -51,7 +49,7 @@ impl AwaitingHello {
             hotplugged,
         });
 
-        Phase::Negotiated(Negotiated::new(held.block_size, step.now))
+        Some(Negotiated::new(held.block_size, step.now))
     }
 
     fn reject(self, step: &mut Step<'_>) -> Phase {
@@ -77,17 +75,14 @@ impl State for AwaitingHello {
         self.reject(step)
     }
 
-    fn on_hello(self, step: &mut Step<'_>, message: GuestMessage) -> Phase {
-        let GuestMessage::Hello {
-            protocol,
-            agent_version,
-            block_size,
-            total_mem,
-        } = message
-        else {
-            return self.refuse(step, "something other than hello");
-        };
-
+    fn on_hello(
+        self,
+        step: &mut Step<'_>,
+        protocol: u16,
+        agent_version: &str,
+        block_size: NonZeroU64,
+        total_mem: u64,
+    ) -> Phase {
         if self.held.is_some() {
             warn!(guest = step.name(), peer = %step.peer, "duplicate hello");
 
@@ -124,8 +119,6 @@ impl State for AwaitingHello {
             return self.reject(step);
         }
 
-        step.world.observe_total_mem(step.guest, total_mem);
-
         info!(
             guest = step.name(),
             peer = %step.peer,
@@ -136,19 +129,23 @@ impl State for AwaitingHello {
         );
 
         let held = Self {
-            held: Some(Held { block_size }),
+            held: Some(Held {
+                block_size,
+                total_mem,
+            }),
         };
 
-        let next = held.welcome(step);
+        held.welcome(step).map_or_else(
+            || {
+                info!(
+                    guest = step.name(),
+                    peer = %step.peer,
+                    "delaying welcome until the memory device reports",
+                );
 
-        if matches!(next, Phase::AwaitingHello(_)) {
-            info!(
-                guest = step.name(),
-                peer = %step.peer,
-                "delaying welcome until the memory device reports",
-            );
-        }
-
-        next
+                held.stay()
+            },
+            Phase::Negotiated,
+        )
     }
 }

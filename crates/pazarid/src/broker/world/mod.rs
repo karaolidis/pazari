@@ -9,7 +9,7 @@ use crate::broker::{
     action::Action,
     arbiter::{Arbiter, Ask, Decision, HostView, Request},
     effects::Effects,
-    guest::{Guest, Guests, Reconcile},
+    guest::{Entry, Geometry, Guests, Reconcile},
     policy::Policy,
     registry::{GuestId, Registry},
     session::Session,
@@ -64,21 +64,13 @@ impl World {
     }
 
     #[must_use]
-    pub fn size(&self, guest: GuestId) -> Option<u64> {
-        self.guests.state(guest)?.size()
+    pub fn geometry(&self, guest: GuestId) -> Option<Geometry> {
+        self.guests.state(guest)?.geometry()
     }
 
     #[must_use]
-    pub fn hotplugged(&self, guest: GuestId) -> Option<u64> {
-        self.guests.state(guest).and_then(Guest::hotplugged)
-    }
-
-    #[must_use]
-    pub fn offset(&self, guest: GuestId) -> u64 {
-        self.guests
-            .state(guest)
-            .and_then(Guest::offset)
-            .unwrap_or(0)
+    pub fn requested(&self, guest: GuestId) -> Option<u64> {
+        self.guests.state(guest)?.requested()
     }
 
     pub fn answer(&self, peer: &PeerId, id: RequestId, decision: Decision, fx: &mut Effects) {
@@ -100,7 +92,7 @@ impl World {
                     ?reason,
                     ?retry_after,
                     available = ?self.host.available,
-                    floor = self.policy.host_floor,
+                    floor = self.policy.grant_floor,
                     "denying",
                 );
 
@@ -167,19 +159,24 @@ impl World {
         let candidates: Vec<_> = self
             .guests
             .iter()
-            .filter(|(_, entry)| entry.state.geometry.is_some() && !entry.state.asked())
-            .map(|(id, entry)| entry.view(id))
+            .filter(|(_, entry)| !entry.state.asked() && !entry.state.shrinking())
+            .filter_map(|(id, entry)| entry.view(id))
             .collect();
 
         self.arbiter.revoke(&candidates, revocation)
     }
 
     pub fn tell_geometry(&self, guest: GuestId, peer: &PeerId, fx: &mut Effects) {
-        let Some(hotplugged) = self.hotplugged(guest) else {
+        let Some(geometry) = self.geometry(guest) else {
             return;
         };
 
-        fx.send(peer, HostMessage::Geometry { hotplugged });
+        fx.send(
+            peer,
+            HostMessage::Geometry {
+                hotplugged: geometry.hotplugged,
+            },
+        );
     }
 
     pub fn observe_total_mem(&mut self, guest: GuestId, total_mem: u64) {
@@ -195,7 +192,7 @@ impl World {
     }
 
     pub fn actuate(&mut self, now: Timestamp, guest: GuestId, target: u64, fx: &mut Effects) {
-        let deadline = Deadline::after(now, self.policy.reconcile_deadline.get());
+        let deadline = Deadline::after(now, self.policy.actuation_deadline.get());
 
         let Some(state) = self.guests.state_mut(guest) else {
             return;
@@ -229,9 +226,7 @@ impl World {
     }
 
     pub fn settle(&mut self, guest: GuestId, size: u64, hotplugged: u64) {
-        let name = self.guests.name(guest).to_owned();
-
-        let Some(state) = self.guests.state_mut(guest) else {
+        let Some(Entry { spec, state }) = self.guests.get_mut(guest) else {
             return;
         };
 
@@ -248,7 +243,7 @@ impl World {
         state.reconcile = None;
 
         debug!(
-            guest = name,
+            guest = spec.name,
             size,
             target = reconcile.target,
             "actuation completed"

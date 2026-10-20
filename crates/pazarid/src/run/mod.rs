@@ -175,10 +175,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
             Step::Accepted(Ok((connection, peer))) => {
                 exchange.peers.accept(connection, peer.clone());
 
-                exchange.drive(Event::Connected {
-                    now: clock.now(),
-                    peer,
-                });
+                exchange.drive(Event::Connected { peer });
             }
             Step::Accepted(Err(error)) => warn!(%error, "failed to accept a connection"),
             Step::Reported(report) => {
@@ -190,7 +187,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
             Step::Tick => {
                 let now = clock.now();
 
-                match host::reading(&memory, now).await {
+                match host::reading(&memory).await {
                     Ok(event) => exchange.drive(event),
                     Err(error) => warn!(%error, "failed to read host memory"),
                 }

@@ -6,41 +6,61 @@ use tracing::{debug, info, warn};
 
 use crate::broker::{
     arbiter::{Ask, Decision},
+    guest::Geometry,
     phase::{Phase, State, Step},
 };
 
+/// How a guest has answered a reclaim request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reply {
+    Pending,
+
+    /// The guest promised to release this much.
+    Committed(u64),
+
+    /// The guest is not asked again until the deadline.
+    Refused,
+}
+
+/// Whether a guest is keeping to its `status` interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reporting {
+    Fresh,
+
+    /// It has missed more intervals than `status.stale_after`.
+    Stale,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reclaim {
-    pub id: ReclaimId,
+    pub(crate) id: ReclaimId,
 
-    pub desired: u64,
+    pub(crate) desired: u64,
 
-    pub deadline: Deadline,
+    pub(crate) deadline: Deadline,
 
-    pub committed: Option<u64>,
-
-    pub refused: bool,
+    pub(crate) reply: Reply,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Negotiated {
     /// What the guest said its geometry was in `hello`.
-    pub block_size: NonZeroU64,
+    pub(crate) block_size: NonZeroU64,
 
     /// The last guest-initiated id answered.
-    pub answered: Option<RequestId>,
+    pub(crate) answered: Option<RequestId>,
 
     /// The next host-initiated id.
-    pub next_reclaim: ReclaimId,
+    pub(crate) next_reclaim: ReclaimId,
 
-    pub reclaim: Option<Reclaim>,
+    pub(crate) reclaim: Option<Reclaim>,
 
-    pub status: Option<Status>,
+    pub(crate) status: Option<Status>,
 
     /// When that `status` or `welcome` arrived.
-    pub heard: Timestamp,
+    pub(crate) heard: Timestamp,
 
-    pub stale: bool,
+    pub(crate) reporting: Reporting,
 }
 
 impl Negotiated {
@@ -53,8 +73,28 @@ impl Negotiated {
             reclaim: None,
             status: None,
             heard: now,
-            stale: false,
+            reporting: Reporting::Fresh,
         }
+    }
+
+    #[must_use]
+    pub const fn block_size(&self) -> NonZeroU64 {
+        self.block_size
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> Option<Status> {
+        self.status
+    }
+
+    #[must_use]
+    pub const fn reporting(&self) -> Reporting {
+        self.reporting
+    }
+
+    #[must_use]
+    pub const fn reclaim(&self) -> Option<Reclaim> {
+        self.reclaim
     }
 
     #[must_use]
@@ -81,11 +121,17 @@ impl Negotiated {
         id
     }
 
-    #[must_use]
-    const fn answers_reclaim(&self, id: ReclaimId) -> bool {
-        match self.reclaim {
-            Some(reclaim) => reclaim.id.get() == id.get(),
-            None => false,
+    /// Takes the first reply to the outstanding reclaim; any other is stray.
+    const fn answer_reclaim(&mut self, id: ReclaimId, reply: Reply) -> bool {
+        match &mut self.reclaim {
+            Some(reclaim)
+                if reclaim.id.get() == id.get() && matches!(reclaim.reply, Reply::Pending) =>
+            {
+                reclaim.reply = reply;
+
+                true
+            }
+            _ => false,
         }
     }
 
@@ -105,13 +151,91 @@ impl Negotiated {
         None
     }
 
+    /// The most of `bytes` that is a whole number of the guest's blocks.
     #[must_use]
-    const fn blocks(&self, size: u64, wanted: u64, ceiling: u64) -> u64 {
-        let blocks = wanted.saturating_sub(size).div_ceil(self.block_size.get());
+    const fn whole_blocks(&self, bytes: u64) -> u64 {
+        bytes - bytes % self.block_size.get()
+    }
 
-        let target = size.saturating_add(blocks.saturating_mul(self.block_size.get()));
+    /// The fewest whole blocks of the guest's that hold `bytes`.
+    #[must_use]
+    const fn blocks_holding(&self, bytes: u64) -> u64 {
+        bytes
+            .div_ceil(self.block_size.get())
+            .saturating_mul(self.block_size.get())
+    }
 
-        if target < ceiling { target } else { ceiling }
+    /// What a grow to `target`, as the guest reads it, asks of the device.
+    ///
+    /// An `Err` is answered without the arbiter.
+    fn grow(&self, step: &Step<'_>, target: u64) -> Result<(Geometry, Ask), Decision> {
+        let ceiling = step.ceiling().ok_or(Decision::UNKNOWN)?;
+        let geometry = step.geometry().ok_or_else(|| step.world.unsized_deny())?;
+
+        // Where the device is heading, which a resize in flight moves off its size.
+        let heading = step.requested().unwrap_or(geometry.size);
+        let wanted = geometry.device(target);
+
+        if wanted <= heading {
+            return Err(Decision::Grant { target });
+        }
+
+        let room = self.whole_blocks(ceiling.get().saturating_sub(heading));
+
+        if room == 0 {
+            return Err(Decision::Deny {
+                reason: DenyReason::Ceiling,
+                retry_after: None,
+            });
+        }
+
+        let grow = self.blocks_holding(wanted - heading).min(room);
+
+        Ok((
+            geometry,
+            Ask::Grow {
+                target: heading + grow,
+            },
+        ))
+    }
+
+    /// What an offer of `releasable` bytes asks of the device.
+    ///
+    /// An `Err` is answered without the arbiter.
+    fn release(&self, step: &Step<'_>, releasable: u64) -> Result<(Geometry, Ask), Decision> {
+        let geometry = step.geometry().ok_or_else(|| step.world.unsized_deny())?;
+
+        let target = geometry
+            .size
+            .saturating_sub(self.whole_blocks(releasable))
+            .max(geometry.boot());
+
+        Ok((geometry, Ask::Release { target }))
+    }
+
+    /// Settles a reclaim the guest promised once it offers that much back.
+    fn fulfil(&mut self, step: &Step<'_>, releasable: u64) {
+        let Some(reclaim) = self.reclaim else {
+            return;
+        };
+
+        let Reply::Committed(committed) = reclaim.reply else {
+            return;
+        };
+
+        if releasable < committed {
+            return;
+        }
+
+        self.reclaim = None;
+
+        info!(
+            guest = step.name(),
+            id = %reclaim.id,
+            committed,
+            releasable,
+            "guest released what it promised",
+        );
     }
 
     fn stray_reclaim(self, step: &mut Step<'_>, id: ReclaimId) -> Phase {
@@ -119,16 +243,16 @@ impl Negotiated {
             guest = step.name(),
             peer = %step.peer,
             %id,
-            "reply to a reclaim that was never requested",
+            "reply to a reclaim that is not awaiting one",
         );
         step.close();
 
         self.stay()
     }
 
-    fn request(step: &mut Step<'_>, id: RequestId, ask: Result<Ask, Decision>) {
-        let ask = match ask {
-            Ok(ask) => ask,
+    fn request(step: &mut Step<'_>, id: RequestId, asked: Result<(Geometry, Ask), Decision>) {
+        let (geometry, ask) = match asked {
+            Ok(asked) => asked,
             Err(decision) => return step.answer(id, decision),
         };
 
@@ -143,9 +267,13 @@ impl Negotiated {
         };
 
         let target = target.min(ceiling.get());
-        let granted = target.saturating_sub(step.world.offset(step.guest));
 
-        step.answer(id, Decision::Grant { target: granted });
+        step.answer(
+            id,
+            Decision::Grant {
+                target: geometry.seen(target),
+            },
+        );
 
         if matches!(ask, Ask::Grow { .. }) {
             step.world.note_granted(step.guest, step.now);
@@ -160,8 +288,13 @@ impl State for Negotiated {
         Phase::Negotiated(self)
     }
 
-    fn refuse(self, step: &mut Step<'_>, _what: &'static str) -> Phase {
-        warn!(guest = step.name(), peer = %step.peer, "duplicate hello");
+    fn refuse(self, step: &mut Step<'_>, what: &'static str) -> Phase {
+        warn!(
+            guest = step.name(),
+            peer = %step.peer,
+            said = what,
+            "guest sent a message out of turn",
+        );
 
         step.close();
 
@@ -177,39 +310,19 @@ impl State for Negotiated {
             guest = step.name(),
             %id,
             target,
-            size = ?step.size(),
+            geometry = ?step.geometry(),
             "a guest asked to grow",
         );
 
-        let ask = match (step.ceiling(), step.size()) {
-            (Some(ceiling), Some(size)) => {
-                let ceiling = ceiling.get();
-                let wanted = target
-                    .saturating_add(step.world.offset(step.guest))
-                    .min(ceiling);
+        let asked = next.grow(step, target);
 
-                if wanted > size {
-                    Ok(Ask::Grow {
-                        target: self.blocks(size, wanted, ceiling),
-                    })
-                } else {
-                    Err(Decision::Deny {
-                        reason: DenyReason::Ceiling,
-                        retry_after: None,
-                    })
-                }
-            }
-            (None, _) => Err(Decision::UNKNOWN),
-            (_, None) => Err(step.world.unsized_deny()),
-        };
-
-        Self::request(step, id, ask);
+        Self::request(step, id, asked);
 
         next.stay()
     }
 
     fn on_offer_release(self, step: &mut Step<'_>, id: RequestId, releasable: u64) -> Phase {
-        let Some(next) = self.accepted(step, id) else {
+        let Some(mut next) = self.accepted(step, id) else {
             return self.stay();
         };
 
@@ -217,34 +330,22 @@ impl State for Negotiated {
             guest = step.name(),
             %id,
             releasable,
-            size = ?step.size(),
+            geometry = ?step.geometry(),
             "guest offered memory back",
         );
 
-        let base = step
-            .size()
-            .unwrap_or(0)
-            .saturating_sub(step.world.hotplugged(step.guest).unwrap_or(0));
+        next.fulfil(step, releasable);
 
-        let ask = step
-            .size()
-            .ok_or_else(|| step.world.unsized_deny())
-            .map(|size| Ask::Release {
-                target: size.saturating_sub(releasable).max(base),
-            });
+        let asked = next.release(step, releasable);
 
-        Self::request(step, id, ask);
+        Self::request(step, id, asked);
 
         next.stay()
     }
 
     fn on_reclaim_ack(mut self, step: &mut Step<'_>, id: ReclaimId, will_release: u64) -> Phase {
-        if !self.answers_reclaim(id) {
+        if !self.answer_reclaim(id, Reply::Committed(will_release)) {
             return self.stray_reclaim(step, id);
-        }
-
-        if let Some(reclaim) = self.reclaim.as_mut() {
-            reclaim.committed = Some(will_release);
         }
 
         info!(
@@ -256,12 +357,8 @@ impl State for Negotiated {
     }
 
     fn on_reclaim_nak(mut self, step: &mut Step<'_>, id: ReclaimId, reason: &str) -> Phase {
-        if !self.answers_reclaim(id) {
+        if !self.answer_reclaim(id, Reply::Refused) {
             return self.stray_reclaim(step, id);
-        }
-
-        if let Some(reclaim) = self.reclaim.as_mut() {
-            reclaim.refused = true;
         }
 
         info!(guest = step.name(), %id, reason, "guest refused the release");
@@ -270,9 +367,9 @@ impl State for Negotiated {
     }
 
     fn on_status(mut self, step: &mut Step<'_>, status: Status) -> Phase {
-        let returned = self.stale;
+        let returned = self.reporting == Reporting::Stale;
 
-        self.stale = false;
+        self.reporting = Reporting::Fresh;
         self.heard = step.now;
         self.status = Some(status);
 
@@ -333,11 +430,15 @@ mod tests {
     }
 
     #[test]
-    fn a_grow_lands_on_a_whole_number_of_the_guests_blocks() {
+    fn sizes_are_taken_in_whole_blocks_of_the_guest_s() {
         let session = negotiated();
 
-        assert_eq!(session.blocks(2048, 2049, u64::MAX), 2048 + BLOCK);
-        assert_eq!(session.blocks(2048, 2048 + BLOCK, u64::MAX), 2048 + BLOCK);
-        assert_eq!(session.blocks(2048, 4096, 2048 + BLOCK), 2048 + BLOCK);
+        assert_eq!(session.blocks_holding(1), BLOCK);
+        assert_eq!(session.blocks_holding(BLOCK), BLOCK);
+        assert_eq!(session.blocks_holding(BLOCK + 1), 2 * BLOCK);
+
+        assert_eq!(session.whole_blocks(BLOCK - 1), 0);
+        assert_eq!(session.whole_blocks(BLOCK), BLOCK);
+        assert_eq!(session.whole_blocks(2 * BLOCK - 1), BLOCK);
     }
 }

@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde_inline_default::serde_inline_default;
 
 use crate::{
-    broker::{GuestSpec, Policy, Registry, Revocation},
+    broker::{Grantable, GuestSpec, Policy, Registry, Revocation, StalledShrinks},
     config::{Config, Qmp, Transport, error::ConfigError},
     runtime::Mode,
 };
@@ -61,18 +61,25 @@ impl File {
         let tick_interval = Interval::try_new(self.tick.interval).at("tick.interval")?;
 
         let policy = Policy {
-            welcome_status_interval: Interval::try_new(self.status.interval)
-                .at("status.interval")?,
-            host_floor: self.grant.floor.as_u64(),
-            grant_min_interval: Interval::try_new(self.grant.min_interval)
-                .at("grant.min_interval")?,
-            reconcile_deadline: Interval::try_new(self.actuation.deadline)
-                .at("actuation.deadline")?,
-            shrink_revert: self.actuation.revert_shrinks,
+            status_interval: Interval::try_new(self.status.interval).at("status.interval")?,
             stale_after: NonZeroU32::new(self.status.stale_after)
                 .positive("status.stale_after", "count of intervals")?,
+            grant_floor: self.grant.floor.as_u64(),
+            grant_min_interval: Interval::try_new(self.grant.min_interval)
+                .at("grant.min_interval")?,
+            grantable: if self.grant.swap {
+                Grantable::RamAndSwap
+            } else {
+                Grantable::Ram
+            },
+            actuation_deadline: Interval::try_new(self.actuation.deadline)
+                .at("actuation.deadline")?,
+            stalled_shrinks: if self.actuation.revert_shrinks {
+                StalledShrinks::Revert
+            } else {
+                StalledShrinks::Leave
+            },
             reclaim_deadline: Interval::try_new(self.reclaim.deadline).at("reclaim.deadline")?,
-            grant_swap: self.grant.swap,
             revocation: self
                 .reclaim
                 .revocation

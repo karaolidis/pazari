@@ -4,16 +4,17 @@ mod negotiated;
 use std::num::NonZeroU64;
 
 use enum_dispatch::enum_dispatch;
-use pazari_proto::{GuestMessage, HostMessage, ReclaimId, RequestId, Status};
+use pazari_proto::{HostMessage, ReclaimId, RequestId, Status};
 use pazari_transport::PeerId;
 use pazari_types::Timestamp;
 
 pub use crate::broker::phase::{
     awaiting_hello::AwaitingHello,
-    negotiated::{Negotiated, Reclaim},
+    negotiated::{Negotiated, Reclaim, Reply, Reporting},
 };
 use crate::broker::{
-    arbiter::Decision, effects::Effects, policy::Policy, registry::GuestId, world::World,
+    arbiter::Decision, effects::Effects, guest::Geometry, policy::Policy, registry::GuestId,
+    world::World,
 };
 
 #[derive(Debug)]
@@ -38,8 +39,12 @@ impl Step<'_> {
         self.world.ceiling(self.guest)
     }
 
-    pub fn size(&self) -> Option<u64> {
-        self.world.size(self.guest)
+    pub fn geometry(&self) -> Option<Geometry> {
+        self.world.geometry(self.guest)
+    }
+
+    pub fn requested(&self) -> Option<u64> {
+        self.world.requested(self.guest)
     }
 
     pub fn send(&mut self, message: HostMessage) {
@@ -61,7 +66,14 @@ pub trait State: Copy {
 
     fn refuse(self, step: &mut Step<'_>, what: &'static str) -> Phase;
 
-    fn on_hello(self, step: &mut Step<'_>, _message: GuestMessage) -> Phase {
+    fn on_hello(
+        self,
+        step: &mut Step<'_>,
+        _protocol: u16,
+        _agent_version: &str,
+        _block_size: NonZeroU64,
+        _total_mem: u64,
+    ) -> Phase {
         self.refuse(step, "hello")
     }
 

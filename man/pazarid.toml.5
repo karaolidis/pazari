@@ -69,14 +69,14 @@ Default
 .Ss [reclaim]\&
 .Bl -tag -width Ds
 .It Cm deadline No = Ar duration
-How long a guest has to answer a reclaim request.
+How long a guest has to answer a reclaim request and release what it promised.
+A guest that refuses is not asked again until this has passed.
 Default
 .Cm 30s .
 .El
 .Ss [reclaim.revocation]\&
 Optional.
-Without it, the daemon never asks guests to return memory, except after a
-ceiling is lowered.
+Without it, the daemon never asks guests to return memory.
 .Bl -tag -width Ds
 .It Cm psi No = Ar percent
 Host memory pressure, as
@@ -220,7 +220,9 @@ The guest's ceiling.
 .It Va guest_stale
 1 while the guest is stale.
 .It Va guest_reclaim_outstanding
-1 while a reclaim request awaits an answer.
+1 from a reclaim request until the guest releases what it promised or
+.Cm reclaim.deadline
+passes.
 .El
 .Ss Host gauges
 .Bl -tag -width "guest_reclaim_outstanding" -compact

@@ -4,8 +4,8 @@ use crate::broker::phase::{Negotiated, Phase};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
-    pub peer: PeerId,
-    pub phase: Phase,
+    pub(crate) peer: PeerId,
+    pub(crate) phase: Phase,
 }
 
 impl Session {

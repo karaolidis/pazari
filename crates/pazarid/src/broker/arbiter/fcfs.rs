@@ -17,7 +17,7 @@ impl Arbiter for Fcfs {
     fn decide(&mut self, request: &Request<'_>) -> Decision {
         match request.ask {
             Ask::Release { target } => Decision::Grant { target },
-            Ask::Grow { target, .. } => Self::grow(request, target),
+            Ask::Grow { target } => Self::grow(request, target),
         }
     }
 
@@ -29,9 +29,7 @@ impl Arbiter for Fcfs {
         let mut most: Option<(GuestId, u64)> = None;
 
         for candidate in candidates {
-            let Some(over) = candidate.hotplugged else {
-                continue;
-            };
+            let over = candidate.geometry.hotplugged;
 
             if over > 0 && most.is_none_or(|(_, held)| over > held) {
                 most = Some((candidate.id, over));
@@ -51,19 +49,16 @@ impl Fcfs {
             let since = request.now.saturating_duration_since(granted);
 
             if since < interval {
-                let reason = DenyReason::RateLimited;
-                let retry_after = interval.saturating_sub(since);
                 return Decision::Deny {
-                    reason,
-                    retry_after: Some(retry_after),
+                    reason: DenyReason::RateLimited,
+                    retry_after: Some(interval.saturating_sub(since)),
                 };
             }
         }
 
-        let Some(available) = request.host.grantable(policy.grant_swap) else {
-            let reason = DenyReason::HostPressure;
+        let Some(available) = request.host.grantable(policy.grantable) else {
             return Decision::Deny {
-                reason,
+                reason: DenyReason::HostPressure,
                 retry_after: Some(interval),
             };
         };
@@ -72,14 +67,13 @@ impl Fcfs {
             total.saturating_add(other.outstanding())
         });
 
-        let wanted = target.saturating_sub(request.guest.size);
+        let wanted = target.saturating_sub(request.guest.geometry.size);
 
         let projected = available.saturating_sub(committed).saturating_sub(wanted);
 
-        if projected < policy.host_floor {
-            let reason = DenyReason::HostPressure;
+        if projected < policy.grant_floor {
             return Decision::Deny {
-                reason,
+                reason: DenyReason::HostPressure,
                 retry_after: Some(interval),
             };
         }
@@ -94,10 +88,11 @@ mod tests {
 
     use super::*;
     use crate::broker::{
+        guest::Geometry,
         registry::GuestSpec,
         testing::{
-            BOOT, CEILING, FLOOR, GIB, MIB, REVOKE_STEP, at, credited, guest, offer, policy,
-            request, revoking, view,
+            BOOT, CEILING, FLOOR, GIB, GRANTING, MIB, POLICY, REVOKE_STEP, at, guest, host, offer,
+            policy, request, revoking, view,
         },
     };
 
@@ -115,7 +110,8 @@ mod tests {
             view(&spec, 2048 * MIB, None),
             grow(3072 * MIB),
             &[],
-            Some(8 * GIB),
+            host(Some(8 * GIB), None),
+            &POLICY,
         ));
 
         assert_eq!(decision, Decision::Grant { target: 3072 * MIB });
@@ -131,7 +127,8 @@ mod tests {
             view(&spec, 2048 * MIB, None),
             grow(4096 * MIB),
             &[],
-            Some(FLOOR + GIB),
+            host(Some(FLOOR + GIB), None),
+            &POLICY,
         ));
 
         assert_eq!(
@@ -153,7 +150,8 @@ mod tests {
             view(&spec, 2048 * MIB, None),
             grow(3072 * MIB),
             &[],
-            Some(FLOOR + GIB),
+            host(Some(FLOOR + GIB), None),
+            &POLICY,
         ));
 
         assert_eq!(decision, Decision::Grant { target: 3072 * MIB });
@@ -172,7 +170,8 @@ mod tests {
             view(&ours, 2048 * MIB, None),
             grow(3072 * MIB),
             &others,
-            Some(FLOOR + GIB),
+            host(Some(FLOOR + GIB), None),
+            &POLICY,
         ));
 
         assert_eq!(
@@ -197,7 +196,8 @@ mod tests {
             asking,
             grow(3072 * MIB),
             &[],
-            Some(8 * GIB),
+            host(Some(8 * GIB), None),
+            &POLICY,
         ));
 
         assert_eq!(
@@ -222,7 +222,8 @@ mod tests {
             asking,
             grow(3072 * MIB),
             &[],
-            Some(8 * GIB),
+            host(Some(8 * GIB), None),
+            &POLICY,
         ));
 
         assert_eq!(decision, Decision::Grant { target: 3072 * MIB });
@@ -238,7 +239,8 @@ mod tests {
             view(&spec, 2048 * MIB, None),
             grow(3072 * MIB),
             &[],
-            None,
+            host(None, None),
+            &POLICY,
         ));
 
         assert_eq!(
@@ -257,13 +259,13 @@ mod tests {
 
         let asking = view(&spec, 2048 * MIB, None);
 
-        let decision = arbiter.decide(&credited(
+        let decision = arbiter.decide(&request(
             at(100),
             asking,
             grow(4096 * MIB),
             &[],
-            Some(FLOOR + GIB),
-            Some(2 * GIB),
+            host(Some(FLOOR + GIB), Some(2 * GIB)),
+            &GRANTING,
         ));
 
         assert_eq!(decision, Decision::Grant { target: 4096 * MIB });
@@ -273,7 +275,8 @@ mod tests {
             asking,
             grow(4096 * MIB),
             &[],
-            Some(FLOOR + GIB),
+            host(Some(FLOOR + GIB), None),
+            &POLICY,
         ));
 
         assert_eq!(
@@ -291,13 +294,13 @@ mod tests {
         let spec = guest("one", CEILING);
         let mut arbiter = Fcfs;
 
-        let decision = arbiter.decide(&credited(
+        let decision = arbiter.decide(&request(
             at(100),
             view(&spec, 2048 * MIB, None),
             grow(4096 * MIB),
             &[],
-            Some(FLOOR + GIB),
-            Some(512 * MIB),
+            host(Some(FLOOR + GIB), Some(512 * MIB)),
+            &GRANTING,
         ));
 
         assert_eq!(
@@ -314,13 +317,13 @@ mod tests {
         let spec = guest("one", CEILING);
         let mut arbiter = Fcfs;
 
-        let decision = arbiter.decide(&credited(
+        let decision = arbiter.decide(&request(
             at(100),
             view(&spec, 2048 * MIB, None),
             grow(3072 * MIB),
             &[],
-            Some(8 * GIB),
-            None,
+            host(Some(8 * GIB), None),
+            &GRANTING,
         ));
 
         assert_eq!(
@@ -340,7 +343,14 @@ mod tests {
         let mut asking = view(&spec, 3072 * MIB, None);
         asking.granted = Some(at(100));
 
-        let decision = arbiter.decide(&request(at(100), asking, offer(2048 * MIB), &[], None));
+        let decision = arbiter.decide(&request(
+            at(100),
+            asking,
+            offer(2048 * MIB),
+            &[],
+            host(None, None),
+            &POLICY,
+        ));
 
         assert_eq!(decision, Decision::Grant { target: 2048 * MIB });
     }
@@ -352,8 +362,10 @@ mod tests {
     fn candidate(spec: &GuestSpec, index: usize, size: u64) -> GuestView<'_> {
         GuestView {
             id: GuestId::from_index(index),
-            size,
-            hotplugged: Some(size.saturating_sub(BOOT)),
+            geometry: Geometry {
+                hotplugged: size.saturating_sub(BOOT),
+                ..view(spec, size, None).geometry
+            },
             ..view(spec, size, None)
         }
     }
@@ -394,21 +406,6 @@ mod tests {
         assert_eq!(
             Fcfs.revoke(&candidates, revocation()),
             Some((GuestId::from_index(0), 128 * MIB))
-        );
-    }
-
-    #[test]
-    fn a_candidate_whose_device_has_not_reported_is_passed_over() {
-        let spec = guest("one", CEILING);
-        let unsettled = GuestView {
-            hotplugged: None,
-            ..candidate(&spec, 0, BOOT + GIB)
-        };
-
-        assert_eq!(Fcfs.revoke(&[unsettled], revocation()), None);
-        assert_eq!(
-            Fcfs.revoke(&[unsettled, candidate(&spec, 1, BOOT + MIB)], revocation()),
-            Some((GuestId::from_index(1), MIB))
         );
     }
 

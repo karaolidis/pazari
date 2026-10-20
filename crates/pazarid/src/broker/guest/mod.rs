@@ -17,8 +17,9 @@ pub struct Geometry {
     /// How much of that size was plugged in, rather than there at boot.
     pub hotplugged: u64,
 
-    /// The device's size is boot memory plus what is plugged into it; the guest
-    /// reads `MemTotal`, which is that less whatever its kernel keeps for itself.
+    /// What the guest's kernel keeps for itself out of the device's size.
+    ///
+    /// The guest reads `MemTotal` as the size less this.
     pub offset: Option<u64>,
 }
 
@@ -30,32 +31,57 @@ impl Geometry {
             offset,
         }
     }
+
+    /// The memory the device held at boot.
+    #[must_use]
+    pub const fn boot(self) -> u64 {
+        self.size.saturating_sub(self.hotplugged)
+    }
+
+    /// What the guest reads as `MemTotal` with the device at `size`.
+    ///
+    /// Until the offset is known this is the device's own figure.
+    #[must_use]
+    pub const fn seen(self, size: u64) -> u64 {
+        match self.offset {
+            Some(offset) => size.saturating_sub(offset),
+            None => size,
+        }
+    }
+
+    /// The device size at which the guest reads `seen` as `MemTotal`.
+    ///
+    /// Until the offset is known this is the guest's own figure.
+    #[must_use]
+    pub const fn device(self, seen: u64) -> u64 {
+        match self.offset {
+            Some(offset) => seen.saturating_add(offset),
+            None => seen,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Guest {
-    pub geometry: Option<Geometry>,
+    pub(crate) geometry: Option<Geometry>,
 
-    pub reconcile: Option<Reconcile>,
+    pub(crate) reconcile: Option<Reconcile>,
 
-    pub granted: Option<Timestamp>,
+    pub(crate) granted: Option<Timestamp>,
 
-    pub session: Option<Session>,
+    pub(crate) session: Option<Session>,
 }
 
 impl Guest {
     #[must_use]
-    pub const fn size(&self) -> Option<u64> {
-        match self.geometry {
-            Some(geometry) => Some(geometry.size),
-            None => None,
-        }
+    pub const fn geometry(&self) -> Option<Geometry> {
+        self.geometry
     }
 
     #[must_use]
-    pub const fn hotplugged(&self) -> Option<u64> {
+    pub const fn size(&self) -> Option<u64> {
         match self.geometry {
-            Some(geometry) => Some(geometry.hotplugged),
+            Some(geometry) => Some(geometry.size),
             None => None,
         }
     }
@@ -74,6 +100,12 @@ impl Guest {
             .as_ref()
             .and_then(Session::negotiated)
             .is_none_or(|session| session.reclaim.is_some())
+    }
+
+    /// Whether a shrink is on its way to the device.
+    #[must_use]
+    pub fn shrinking(&self) -> bool {
+        self.reconcile.is_some_and(Reconcile::is_shrink)
     }
 
     #[must_use]
@@ -105,21 +137,17 @@ impl Guest {
         }
     }
 
+    /// Absent until the device has reported a size.
     #[must_use]
-    pub fn view<'a>(&self, id: GuestId, spec: &'a GuestSpec) -> GuestView<'a> {
-        let negotiated = self.session.as_ref().and_then(Session::negotiated);
-
-        GuestView {
+    pub fn view<'a>(&'a self, id: GuestId, spec: &'a GuestSpec) -> Option<GuestView<'a>> {
+        Some(GuestView {
             id,
             spec,
-            hotplugged: self.hotplugged(),
-            size: self.size().unwrap_or(0),
+            geometry: self.geometry?,
             requested: self.requested(),
-            status: negotiated.and_then(|session| session.status),
-            stale: negotiated.is_some_and(|session| session.stale),
-            connected: negotiated.is_some(),
+            session: self.session.as_ref().and_then(Session::negotiated),
             granted: self.granted,
-        }
+        })
     }
 }
 
@@ -158,7 +186,7 @@ pub struct Entry {
 
 impl Entry {
     #[must_use]
-    pub fn view(&self, id: GuestId) -> GuestView<'_> {
+    pub fn view(&self, id: GuestId) -> Option<GuestView<'_>> {
         self.state.view(id, &self.spec)
     }
 }
@@ -223,10 +251,6 @@ impl Guests {
         self.state_mut(id)?.session.as_mut()
     }
 
-    pub fn negotiated_mut(&mut self, id: GuestId) -> Option<&mut Negotiated> {
-        self.session_mut(id)?.negotiated_mut()
-    }
-
     #[must_use]
     pub fn ceiling(&self, id: GuestId) -> Option<NonZeroU64> {
         self.get(id).map(|entry| entry.spec.ceiling)
@@ -260,7 +284,9 @@ impl Guests {
         let mut others = Vec::with_capacity(self.len());
 
         for (id, entry) in self.iter() {
-            let view = entry.view(id);
+            let Some(view) = entry.view(id) else {
+                continue;
+            };
 
             if id == asking {
                 mine = Some(view);

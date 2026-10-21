@@ -299,6 +299,7 @@ impl Harness {
                     name: "one".to_owned(),
                     ceiling: bytes(CEILING),
                 },
+                (),
             )
             .expect("the only guest");
 
@@ -416,7 +417,7 @@ impl Harness {
                 self.heard.push(message.clone());
             }
 
-            let actions = self.engine.handle(event);
+            let actions = self.engine.handle(event).actions;
 
             self.geometry.send_replace(self.engine.total_mem());
 

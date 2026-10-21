@@ -33,21 +33,20 @@ impl Pacer {
 
         Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
     }
+}
 
-    /// The rate, in bytes a second, a phase actually held: what a report says
-    /// it moved, against the target the rest of this type sets.
-    #[must_use]
-    pub fn measure(bytes: u64, span: Duration) -> u64 {
-        let nanos = span.as_nanos();
+/// The rate, in bytes a second, that moving `bytes` over `span` held.
+#[must_use]
+pub fn measure(bytes: u64, span: Duration) -> u64 {
+    let nanos = span.as_nanos();
 
-        if nanos == 0 {
-            return 0;
-        }
-
-        let rate = u128::from(bytes) * NANOS_PER_SECOND / nanos;
-
-        u64::try_from(rate).unwrap_or(u64::MAX)
+    if nanos == 0 {
+        return 0;
     }
+
+    let rate = u128::from(bytes) * NANOS_PER_SECOND / nanos;
+
+    u64::try_from(rate).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -140,10 +139,10 @@ mod tests {
 
     #[test]
     fn a_rate_is_what_moved_over_how_long_it_took() {
-        assert_eq!(Pacer::measure(MIB, Duration::from_secs(1)), MIB);
-        assert_eq!(Pacer::measure(MIB, Duration::from_millis(500)), 2 * MIB);
-        assert_eq!(Pacer::measure(0, Duration::from_secs(1)), 0);
-        assert_eq!(Pacer::measure(MIB, Duration::ZERO), 0, "no time, no rate");
-        assert_eq!(Pacer::measure(u64::MAX, Duration::from_nanos(1)), u64::MAX);
+        assert_eq!(measure(MIB, Duration::from_secs(1)), MIB);
+        assert_eq!(measure(MIB, Duration::from_millis(500)), 2 * MIB);
+        assert_eq!(measure(0, Duration::from_secs(1)), 0);
+        assert_eq!(measure(MIB, Duration::ZERO), 0, "no time, no rate");
+        assert_eq!(measure(u64::MAX, Duration::from_nanos(1)), u64::MAX);
     }
 }

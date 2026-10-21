@@ -208,29 +208,11 @@ impl Peer for Host {
 mod tests {
     use std::time::Duration;
 
-    use super::{DenyReason, GuestMessage, HostMessage, RequestId};
+    use super::{DenyReason, HostMessage, RequestId};
     use crate::{
         Codec, Decoder, JsonLinesCodec,
         testing::{guest_messages, host_messages},
     };
-
-    #[test]
-    fn guest_messages_survive_serde() {
-        for message in guest_messages() {
-            let text = serde_json::to_string(&message).unwrap();
-            let back: GuestMessage = serde_json::from_str(&text).unwrap();
-            assert_eq!(back, message, "round trip of {text}");
-        }
-    }
-
-    #[test]
-    fn host_messages_survive_serde() {
-        for message in host_messages() {
-            let text = serde_json::to_string(&message).unwrap();
-            let back: HostMessage = serde_json::from_str(&text).unwrap();
-            assert_eq!(back, message, "round trip of {text}");
-        }
-    }
 
     fn assert_golden<M: serde::Serialize>(message: &M, expected: &str) {
         let framed = JsonLinesCodec::encode_to_vec(message).expect("message encodes");

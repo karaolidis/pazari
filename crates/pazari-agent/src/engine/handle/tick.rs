@@ -80,6 +80,6 @@ impl Engine {
             "workload throttled at memory.high",
         );
 
-        self.transition(now, fx, Phase::brake);
+        self.transition(now, fx, Phase::on_throttled);
     }
 }

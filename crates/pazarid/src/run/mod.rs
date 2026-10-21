@@ -27,7 +27,7 @@ pub use crate::run::{
     supervisor::{Connect, Supervisor},
 };
 use crate::{
-    broker::{Broker, Event},
+    broker::{Broker, Entry, Event},
     config::Config,
     runtime::ProcMemory,
 };
@@ -59,13 +59,12 @@ pub async fn run(config: Config) -> Result<(), RunError> {
         listeners,
         metrics,
         policy,
-        registry,
-        devices,
+        guests,
     } = config;
 
     let memory = ProcMemory::new();
 
-    host::survey(&memory, &policy, &registry).await?;
+    host::survey(&memory, &policy, &guests).await?;
 
     let (observer, exposition) = match metrics {
         Some(address) => {
@@ -80,11 +79,10 @@ pub async fn run(config: Config) -> Result<(), RunError> {
     };
 
     let (sizes, mut resized) = mpsc::channel(SIZE_DEPTH);
-    let mut targets = HashMap::with_capacity(devices.len());
-    let mut supervisors = Vec::with_capacity(devices.len());
+    let mut targets = HashMap::with_capacity(guests.len());
+    let mut supervisors = Vec::with_capacity(guests.len());
 
-    for (guest, qmp) in devices {
-        let spec = registry.spec(guest);
+    for (guest, Entry { spec, value: qmp }) in guests.iter() {
         let (target, targeted) = watch::channel(None);
 
         info!(
@@ -100,7 +98,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
             Supervisor::new(
                 guest,
                 spec.name.clone(),
-                qmp,
+                qmp.clone(),
                 clock,
                 sizes.clone(),
                 targeted,
@@ -140,7 +138,7 @@ pub async fn run(config: Config) -> Result<(), RunError> {
     let (peers, mut reports) = Peers::new();
 
     let mut exchange = Exchange {
-        broker: Broker::new(policy, registry),
+        broker: Broker::new(policy, guests),
         peers,
         targets,
         observer,

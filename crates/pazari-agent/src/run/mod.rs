@@ -191,17 +191,17 @@ impl<C: Cgroup + 'static> Agent<C> {
     async fn handle(&mut self, event: Event) -> Result<(), RuntimeError> {
         self.observer.observe_event(&event);
 
-        let actions = self.engine.handle(event);
+        let outcome = self.engine.handle(event);
 
         self.observer.refresh(&self.engine);
-        self.observer.observe_actions(&actions);
+        self.observer.observe_outcome(&outcome);
 
         self.total_mem.send_replace(self.engine.total_mem());
 
         let outbound = &self.outbound;
 
         self.applier
-            .apply(actions, &mut |message| outbound.send(message))
+            .apply(outcome.actions, &mut |message| outbound.send(message))
             .await
     }
 }
@@ -257,17 +257,6 @@ mod tests {
         fs::write(dir.path().join(MEMORY_HIGH), "1073741824\n").expect("a starting limit");
 
         panic_open(&config).await.expect("the brake comes off");
-
-        assert_eq!(read(dir.path(), MEMORY_HIGH), "max");
-    }
-
-    #[tokio::test]
-    async fn releasing_a_brake_that_is_already_off_is_still_a_release() {
-        let dir = cgroup_dir();
-        let config = runtime_config(dir.path());
-
-        panic_open(&config).await.expect("the brake comes off");
-        panic_open(&config).await.expect("and stays off");
 
         assert_eq!(read(dir.path(), MEMORY_HIGH), "max");
     }

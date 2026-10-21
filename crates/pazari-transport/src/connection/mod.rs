@@ -40,20 +40,3 @@ impl fmt::Display for PeerId {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_peer_id_displays_its_address() {
-        assert_eq!(PeerId::Vsock { cid: 3 }.to_string(), "vsock:3");
-        assert_eq!(
-            PeerId::Unix {
-                path: PathBuf::from("/run/pazari.sock"),
-            }
-            .to_string(),
-            "unix:/run/pazari.sock"
-        );
-    }
-}

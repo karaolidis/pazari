@@ -102,14 +102,14 @@ pub fn guest(name: &str, ceiling: u64) -> GuestSpec {
     }
 }
 
-pub fn registry() -> Registry {
+pub fn registry() -> Registry<()> {
     let mut registry = Registry::new();
 
     registry
-        .insert(vsock(ONE), guest("one", CEILING))
+        .insert(vsock(ONE), guest("one", CEILING), ())
         .expect("the first guest");
     registry
-        .insert(vsock(TWO), guest("two", CEILING))
+        .insert(vsock(TWO), guest("two", CEILING), ())
         .expect("the second guest");
 
     registry
@@ -190,7 +190,7 @@ pub fn ceilinged(ceiling: u64) -> Broker {
     let mut registry = Registry::new();
 
     registry
-        .insert(vsock(ONE), guest("one", ceiling))
+        .insert(vsock(ONE), guest("one", ceiling), ())
         .expect("the only guest");
 
     let mut broker = Broker::new(policy(), registry);

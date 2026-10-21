@@ -39,12 +39,8 @@ pub struct Growing {
 }
 
 impl Growing {
-    pub fn braked(step: &mut Step<'_>) -> Phase {
-        Self::braked_at(step, step.now)
-    }
-
     /// Answers a brake the workload hit at `at`.
-    pub fn braked_at(step: &mut Step<'_>, at: Timestamp) -> Phase {
+    pub fn braked(step: &mut Step<'_>, at: Timestamp) -> Phase {
         step.world.note_braked(at);
 
         Self::start(step, Attempt::First)
@@ -123,14 +119,10 @@ impl State for Growing {
         Phase::Growing(self)
     }
 
-    fn brake(self, _step: &mut Step<'_>) -> Phase {
-        self.stay()
-    }
-
-    fn resume(self, step: &mut Step<'_>) -> Phase {
+    fn on_connected(self, step: &mut Step<'_>) -> Phase {
         match self.stage {
-            Stage::Settling { .. } => self.stay(),
-            _ => Self::start(step, self.attempt),
+            Stage::Blocked => Self::start(step, self.attempt),
+            _ => self.stay(),
         }
     }
 
@@ -156,9 +148,7 @@ impl State for Growing {
                 Steady::settled(step)
             }
             _ => {
-                if moved != Moved::Unchanged {
-                    step.world.rebrake(step.fx);
-                }
+                step.rebrake(moved);
 
                 self.stay()
             }
@@ -170,10 +160,13 @@ impl State for Growing {
             return self.stay();
         }
 
-        let expires = Deadline::after(step.now, step.config().settle_grace.get());
-        let settling = Self::at(self.attempt, Stage::Settling { target, expires });
+        if step.limits().total_mem() >= target {
+            return Steady::settled(step);
+        }
 
-        settling.on_total_changed(step, Moved::Unchanged)
+        let expires = Deadline::after(step.now, step.config().settle_grace.get());
+
+        Self::at(self.attempt, Stage::Settling { target, expires })
     }
 
     fn on_deny(
@@ -330,10 +323,12 @@ mod tests {
         assert!(matches!(engine.phase(), Phase::Growing(_)));
 
         assert_eq!(
-            engine.handle(Event::TotalChanged {
-                now: at(102),
-                total_mem: 2560 * MIB,
-            }),
+            engine
+                .handle(Event::TotalChanged {
+                    now: at(102),
+                    total_mem: 2560 * MIB,
+                })
+                .actions,
             vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
         );
         assert!(matches!(engine.phase(), Phase::Steady(_)));
@@ -355,10 +350,12 @@ mod tests {
         );
 
         assert_eq!(
-            engine.handle(Event::TotalChanged {
-                now: at(102),
-                total_mem: 2304 * MIB,
-            }),
+            engine
+                .handle(Event::TotalChanged {
+                    now: at(102),
+                    total_mem: 2304 * MIB,
+                })
+                .actions,
             vec![Action::SetMax(2048 * MIB), Action::SetHigh(1792 * MIB)]
         );
         assert!(matches!(engine.phase(), Phase::Steady(_)));
@@ -381,10 +378,12 @@ mod tests {
         );
 
         assert_eq!(
-            engine.handle(Event::TotalChanged {
-                now: at(102),
-                total_mem: 2304 * MIB,
-            }),
+            engine
+                .handle(Event::TotalChanged {
+                    now: at(102),
+                    total_mem: 2304 * MIB,
+                })
+                .actions,
             vec![Action::SetMax(2048 * MIB), Action::SetHigh(1792 * MIB)]
         );
         assert!(matches!(engine.phase(), Phase::Growing(_)));

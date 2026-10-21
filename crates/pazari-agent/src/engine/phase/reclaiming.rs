@@ -7,7 +7,7 @@ use tracing::debug;
 use crate::engine::{
     phase::{Phase, State, Step, growing::Growing, steady::Steady},
     refusal::Refusal,
-    tally::Transition,
+    transition::Transition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,9 +43,9 @@ impl Reclaiming {
     }
 
     fn fell_short(step: &mut Step<'_>, braked: Timestamp) -> Phase {
-        step.world.record(Transition::ThrottleReclaimShortfall);
+        step.fx.record(Transition::ThrottleReclaimShortfall);
 
-        Growing::braked_at(step, braked)
+        Growing::braked(step, braked)
     }
 
     fn run(step: &mut Step<'_>, braked: Timestamp, amount: NonZeroU64) -> Phase {
@@ -68,14 +68,6 @@ impl Reclaiming {
 impl State for Reclaiming {
     fn stay(self) -> Phase {
         Phase::Reclaiming(self)
-    }
-
-    fn brake(self, _step: &mut Step<'_>) -> Phase {
-        self.stay()
-    }
-
-    fn resume(self, _step: &mut Step<'_>) -> Phase {
-        self.stay()
     }
 
     fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, _desired: u64) -> Phase {
@@ -121,7 +113,9 @@ mod tests {
 
     use pazari_proto::{GuestMessage, HostMessage};
 
-    use crate::engine::{Action, EngineConfig, Event, Phase, ThrottleMode, testing::*};
+    use crate::engine::{
+        Action, EngineConfig, Event, Outcome, Phase, ThrottleMode, Transition, testing::*,
+    };
 
     const AMOUNT: u64 = 256 * MIB;
 
@@ -156,15 +150,28 @@ mod tests {
     #[test]
     fn a_reclaim_that_falls_short_asks_the_host() {
         let mut engine = started_with(reclaiming(), CEILING);
-        wake(&mut engine, at(100), 1);
 
         assert_eq!(
-            reclaimed(&mut engine, at(101), 64 * MIB),
-            vec![request(1, BOOT, 2560 * MIB)]
+            engine
+                .handle(Event::ThrottleWake {
+                    now: at(100),
+                    high_events: 1,
+                    max_events: 0,
+                })
+                .transitions,
+            vec![Transition::ThrottleReclaim]
+        );
+        assert_eq!(
+            engine.handle(Event::ReclaimFinished {
+                now: at(101),
+                reclaimed: 64 * MIB,
+            }),
+            Outcome {
+                actions: vec![request(1, BOOT, 2560 * MIB)],
+                transitions: vec![Transition::ThrottleReclaimShortfall],
+            }
         );
         assert!(matches!(engine.phase(), Phase::Growing(_)));
-        assert_eq!(engine.tally().throttle_reclaims, 1);
-        assert_eq!(engine.tally().throttle_reclaim_shortfalls, 1);
     }
 
     #[test]
@@ -243,7 +250,7 @@ mod tests {
         releasing(&mut engine);
 
         assert_eq!(
-            engine.handle(Event::Disconnected { now: at(144) }),
+            engine.handle(Event::Disconnected { now: at(144) }).actions,
             vec![Action::CancelReclaim]
         );
         assert!(matches!(engine.phase(), Phase::Steady(_)));

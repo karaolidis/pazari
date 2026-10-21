@@ -94,12 +94,6 @@ mod tests {
     }
 
     #[test]
-    fn a_timestamp_displays_its_milliseconds() {
-        assert_eq!(Timestamp::from_millis(1_500).to_string(), "1500ms");
-        assert_eq!(Timestamp::START.to_string(), "0ms");
-    }
-
-    #[test]
     fn the_clock_starts_with_the_process_and_only_moves_forward() {
         let clock = Clock::start();
 

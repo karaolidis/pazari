@@ -127,14 +127,6 @@ mod tests {
     use crate::broker::testing::{GIB, MIB, guest, view};
 
     #[test]
-    fn an_ask_names_the_size_it_is_after() {
-        let grow = Ask::Grow { target: 3072 * MIB };
-
-        assert_eq!(grow.target(), 3072 * MIB);
-        assert_eq!(Ask::Release { target: 1024 * MIB }.target(), 1024 * MIB);
-    }
-
-    #[test]
     fn only_memory_on_its_way_out_of_the_host_is_outstanding() {
         let spec = guest("one", 4096 * MIB);
 

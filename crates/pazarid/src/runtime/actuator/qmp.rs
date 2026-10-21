@@ -143,18 +143,17 @@ impl QmpActuator {
         (self.last.swap(reading.size, Ordering::Relaxed) != reading.size).then_some(reading)
     }
 
-    async fn awaited(&self, held: &Arc<Held>) -> Result<Reading, RuntimeError> {
+    async fn awaited(&self, mut held: &Held) -> Result<Reading, RuntimeError> {
         loop {
-            let mut client = Arc::clone(held);
-            let mut sizes = client.watch();
+            let mut sizes = held.watch();
 
-            let sampled = read(&mut client, &self.qom, SIZE, self.deadline).await?;
+            let sampled = read(&mut held, &self.qom, SIZE, self.deadline).await?;
 
             if let Some(reading) = self.report(Reading::plugged(self.boot, sampled)) {
                 return Ok(reading);
             }
 
-            let raised = client.changed(&mut sizes).await?;
+            let raised = held.changed(&mut sizes).await?;
 
             if let Some(reading) = self.report(Reading::plugged(self.boot, raised)) {
                 return Ok(reading);

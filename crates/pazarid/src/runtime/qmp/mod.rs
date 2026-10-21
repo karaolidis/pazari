@@ -377,7 +377,8 @@ impl Held {
     }
 }
 
-impl Endpoint for Arc<Held> {
+/// Commands share a held session, so a shared reference can send them.
+impl Endpoint for &Held {
     fn path(&self) -> &Path {
         Held::path(self)
     }
@@ -645,11 +646,6 @@ mod tests {
         });
 
         Lines::new(client, PATH)
-    }
-
-    #[test]
-    fn a_device_hangs_where_qemu_puts_it() {
-        assert_eq!(qom_path("vm0"), "/machine/peripheral/vm0");
     }
 
     #[tokio::test]

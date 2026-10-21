@@ -1,4 +1,4 @@
-use std::{collections::HashMap, num::NonZeroU64};
+use std::num::NonZeroU64;
 
 use pazari_transport::PeerId;
 use pazari_types::{Deadline, Timestamp};
@@ -6,7 +6,7 @@ use pazari_types::{Deadline, Timestamp};
 use crate::broker::{
     arbiter::GuestView,
     phase::Negotiated,
-    registry::{GuestId, GuestSpec, Registry},
+    registry::{Entry, GuestId, GuestSpec, Registry},
     session::Session,
 };
 
@@ -203,63 +203,23 @@ impl Reconcile {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Entry {
-    pub spec: GuestSpec,
-    pub state: Guest,
-}
+pub type Guests = Registry<Guest>;
 
-impl Entry {
+impl Entry<Guest> {
     #[must_use]
     pub fn view(&self, id: GuestId) -> Option<GuestView<'_>> {
-        self.state.view(id, &self.spec)
+        self.value.view(id, &self.spec)
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Guests {
-    entries: Vec<Entry>,
-    peers: HashMap<PeerId, GuestId>,
-}
-
-impl Guests {
-    #[must_use]
-    pub fn new(registry: Registry) -> Self {
-        let (specs, peers) = registry.into_parts();
-
-        Self {
-            entries: specs
-                .into_iter()
-                .map(|spec| Entry {
-                    spec,
-                    state: Guest::default(),
-                })
-                .collect(),
-            peers,
-        }
-    }
-
-    #[must_use]
-    pub fn lookup(&self, peer: &PeerId) -> Option<GuestId> {
-        self.peers.get(peer).copied()
-    }
-
-    #[must_use]
-    pub fn get(&self, id: GuestId) -> &Entry {
-        &self.entries[id.index()]
-    }
-
-    pub fn get_mut(&mut self, id: GuestId) -> &mut Entry {
-        &mut self.entries[id.index()]
-    }
-
+impl Registry<Guest> {
     #[must_use]
     pub fn state(&self, id: GuestId) -> &Guest {
-        &self.get(id).state
+        &self.get(id).value
     }
 
     pub fn state_mut(&mut self, id: GuestId) -> &mut Guest {
-        &mut self.get_mut(id).state
+        &mut self.get_mut(id).value
     }
 
     #[must_use]
@@ -278,29 +238,12 @@ impl Guests {
 
     #[must_use]
     pub fn ceiling(&self, id: GuestId) -> NonZeroU64 {
-        self.get(id).spec.ceiling
+        self.spec(id).ceiling
     }
 
     #[must_use]
     pub fn name(&self, id: GuestId) -> &str {
-        &self.get(id).spec.name
-    }
-
-    #[must_use]
-    pub const fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (GuestId, &Entry)> {
-        self.entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (GuestId::from_index(index), entry))
+        &self.spec(id).name
     }
 
     /// Every guest but `asking` that has reported a size.
@@ -346,16 +289,5 @@ mod tests {
         assert!(!shrinking.converged(2049 * MIB));
         assert!(shrinking.converged(2048 * MIB));
         assert!(shrinking.converged(1024 * MIB));
-    }
-
-    #[test]
-    fn a_guest_with_nothing_in_flight_has_asked_for_nothing() {
-        let mut guest = Guest::default();
-
-        assert_eq!(guest.requested(), None);
-
-        guest.reconcile = Some(reconcile(2048 * MIB, 3072 * MIB));
-
-        assert_eq!(guest.requested(), Some(3072 * MIB));
     }
 }

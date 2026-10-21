@@ -77,9 +77,10 @@ fn main() -> ExitCode {
 }
 
 fn stress(cli: &Cli, out: &mut Reporter<StdoutLock<'static>>) -> Result<()> {
-    let plan = Plan::parse(&cli.phases, cli.cache_dir.clone())?;
+    let plan = Plan::parse(&cli.phases)?;
 
     let options = Options {
+        cache_dir: plan.cache_dir(cli.cache_dir.clone())?,
         arena: plan.arena(cli.arena.map(|arena| arena.as_u64()))?,
         interval: Interval::try_new(cli.interval)?,
         commit: if cli.no_reserve {

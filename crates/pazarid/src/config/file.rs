@@ -56,27 +56,40 @@ const VMADDR_CID_HYPERVISOR: u32 = 0;
 /// The port vsock reads as any port.
 const VMADDR_PORT_ANY: u32 = u32::MAX;
 
+#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
 #[serde(deny_unknown_fields)]
 pub struct File {
-    #[serde(default)]
+    #[serde_inline_default(TickSection {
+        interval: TICK_INTERVAL,
+    })]
     tick: TickSection,
 
-    #[serde(default)]
+    #[serde_inline_default(StatusSection {
+        interval: STATUS_INTERVAL,
+        stale_after: STALE_AFTER,
+    })]
     status: StatusSection,
 
     grant: GrantSection,
 
-    #[serde(default)]
+    #[serde_inline_default(ActuationSection {
+        deadline: ACTUATION_DEADLINE,
+        revert_shrinks: REVERT_SHRINKS,
+    })]
     actuation: ActuationSection,
 
-    #[serde(default)]
+    #[serde_inline_default(ReclaimSection {
+        deadline: RECLAIM_DEADLINE,
+        revocation: None,
+    })]
     reclaim: ReclaimSection,
 
-    #[serde(default)]
     metrics: Option<MetricsSection>,
 
-    #[serde(default)]
+    #[serde_inline_default(VsockSection {
+        port: VsockPort(DEFAULT_VSOCK_PORT),
+    })]
     vsock: VsockSection,
 
     #[serde(default)]
@@ -119,8 +132,7 @@ impl File {
             return Err(ConfigError::Guestless);
         }
 
-        let mut registry = Registry::new();
-        let mut devices = Vec::with_capacity(self.guests.len());
+        let mut guests = Registry::new();
         let mut vsock = None;
         let mut sockets = Vec::new();
 
@@ -152,7 +164,7 @@ impl File {
             let ceiling = NonZeroU64::new(ceiling.as_u64()).bytes(format!("{prefix}.ceiling"))?;
             let qmp = qmp.resolve(&prefix)?;
 
-            devices.push((registry.insert(peer, GuestSpec { name, ceiling })?, qmp));
+            guests.insert(peer, GuestSpec { name, ceiling }, qmp)?;
         }
 
         Ok(Config {
@@ -160,49 +172,36 @@ impl File {
             listeners: vsock.into_iter().chain(sockets).collect(),
             metrics: self.metrics.map(|metrics| metrics.listen),
             policy,
-            registry,
-            devices,
+            guests,
         })
     }
 }
 
+#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct TickSection {
     /// How often the daemon checks on the host and its guests.
+    #[serde_inline_default(TICK_INTERVAL)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "1s")]
     interval: Duration,
 }
 
-impl Default for TickSection {
-    fn default() -> Self {
-        Self {
-            interval: TICK_INTERVAL,
-        }
-    }
-}
-
+#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct StatusSection {
     /// How often a guest must send `status`.
+    #[serde_inline_default(STATUS_INTERVAL)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "1s")]
     interval: Duration,
 
     /// Missed `status` intervals before a guest is marked stale.
+    #[serde_inline_default(STALE_AFTER)]
     #[doku(example = "3")]
     stale_after: u32,
-}
-
-impl Default for StatusSection {
-    fn default() -> Self {
-        Self {
-            interval: STATUS_INTERVAL,
-            stale_after: STALE_AFTER,
-        }
-    }
 }
 
 #[serde_inline_default]
@@ -226,49 +225,36 @@ pub struct GrantSection {
     swap: bool,
 }
 
+#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ActuationSection {
     /// How long a resize may take before the daemon stops waiting for it.
+    #[serde_inline_default(ACTUATION_DEADLINE)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "30s")]
     deadline: Duration,
 
     /// Whether a shrink that did not finish is taken back to the size the
     /// guest still has.
+    #[serde_inline_default(REVERT_SHRINKS)]
     #[doku(example = "true")]
     revert_shrinks: bool,
 }
 
-impl Default for ActuationSection {
-    fn default() -> Self {
-        Self {
-            deadline: ACTUATION_DEADLINE,
-            revert_shrinks: REVERT_SHRINKS,
-        }
-    }
-}
-
+#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ReclaimSection {
     /// How long a guest has to answer a `reclaim_request` and release what it
     /// promised.
+    #[serde_inline_default(RECLAIM_DEADLINE)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "30s")]
     deadline: Duration,
 
     /// How the host takes memory back when it comes under pressure itself.
     revocation: Option<RevocationSection>,
-}
-
-impl Default for ReclaimSection {
-    fn default() -> Self {
-        Self {
-            deadline: RECLAIM_DEADLINE,
-            revocation: None,
-        }
-    }
 }
 
 #[serde_inline_default]
@@ -303,20 +289,14 @@ pub struct MetricsSection {
     listen: SocketAddr,
 }
 
+#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct VsockSection {
     /// The port vsock guests dial.
+    #[serde_inline_default(VsockPort(DEFAULT_VSOCK_PORT))]
     #[doku(as = "u32", example = "4650")]
     port: VsockPort,
-}
-
-impl Default for VsockSection {
-    fn default() -> Self {
-        Self {
-            port: VsockPort(DEFAULT_VSOCK_PORT),
-        }
-    }
 }
 
 /// A port the daemon can listen on over vsock.

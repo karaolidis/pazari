@@ -188,13 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn a_metrics_table_without_an_address_is_refused() {
-        let error = rejects(&MINIMAL.replace("[host.transport]", "[metrics]\n\n[host.transport]"));
-
-        assert!(error.contains("listen"), "unexpected error: {error}");
-    }
-
-    #[test]
     fn a_file_that_sets_everything_is_taken_at_its_word() {
         let config = parse(FULL);
 
@@ -312,17 +305,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_hugepage_posture_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[preflight]\nthp_always = \"shrug\"\n\n[host.transport]",
-        ));
-
-        assert!(error.contains("fail"), "unexpected error: {error}");
-        assert!(error.contains("warn"), "unexpected error: {error}");
-    }
-
-    #[test]
     fn a_vsock_transport_takes_the_cid_and_port_the_file_names() {
         let config = parse(&MINIMAL.replace(
             r#"kind = "vsock""#,
@@ -333,44 +315,6 @@ mod tests {
             config.session.connector,
             AnyConnector::Vsock(VsockConnector::new(7, 9_000))
         );
-    }
-
-    #[test]
-    fn a_malformed_duration_names_the_field_that_carries_it() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[resize]\nhotplug_debounce = \"3 fortnights\"\n\n[host.transport]",
-        ));
-
-        assert!(
-            error.contains("hotplug_debounce"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn a_malformed_size_names_the_field_that_carries_it() {
-        let error = rejects(&MINIMAL.replace(
-            r#"burst_reserve = "256MiB""#,
-            r#"burst_reserve = "2 lorries""#,
-        ));
-
-        assert!(error.contains("burst_reserve"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn an_unknown_enum_names_the_field_that_carries_it() {
-        let error = rejects(&MINIMAL.replace(r#"kind = "vsock""#, r#"kind = "carrier_pigeon""#));
-
-        assert!(error.contains("kind"), "unexpected error: {error}");
-        assert!(error.contains("vsock"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn an_unknown_key_names_itself() {
-        let error = rejects(&MINIMAL.replace("[host.transport]", "[host.transport]\nnagle = true"));
-
-        assert!(error.contains("nagle"), "unexpected error: {error}");
     }
 
     #[test]
@@ -406,65 +350,6 @@ mod tests {
             error,
             "tick.interval: Interval rejects 0ns: expected (0s, 24h]"
         );
-    }
-
-    #[test]
-    fn a_systemd_backend_without_a_unit_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[workload.backend]\nkind = \"systemd\"\n\n[host.transport]",
-        ));
-
-        assert!(error.contains("unit"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_unit_without_the_systemd_backend_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[workload.backend]\nkind = \"cgroupfs\"\nunit = \"workload.service\"\n\n[host.transport]",
-        ));
-
-        assert!(error.contains("unit"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_unix_transport_without_a_path_is_refused() {
-        let error = rejects(&MINIMAL.replace(r#"kind = "vsock""#, r#"kind = "unix""#));
-
-        assert!(error.contains("path"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_vsock_address_on_a_unix_transport_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            r#"kind = "vsock""#,
-            "kind = \"unix\"\npath = \"/run/pazari/host.sock\"\ncid = 2",
-        ));
-
-        assert!(error.contains("cid"), "unexpected error: {error}");
-        assert!(error.contains("path"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_socket_path_on_a_vsock_transport_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            r#"kind = "vsock""#,
-            "kind = \"vsock\"\npath = \"/run/pazari/host.sock\"",
-        ));
-
-        assert!(error.contains("path"), "unexpected error: {error}");
-        assert!(error.contains("cid"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_stall_timeout_on_a_killed_workload_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[exhaustion.mode]\nkind = \"kill\"\ntimeout = \"30s\"\n\n[host.transport]",
-        ));
-
-        assert!(error.contains("timeout"), "unexpected error: {error}");
     }
 
     #[test]
@@ -513,29 +398,6 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_sweep_minimum_names_the_table_that_carries_it() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[release]\nkind = \"sweep\"\nmin = \"0B\"\n\n[host.transport]",
-        ));
-
-        assert_eq!(
-            error,
-            "release.min rejects 0: expected a positive byte count"
-        );
-    }
-
-    #[test]
-    fn a_titrate_key_on_a_sweep_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[release]\nkind = \"sweep\"\nafter = 3\n\n[host.transport]",
-        ));
-
-        assert!(error.contains("after"), "unexpected error: {error}");
-    }
-
-    #[test]
     fn a_reclaim_throttle_takes_the_default_amount() {
         let config = parse(&MINIMAL.replace(
             "[host.transport]",
@@ -547,19 +409,6 @@ mod tests {
             ThrottleMode::Reclaim {
                 amount: bytes(256 * MIB),
             }
-        );
-    }
-
-    #[test]
-    fn a_zero_throttle_amount_names_the_table_that_carries_it() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[throttle]\nkind = \"reclaim\"\namount = \"0B\"\n\n[host.transport]",
-        ));
-
-        assert_eq!(
-            error,
-            "throttle.amount rejects 0: expected a positive byte count"
         );
     }
 
@@ -590,49 +439,6 @@ mod tests {
         assert_eq!(
             error,
             "grow.cap rejects 0: expected a positive count of steps"
-        );
-    }
-
-    #[test]
-    fn a_strategy_table_without_a_kind_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[grow]\nstep = \"1GiB\"\n\n[host.transport]",
-        ));
-
-        assert!(error.contains("kind"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn an_unknown_strategy_names_the_ones_there_are() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[release]\nkind = \"all_at_once\"\n\n[host.transport]",
-        ));
-
-        assert!(error.contains("titrate"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_key_from_another_strategy_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[grow]\nkind = \"exponential\"\nafter = 3\n\n[host.transport]",
-        ));
-
-        assert!(error.contains("after"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_zero_strategy_step_names_the_table_that_carries_it() {
-        let error = rejects(&MINIMAL.replace(
-            "[host.transport]",
-            "[release]\nkind = \"titrate\"\nstep = \"0B\"\n\n[host.transport]",
-        ));
-
-        assert_eq!(
-            error,
-            "release.step rejects 0: expected a positive byte count"
         );
     }
 

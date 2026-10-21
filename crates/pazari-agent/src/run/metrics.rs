@@ -3,7 +3,7 @@ use pazari_metrics::{
 };
 use pazari_proto::{GuestMessage, HostMessage};
 
-use crate::engine::{Action, Engine, Event, PhaseKind, Snapshot, Tally};
+use crate::engine::{Action, Engine, Event, Outcome, PhaseKind, Snapshot, Transition};
 
 const PREFIX: &str = "pazari_agent";
 
@@ -58,12 +58,20 @@ impl Observer {
         }
     }
 
-    pub fn observe_actions(&self, actions: &[Action]) {
+    pub fn observe_outcome(&self, outcome: &Outcome) {
         let Some(series) = &self.0 else {
             return;
         };
 
-        for action in actions {
+        for transition in &outcome.transitions {
+            match transition {
+                Transition::Exhaustion => series.exhaustions.inc(),
+                Transition::ThrottleReclaim => series.throttle_reclaims.inc(),
+                Transition::ThrottleReclaimShortfall => series.throttle_reclaim_shortfalls.inc(),
+            };
+        }
+
+        for action in &outcome.actions {
             match action {
                 Action::Send(GuestMessage::GrantRequest { .. }) => {
                     series.grant_requests.inc();
@@ -80,8 +88,8 @@ impl Observer {
         }
     }
 
-    pub fn refresh(&mut self, engine: &Engine) {
-        let Some(series) = &mut self.0 else {
+    pub fn refresh(&self, engine: &Engine) {
+        let Some(series) = &self.0 else {
             return;
         };
 
@@ -95,8 +103,6 @@ impl Observer {
                 })
                 .set(i64::from(candidate == kind));
         }
-
-        series.publish(engine.tally());
 
         series.limits.high.set_saturating(engine.high());
         series.limits.max.set_saturating(engine.max());
@@ -135,23 +141,9 @@ struct Series {
 
     connections: Counter,
     disconnections: Counter,
-
-    published: Tally,
 }
 
 impl Series {
-    /// Brings the counters up to the engine's tally.
-    fn publish(&mut self, tally: Tally) {
-        self.exhaustions
-            .inc_by(tally.exhaustions - self.published.exhaustions);
-        self.throttle_reclaims
-            .inc_by(tally.throttle_reclaims - self.published.throttle_reclaims);
-        self.throttle_reclaim_shortfalls
-            .inc_by(tally.throttle_reclaim_shortfalls - self.published.throttle_reclaim_shortfalls);
-
-        self.published = tally;
-    }
-
     fn register(&self, registry: &mut Registry) {
         self.limits.register(registry);
         self.reading.register(registry);
@@ -360,7 +352,7 @@ mod tests {
 
     #[test]
     fn what_the_engine_holds_the_workload_to_is_published() {
-        let (mut observer, registry) = Observer::new();
+        let (observer, registry) = Observer::new();
         let mut engine = started();
 
         observer.refresh(&engine);
@@ -385,7 +377,7 @@ mod tests {
 
     #[test]
     fn a_ceiling_the_host_has_not_named_is_not_published() {
-        let (mut observer, registry) = Observer::new();
+        let (observer, registry) = Observer::new();
         let (engine, _) = Engine::try_new(config(), boot()).expect("a workable boot");
 
         observer.refresh(&engine);
@@ -475,18 +467,24 @@ mod tests {
     fn what_the_agent_asks_for_is_counted_as_it_goes_out() {
         let (observer, registry) = Observer::new();
 
-        observer.observe_actions(&[
-            Action::SetHigh(HIGH0),
-            request(1, BOOT, 2560 * MIB),
-            Action::StartReclaim {
-                bytes: bytes(256 * MIB),
-            },
-        ]);
-        observer.observe_actions(&[Action::Send(GuestMessage::OfferRelease {
-            id: RequestId(2),
-            current: BOOT,
-            releasable: BURST,
-        })]);
+        observer.observe_outcome(&Outcome {
+            actions: vec![
+                Action::SetHigh(HIGH0),
+                request(1, BOOT, 2560 * MIB),
+                Action::StartReclaim {
+                    bytes: bytes(256 * MIB),
+                },
+            ],
+            transitions: vec![],
+        });
+        observer.observe_outcome(&Outcome {
+            actions: vec![Action::Send(GuestMessage::OfferRelease {
+                id: RequestId(2),
+                current: BOOT,
+                releasable: BURST,
+            })],
+            transitions: vec![],
+        });
 
         carries(&registry, "pazari_agent_grant_requests_total 1");
         carries(&registry, "pazari_agent_offers_total 1");
@@ -498,64 +496,20 @@ mod tests {
     }
 
     #[test]
-    fn falling_into_exhaustion_is_counted_once_per_fall() {
-        let (mut observer, registry) = Observer::new();
-        let mut engine = started_with(config(), 2560 * MIB);
+    fn the_transitions_the_engine_makes_are_counted_as_they_come() {
+        let (observer, registry) = Observer::new();
 
-        observer.refresh(&engine);
-        wake(&mut engine, at(100), 1);
-        observer.refresh(&engine);
+        observer.observe_outcome(&Outcome {
+            actions: vec![],
+            transitions: vec![Transition::ThrottleReclaim, Transition::Exhaustion],
+        });
+        observer.observe_outcome(&Outcome {
+            actions: vec![],
+            transitions: vec![Transition::ThrottleReclaimShortfall, Transition::Exhaustion],
+        });
 
-        carries(&registry, "pazari_agent_exhaustions_total 0");
-
-        host(
-            &mut engine,
-            at(101),
-            HostMessage::Deny {
-                id: RequestId(1),
-                reason: DenyReason::Ceiling,
-                retry_after: None,
-            },
-        );
-        observer.refresh(&engine);
-
-        carries(&registry, "pazari_agent_mode{mode=\"exhausted\"} 1");
-        carries(&registry, "pazari_agent_mode{mode=\"awaiting_grant\"} 0");
-        carries(&registry, "pazari_agent_exhaustions_total 1");
-
-        observer.refresh(&engine);
-
-        carries(&registry, "pazari_agent_exhaustions_total 1");
-    }
-
-    #[test]
-    fn a_throttle_reclaim_and_its_shortfall_are_counted() {
-        let (mut observer, registry) = Observer::new();
-        let mut engine = started_with(
-            EngineConfig {
-                throttle: ThrottleMode::Reclaim {
-                    amount: bytes(256 * MIB),
-                },
-                ..config()
-            },
-            CEILING,
-        );
-
-        observer.refresh(&engine);
-        wake(&mut engine, at(100), 1);
-        observer.refresh(&engine);
-
-        carries(&registry, "pazari_agent_mode{mode=\"reclaiming\"} 1");
+        carries(&registry, "pazari_agent_exhaustions_total 2");
         carries(&registry, "pazari_agent_throttle_reclaims_total 1");
-        carries(
-            &registry,
-            "pazari_agent_throttle_reclaim_shortfalls_total 0",
-        );
-
-        reclaimed(&mut engine, at(101), 0);
-        observer.refresh(&engine);
-
-        carries(&registry, "pazari_agent_mode{mode=\"awaiting_grant\"} 1");
         carries(
             &registry,
             "pazari_agent_throttle_reclaim_shortfalls_total 1",
@@ -563,29 +517,8 @@ mod tests {
     }
 
     #[test]
-    fn a_fall_between_refreshes_is_still_counted() {
-        let (mut observer, registry) = Observer::new();
-        let mut engine = started_with(config(), BOOT);
-
-        wake(&mut engine, at(100), 1);
-        observer.refresh(&engine);
-
-        carries(&registry, "pazari_agent_exhaustions_total 1");
-
-        engine.handle(Event::TotalChanged {
-            now: at(101),
-            total_mem: 2560 * MIB,
-        });
-        wake(&mut engine, at(102), 2);
-        observer.refresh(&engine);
-
-        carries(&registry, "pazari_agent_mode{mode=\"exhausted\"} 1");
-        carries(&registry, "pazari_agent_exhaustions_total 2");
-    }
-
-    #[test]
-    fn a_throttle_reclaim_between_refreshes_is_still_counted() {
-        let (mut observer, registry) = Observer::new();
+    fn the_mode_the_engine_is_in_is_published() {
+        let (observer, registry) = Observer::new();
         let mut engine = started_with(
             EngineConfig {
                 throttle: ThrottleMode::Reclaim {
@@ -599,15 +532,13 @@ mod tests {
         wake(&mut engine, at(100), 1);
         observer.refresh(&engine);
 
-        reclaimed(&mut engine, at(101), 256 * MIB);
-        wake(&mut engine, at(102), 2);
+        carries(&registry, "pazari_agent_mode{mode=\"reclaiming\"} 1");
+        carries(&registry, "pazari_agent_mode{mode=\"growing\"} 0");
+
+        reclaimed(&mut engine, at(101), 0);
         observer.refresh(&engine);
 
-        carries(&registry, "pazari_agent_mode{mode=\"reclaiming\"} 1");
-        carries(&registry, "pazari_agent_throttle_reclaims_total 2");
-        carries(
-            &registry,
-            "pazari_agent_throttle_reclaim_shortfalls_total 0",
-        );
+        carries(&registry, "pazari_agent_mode{mode=\"reclaiming\"} 0");
+        carries(&registry, "pazari_agent_mode{mode=\"growing\"} 1");
     }
 }

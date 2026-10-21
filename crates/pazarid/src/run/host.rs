@@ -23,12 +23,12 @@ pub struct Demand {
 
 impl Demand {
     #[must_use]
-    pub fn of(policy: &Policy, registry: &Registry, info: &MemInfo) -> Self {
+    pub fn of<T>(policy: &Policy, registry: &Registry<T>, info: &MemInfo) -> Self {
         Self {
             asked: registry
                 .iter()
-                .fold(policy.grant_floor, |total, (_, spec)| {
-                    total.saturating_add(spec.ceiling.get())
+                .fold(policy.grant_floor, |total, (_, entry)| {
+                    total.saturating_add(entry.spec.ceiling.get())
                 }),
             have: info.total.saturating_add(info.swap_total),
         }
@@ -40,10 +40,10 @@ impl Demand {
     }
 }
 
-pub async fn survey<M: HostMemory>(
+pub async fn survey<M: HostMemory, T: Sync>(
     memory: &M,
     policy: &Policy,
-    registry: &Registry,
+    registry: &Registry<T>,
 ) -> Result<(), RunError> {
     let demand = Demand::of(policy, registry, &memory.meminfo().await?);
     let Demand { asked, have } = demand;
@@ -135,7 +135,7 @@ mod tests {
         MockMemory::new(meminfo(total, total, swap_total))
     }
 
-    fn guests(ceilings: &[u64]) -> Registry {
+    fn guests(ceilings: &[u64]) -> Registry<()> {
         let mut registry = Registry::new();
 
         for (index, ceiling) in ceilings.iter().enumerate() {
@@ -148,6 +148,7 @@ mod tests {
                         name: format!("guest{index}"),
                         ceiling: bytes(*ceiling),
                     },
+                    (),
                 )
                 .expect("a guest of its own");
         }
@@ -155,7 +156,7 @@ mod tests {
         registry
     }
 
-    fn demand(policy: &Policy, registry: &Registry, total: u64, swap_total: u64) -> Demand {
+    fn demand(policy: &Policy, registry: &Registry<()>, total: u64, swap_total: u64) -> Demand {
         Demand::of(policy, registry, &meminfo(total, total, swap_total))
     }
 

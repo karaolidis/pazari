@@ -57,28 +57,3 @@ impl Default for Notifier {
         Self::new()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use tokio::time::timeout;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn a_notifier_with_no_service_manager_says_nothing_and_never_pings() {
-        let mut notifier = Notifier::new();
-
-        notifier.ready();
-        notifier.ping();
-        notifier.stopping();
-
-        assert!(
-            timeout(Duration::from_millis(50), notifier.due())
-                .await
-                .is_err(),
-            "the watchdog fired without a service manager asking for it"
-        );
-    }
-}

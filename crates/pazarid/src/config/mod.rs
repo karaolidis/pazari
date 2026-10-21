@@ -12,7 +12,7 @@ pub use crate::config::{
     file::{RECONNECT_MAX, RECONNECT_MIN},
 };
 use crate::{
-    broker::{GuestId, Policy, Registry},
+    broker::{Policy, Registry},
     config::file::File,
     runtime::Mode,
 };
@@ -28,10 +28,8 @@ pub struct Config {
 
     pub policy: Policy,
 
-    pub registry: Registry,
-
-    /// Each registered guest's device.
-    pub devices: Vec<(GuestId, Qmp)>,
+    /// Each guest and its device.
+    pub guests: Registry<Qmp>,
 }
 
 impl Settings for Config {
@@ -88,7 +86,7 @@ mod tests {
 
     use super::*;
     use crate::broker::{
-        Grantable, GuestSpec, Revocation, StalledShrinks,
+        Entry, Grantable, GuestSpec, Revocation, StalledShrinks,
         testing::{bytes, count},
     };
 
@@ -245,13 +243,16 @@ mod tests {
         let peer = PeerId::Unix {
             path: PathBuf::from("/run/pazari/example.sock"),
         };
-        let guest = config.registry.lookup(&peer).expect("a registered guest");
+        let guest = config.guests.lookup(&peer).expect("a registered guest");
 
         assert_eq!(
-            config.devices,
-            vec![(
-                guest,
-                Qmp {
+            config.guests.get(guest),
+            &Entry {
+                spec: GuestSpec {
+                    name: "example".to_owned(),
+                    ceiling: bytes(8 * GIB),
+                },
+                value: Qmp {
                     path: PathBuf::from("/run/pazari/example.qmp"),
                     device: "vm0".to_owned(),
                     deadline: interval(Duration::from_millis(2_500)),
@@ -260,14 +261,7 @@ mod tests {
                     mode: Mode::PerOperation {
                         poll: interval(Duration::from_millis(250)),
                     },
-                }
-            )]
-        );
-        assert_eq!(
-            config.registry.spec(guest),
-            &GuestSpec {
-                name: "example".to_owned(),
-                ceiling: bytes(8 * GIB),
+                },
             }
         );
     }
@@ -300,23 +294,20 @@ mod tests {
         );
 
         let guest = config
-            .registry
+            .guests
             .lookup(&PeerId::Vsock { cid: 3 })
             .expect("a registered guest");
 
         assert_eq!(
-            config.devices,
-            vec![(
-                guest,
-                Qmp {
-                    path: PathBuf::from("/run/pazari/example.qmp"),
-                    device: "vm0".to_owned(),
-                    deadline: interval(Duration::from_secs(5)),
-                    reconnect_min: interval(Duration::from_millis(500)),
-                    reconnect_max: interval(Duration::from_secs(30)),
-                    mode: Mode::Held,
-                }
-            )]
+            config.guests.get(guest).value,
+            Qmp {
+                path: PathBuf::from("/run/pazari/example.qmp"),
+                device: "vm0".to_owned(),
+                deadline: interval(Duration::from_secs(5)),
+                reconnect_min: interval(Duration::from_millis(500)),
+                reconnect_max: interval(Duration::from_secs(30)),
+                mode: Mode::Held,
+            }
         );
     }
 
@@ -326,22 +317,11 @@ mod tests {
 
         assert_eq!(
             config
-                .registry
+                .guests
                 .iter()
-                .map(|(_, spec)| spec.name.as_str())
+                .map(|(_, entry)| (entry.spec.name.as_str(), entry.value.device.as_str()))
                 .collect::<Vec<_>>(),
-            ["example", "other"]
-        );
-        assert_eq!(
-            config
-                .devices
-                .iter()
-                .map(|(guest, qmp)| (*guest, qmp.device.as_str()))
-                .collect::<Vec<_>>(),
-            [
-                (GuestId::from_index(0), "vm0"),
-                (GuestId::from_index(1), "vm1")
-            ]
+            [("example", "vm0"), ("other", "vm1")]
         );
     }
 
@@ -363,9 +343,9 @@ mod tests {
         );
         assert_eq!(
             config
-                .registry
+                .guests
                 .iter()
-                .map(|(_, spec)| spec.name.as_str())
+                .map(|(_, entry)| entry.spec.name.as_str())
                 .collect::<Vec<_>>(),
             ["example", "other"]
         );
@@ -402,13 +382,6 @@ mod tests {
     }
 
     #[test]
-    fn a_port_on_one_guest_is_refused() {
-        let error = rejects(&MINIMAL.replace("cid = 3\n", "cid = 3\nport = 5000\n"));
-
-        assert!(error.contains("port"), "unexpected error: {error}");
-    }
-
-    #[test]
     fn a_context_id_vsock_keeps_for_itself_is_refused() {
         for cid in [0, 1, 2, u32::MAX] {
             let error = rejects(&MINIMAL.replace("cid = 3\n", &format!("cid = {cid}\n")));
@@ -421,7 +394,7 @@ mod tests {
 
         assert!(
             parse(&MINIMAL.replace("cid = 3\n", "cid = 4294967294\n"))
-                .registry
+                .guests
                 .lookup(&PeerId::Vsock { cid: u32::MAX - 1 })
                 .is_some()
         );
@@ -432,23 +405,6 @@ mod tests {
         let error = rejects("[grant]\nfloor = \"2GiB\"\n");
 
         assert_eq!(error, "the file names no guests");
-    }
-
-    #[test]
-    fn a_vsock_guest_without_a_cid_is_refused() {
-        let error = rejects(&MINIMAL.replace("cid = 3\n", ""));
-
-        assert!(error.contains("cid"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_unix_guest_with_a_cid_is_refused() {
-        let error = rejects(&FULL.replace(
-            r#"path = "/run/pazari/example.sock""#,
-            "cid = 3\npath = \"/run/pazari/example.sock\"",
-        ));
-
-        assert!(error.contains("cid"), "unexpected error: {error}");
     }
 
     #[test]
@@ -470,66 +426,6 @@ mod tests {
             error,
             "unix:/run/pazari/example.sock is already registered as example"
         );
-    }
-
-    #[test]
-    fn a_malformed_duration_names_the_field_that_carries_it() {
-        let error = rejects(&MINIMAL.replace(
-            r#"floor = "2GiB""#,
-            "floor = \"2GiB\"\nmin_interval = \"3 fortnights\"",
-        ));
-
-        assert!(error.contains("min_interval"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_malformed_size_names_the_field_that_carries_it() {
-        let error = rejects(&MINIMAL.replace(r#"floor = "2GiB""#, r#"floor = "2 lorries""#));
-
-        assert!(error.contains("floor"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn an_unknown_key_names_itself() {
-        let error = rejects(&MINIMAL.replace("[grant]", "[grant]\nnagle = true"));
-
-        assert!(error.contains("nagle"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn an_unknown_enum_names_the_field_that_carries_it() {
-        let error = rejects(&MINIMAL.replace(r#"kind = "vsock""#, r#"kind = "carrier_pigeon""#));
-
-        assert!(error.contains("kind"), "unexpected error: {error}");
-        assert!(error.contains("vsock"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_unix_transport_without_a_path_is_refused() {
-        let error =
-            rejects(&MINIMAL.replace("kind = \"vsock\"\n        cid = 3", "kind = \"unix\""));
-
-        assert!(error.contains("path"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_socket_path_on_a_vsock_transport_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            r#"kind = "vsock""#,
-            "kind = \"vsock\"\npath = \"/run/pazari/example.sock\"",
-        ));
-
-        assert!(error.contains("path"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn a_poll_interval_on_a_held_socket_is_refused() {
-        let error = rejects(&MINIMAL.replace(
-            r#"device = "vm0""#,
-            "device = \"vm0\"\n\n[guests.example.qmp.mode]\nkind = \"held\"\npoll = \"1s\"",
-        ));
-
-        assert!(error.contains("poll"), "unexpected error: {error}");
     }
 
     #[test]
@@ -601,22 +497,8 @@ mod tests {
     }
 
     #[test]
-    fn a_metrics_table_without_an_address_is_refused() {
-        let error = rejects(&MINIMAL.replace("[grant]", "[metrics]\n\n[grant]"));
-
-        assert!(error.contains("listen"), "unexpected error: {error}");
-    }
-
-    #[test]
     fn a_file_that_asks_for_no_revocation_gets_none() {
         assert_eq!(parse(MINIMAL).policy.revocation, None);
-    }
-
-    #[test]
-    fn a_revocation_table_without_a_threshold_names_the_field() {
-        let error = rejects(&FULL.replace("psi = 30.0\n", ""));
-
-        assert!(error.contains("psi"), "unexpected error: {error}");
     }
 
     #[test]

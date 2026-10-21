@@ -1,6 +1,7 @@
 use std::{
     io::Write,
     num::NonZeroU64,
+    path::PathBuf,
     process,
     sync::atomic::{AtomicBool, Ordering},
     thread,
@@ -12,7 +13,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 use crate::{
-    pace::Pacer,
+    pace::{self, Pacer},
     plan::{Kind, Plan},
     region::{Commit, Fill, HugePages, Region, RegionError},
     report::{ReportError, Reporter, Started},
@@ -22,6 +23,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     pub plan: Plan,
+    pub cache_dir: Option<PathBuf>,
     pub arena: NonZeroU64,
     pub interval: Interval,
     pub commit: Commit,
@@ -64,11 +66,15 @@ pub fn run<W: Write>(
         commit: options.commit,
         huge_pages: options.huge_pages,
         fill: options.fill,
-        cache_dir: options.plan.cache_dir(),
+        cache_dir: options.cache_dir.as_deref(),
         plan: &options.plan,
     })?;
 
-    let scratch = options.plan.cache_dir().map(Scratch::create).transpose()?;
+    let scratch = options
+        .cache_dir
+        .as_deref()
+        .map(Scratch::create)
+        .transpose()?;
 
     let mut walk = Walk {
         region,
@@ -270,7 +276,7 @@ impl<W: Write> Walk<'_, W> {
     }
 
     fn report(&mut self, elapsed: Duration) -> Result<(), RunError> {
-        let rate = Pacer::measure(
+        let rate = pace::measure(
             self.touched - self.counted,
             elapsed.saturating_sub(self.marked),
         );
@@ -307,7 +313,7 @@ fn due(interval: Interval, elapsed: Duration) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::fs;
 
     use serde_json::Value;
 
@@ -320,9 +326,12 @@ mod tests {
     }
 
     fn options_in(specs: &[&str], cache_dir: Option<PathBuf>, millis: u64) -> Options {
-        let plan = Plan::parse(specs, cache_dir).expect("the specs are a workable plan");
+        let plan = Plan::parse(specs).expect("the specs are a workable plan");
 
         Options {
+            cache_dir: plan
+                .cache_dir(cache_dir)
+                .expect("the plan has somewhere to write"),
             arena: plan.arena(None).expect("the plan grows into something"),
             interval: interval(millis),
             commit: Commit::Reserve,

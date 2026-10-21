@@ -5,9 +5,8 @@ use tracing::info;
 use crate::broker::{
     Broker,
     effects::Effects,
-    guest::Entry,
     phase::{Reclaim, Reply},
-    registry::GuestId,
+    registry::{Entry, GuestId},
 };
 
 impl Broker {
@@ -20,7 +19,7 @@ impl Broker {
     ) {
         let answer_within = self.world.policy().reclaim_deadline.get();
 
-        let Entry { spec, state } = self.world.guests_mut().get_mut(guest);
+        let Entry { spec, value: state } = self.world.guests_mut().get_mut(guest);
 
         let Some((peer, session)) = state.askable() else {
             return;

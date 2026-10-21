@@ -31,6 +31,16 @@ pub enum Reporting {
     Stale,
 }
 
+/// How a guest's request is settled.
+#[derive(Debug, Clone, Copy)]
+enum Route {
+    /// Answered without the arbiter.
+    Answer(Decision),
+
+    /// Put to the arbiter.
+    Arbitrate(Geometry, Ask),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reclaim {
     pub(crate) id: ReclaimId,
@@ -161,24 +171,24 @@ impl Negotiated {
     }
 
     /// What a grow to `target`, as the guest reads it, asks of the device.
-    ///
-    /// An `Err` is answered without the arbiter.
-    fn grow(&self, step: &Step<'_>, target: u64) -> Result<(Geometry, Ask), Decision> {
+    fn grow(&self, step: &Step<'_>, target: u64) -> Route {
         let ceiling = step.ceiling();
-        let geometry = step.geometry().ok_or_else(|| step.world.unsized_deny())?;
+        let Some(geometry) = step.geometry() else {
+            return Route::Answer(step.world.unsized_deny());
+        };
 
         // Where the device is heading, which a resize in flight moves off its size.
         let heading = step.requested().unwrap_or(geometry.size);
         let wanted = geometry.device(target);
 
         if wanted <= heading {
-            return Err(Decision::Grant { target });
+            return Route::Answer(Decision::Grant { target });
         }
 
         let room = self.whole_blocks(ceiling.get().saturating_sub(heading));
 
         if room == 0 {
-            return Err(Decision::Deny {
+            return Route::Answer(Decision::Deny {
                 reason: DenyReason::Ceiling,
                 retry_after: None,
             });
@@ -186,26 +196,26 @@ impl Negotiated {
 
         let grow = self.blocks_holding(wanted - heading).min(room);
 
-        Ok((
+        Route::Arbitrate(
             geometry,
             Ask::Grow {
                 target: heading + grow,
             },
-        ))
+        )
     }
 
     /// What an offer of `releasable` bytes asks of the device.
-    ///
-    /// An `Err` is answered without the arbiter.
-    fn release(&self, step: &Step<'_>, releasable: u64) -> Result<(Geometry, Ask), Decision> {
-        let geometry = step.geometry().ok_or_else(|| step.world.unsized_deny())?;
+    fn release(&self, step: &Step<'_>, releasable: u64) -> Route {
+        let Some(geometry) = step.geometry() else {
+            return Route::Answer(step.world.unsized_deny());
+        };
 
         let target = geometry
             .size
             .saturating_sub(self.whole_blocks(releasable))
             .max(geometry.boot());
 
-        Ok((geometry, Ask::Release { target }))
+        Route::Arbitrate(geometry, Ask::Release { target })
     }
 
     /// Settles a reclaim the guest promised once it offers that much back.
@@ -245,10 +255,10 @@ impl Negotiated {
         self.stay()
     }
 
-    fn request(step: &mut Step<'_>, id: RequestId, asked: Result<(Geometry, Ask), Decision>) {
-        let (geometry, ask) = match asked {
-            Ok(asked) => asked,
-            Err(decision) => return step.answer(id, decision),
+    fn request(step: &mut Step<'_>, id: RequestId, route: Route) {
+        let (geometry, ask) = match route {
+            Route::Answer(decision) => return step.answer(id, decision),
+            Route::Arbitrate(geometry, ask) => (geometry, ask),
         };
 
         let decision = step.world.arbitrate(step.now, step.guest, geometry, ask);
@@ -305,9 +315,9 @@ impl State for Negotiated {
             "a guest asked to grow",
         );
 
-        let asked = next.grow(step, target);
+        let route = next.grow(step, target);
 
-        Self::request(step, id, asked);
+        Self::request(step, id, route);
 
         next.stay()
     }
@@ -327,9 +337,9 @@ impl State for Negotiated {
 
         next.fulfil(step, releasable);
 
-        let asked = next.release(step, releasable);
+        let route = next.release(step, releasable);
 
-        Self::request(step, id, asked);
+        Self::request(step, id, route);
 
         next.stay()
     }

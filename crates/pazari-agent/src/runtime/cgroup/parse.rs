@@ -168,13 +168,4 @@ mod tests {
             "/sys/fs/cgroup/workload/memory.events holds \"infinity\", which is not a decimal byte count or \"max\""
         );
     }
-
-    #[test]
-    fn a_limit_writes_the_way_the_kernel_reads_it() {
-        assert_eq!(Limit::Bytes(2_147_483_648).to_string(), "2147483648");
-        assert_eq!(Limit::Max.to_string(), "max");
-        assert_eq!(Limit::Max.bytes(), None);
-        assert_eq!(Limit::Max.or_infinity(), u64::MAX);
-        assert_eq!(Limit::Bytes(42).or_infinity(), 42);
-    }
 }

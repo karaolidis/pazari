@@ -68,12 +68,6 @@ impl VsockConnector {
     }
 }
 
-impl Default for VsockConnector {
-    fn default() -> Self {
-        Self::new(VMADDR_CID_HOST, DEFAULT_VSOCK_PORT)
-    }
-}
-
 impl Connector for VsockConnector {
     type Connection = VsockStream;
 
@@ -110,20 +104,6 @@ mod tests {
 
     fn welcome() -> HostMessage {
         host_messages().swap_remove(0)
-    }
-
-    #[test]
-    fn the_connector_defaults_to_the_host_cid_and_the_protocol_port() {
-        let connector = VsockConnector::default();
-
-        assert_eq!(connector.cid(), VMADDR_CID_HOST);
-        assert_eq!(connector.port(), DEFAULT_VSOCK_PORT);
-        assert_eq!(
-            connector.peer(),
-            PeerId::Vsock {
-                cid: VMADDR_CID_HOST
-            }
-        );
     }
 
     #[tokio::test]

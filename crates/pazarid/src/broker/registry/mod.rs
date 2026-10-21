@@ -33,33 +33,59 @@ pub enum RegistryError {
     DuplicateName { name: String },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Registry {
-    specs: Vec<GuestSpec>,
+/// A registered guest and what is kept alongside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry<T> {
+    pub spec: GuestSpec,
+    pub value: T,
+}
+
+/// The guests, each answering to one peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Registry<T> {
+    entries: Vec<Entry<T>>,
     peers: HashMap<PeerId, GuestId>,
 }
 
-impl Registry {
+impl<T> Default for Registry<T> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            peers: HashMap::new(),
+        }
+    }
+}
+
+impl<T> Registry<T> {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert(&mut self, peer: PeerId, spec: GuestSpec) -> Result<GuestId, RegistryError> {
+    pub fn insert(
+        &mut self,
+        peer: PeerId,
+        spec: GuestSpec,
+        value: T,
+    ) -> Result<GuestId, RegistryError> {
         if let Some(id) = self.peers.get(&peer) {
             return Err(RegistryError::DuplicatePeer {
                 peer,
-                name: self.specs[id.index()].name.clone(),
+                name: self.spec(*id).name.clone(),
             });
         }
 
-        if self.specs.iter().any(|other| other.name == spec.name) {
+        if self
+            .entries
+            .iter()
+            .any(|other| other.spec.name == spec.name)
+        {
             return Err(RegistryError::DuplicateName { name: spec.name });
         }
 
-        let id = GuestId(self.specs.len());
+        let id = GuestId(self.entries.len());
 
-        self.specs.push(spec);
+        self.entries.push(Entry { spec, value });
         self.peers.insert(peer, id);
 
         Ok(id)
@@ -71,29 +97,50 @@ impl Registry {
     }
 
     #[must_use]
+    pub fn get(&self, id: GuestId) -> &Entry<T> {
+        &self.entries[id.index()]
+    }
+
+    pub fn get_mut(&mut self, id: GuestId) -> &mut Entry<T> {
+        &mut self.entries[id.index()]
+    }
+
+    #[must_use]
     pub fn spec(&self, id: GuestId) -> &GuestSpec {
-        &self.specs[id.index()]
+        &self.get(id).spec
     }
 
     #[must_use]
     pub const fn len(&self) -> usize {
-        self.specs.len()
+        self.entries.len()
     }
 
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.specs.is_empty()
+        self.entries.is_empty()
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<GuestSpec>, HashMap<PeerId, GuestId>) {
-        (self.specs, self.peers)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (GuestId, &GuestSpec)> {
-        self.specs
+    pub fn iter(&self) -> impl Iterator<Item = (GuestId, &Entry<T>)> {
+        self.entries
             .iter()
             .enumerate()
-            .map(|(index, spec)| (GuestId(index), spec))
+            .map(|(index, entry)| (GuestId(index), entry))
+    }
+
+    /// The same guests, each keeping `f` of what it kept.
+    #[must_use]
+    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> Registry<U> {
+        Registry {
+            entries: self
+                .entries
+                .into_iter()
+                .map(|Entry { spec, value }| Entry {
+                    spec,
+                    value: f(value),
+                })
+                .collect(),
+            peers: self.peers,
+        }
     }
 }
 
@@ -106,8 +153,12 @@ mod tests {
     fn a_registry_answers_by_address() {
         let mut registry = Registry::new();
 
-        let one = registry.insert(vsock(3), guest("one", CEILING)).unwrap();
-        let two = registry.insert(vsock(4), guest("two", 512 * MIB)).unwrap();
+        let one = registry
+            .insert(vsock(3), guest("one", CEILING), ())
+            .unwrap();
+        let two = registry
+            .insert(vsock(4), guest("two", 512 * MIB), ())
+            .unwrap();
 
         assert_eq!(registry.lookup(&vsock(3)), Some(one));
         assert_eq!(registry.lookup(&vsock(4)), Some(two));
@@ -125,11 +176,13 @@ mod tests {
     fn a_second_guest_at_one_address_is_refused() {
         let mut registry = Registry::new();
 
-        registry.insert(vsock(3), guest("one", CEILING)).unwrap();
+        registry
+            .insert(vsock(3), guest("one", CEILING), ())
+            .unwrap();
 
         assert_eq!(
             registry
-                .insert(vsock(3), guest("two", CEILING))
+                .insert(vsock(3), guest("two", CEILING), ())
                 .expect_err("one address, one guest"),
             RegistryError::DuplicatePeer {
                 peer: vsock(3),
@@ -143,11 +196,13 @@ mod tests {
     fn a_second_guest_of_one_name_is_refused() {
         let mut registry = Registry::new();
 
-        registry.insert(vsock(3), guest("one", CEILING)).unwrap();
+        registry
+            .insert(vsock(3), guest("one", CEILING), ())
+            .unwrap();
 
         assert_eq!(
             registry
-                .insert(vsock(4), guest("one", CEILING))
+                .insert(vsock(4), guest("one", CEILING), ())
                 .expect_err("one name, one guest"),
             RegistryError::DuplicateName {
                 name: "one".to_owned(),

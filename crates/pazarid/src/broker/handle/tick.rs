@@ -5,10 +5,9 @@ use crate::broker::{
     Broker,
     action::Action,
     effects::Effects,
-    guest::Entry,
     phase::{Reply, Reporting},
     policy::StalledShrinks,
-    registry::GuestId,
+    registry::{Entry, GuestId},
     session::Session,
 };
 
@@ -55,7 +54,7 @@ impl Broker {
     fn tick_reconcile(&mut self, now: Timestamp, guest: GuestId, fx: &mut Effects) {
         let stalled_shrinks = self.world.policy().stalled_shrinks;
 
-        let Entry { spec, state } = self.world.guests_mut().get_mut(guest);
+        let Entry { spec, value: state } = self.world.guests_mut().get_mut(guest);
 
         let Some(reconcile) = state.reconcile else {
             return;
@@ -99,7 +98,7 @@ impl Broker {
     }
 
     fn tick_reclaim(&mut self, now: Timestamp, guest: GuestId) {
-        let Entry { spec, state } = self.world.guests_mut().get_mut(guest);
+        let Entry { spec, value: state } = self.world.guests_mut().get_mut(guest);
 
         let Some(session) = state.session.as_mut().and_then(Session::negotiated_mut) else {
             return;
@@ -138,7 +137,7 @@ impl Broker {
             .get()
             .saturating_mul(policy.stale_after.get());
 
-        let Entry { spec, state } = self.world.guests_mut().get_mut(guest);
+        let Entry { spec, value: state } = self.world.guests_mut().get_mut(guest);
 
         let Some(session) = state.session.as_mut().and_then(Session::negotiated_mut) else {
             return;

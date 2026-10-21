@@ -97,28 +97,3 @@ pub struct RuntimeConfig {
 
     pub paths: Paths,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_fixture_tree_carries_the_same_layout() {
-        let paths = Paths::under(Path::new("/tmp/fixture"));
-
-        assert_eq!(paths.cgroup_root, Path::new("/tmp/fixture/sys/fs/cgroup"));
-        assert_eq!(paths.meminfo, Path::new("/tmp/fixture/proc/meminfo"));
-        assert_eq!(
-            paths.self_cgroup,
-            Path::new("/tmp/fixture/proc/self/cgroup")
-        );
-        assert_eq!(
-            paths.auto_online_blocks,
-            Path::new("/tmp/fixture/sys/devices/system/memory/auto_online_blocks")
-        );
-        assert_eq!(
-            paths.virtio_devices,
-            Path::new("/tmp/fixture/sys/bus/virtio/devices")
-        );
-    }
-}

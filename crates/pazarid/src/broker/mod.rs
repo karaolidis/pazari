@@ -22,10 +22,10 @@ pub use crate::broker::{
     arbiter::{Arbiter, Ask, Decision, Fcfs, GuestView, HostView, Request},
     effects::Effects,
     event::Event,
-    guest::{Entry, Geometry, Guest, Guests, Reconcile},
+    guest::{Geometry, Guest, Guests, Reconcile},
     phase::{Negotiated, Phase, Reclaim, Reply, Reporting},
     policy::{Grantable, Policy, Revocation, StalledShrinks},
-    registry::{GuestId, GuestSpec, Registry, RegistryError},
+    registry::{Entry, GuestId, GuestSpec, Registry, RegistryError},
     session::Session,
 };
 use crate::broker::{phase::Step, world::World};
@@ -37,14 +37,14 @@ pub struct Broker {
 
 impl Broker {
     #[must_use]
-    pub fn new(policy: Policy, guests: Registry) -> Self {
-        Self::with_arbiter(policy, guests, Fcfs)
+    pub fn new<T>(policy: Policy, registry: Registry<T>) -> Self {
+        Self::with_arbiter(policy, registry, Fcfs)
     }
 
     #[must_use]
-    pub fn with_arbiter(
+    pub fn with_arbiter<T>(
         policy: Policy,
-        registry: Registry,
+        registry: Registry<T>,
         arbiter: impl Arbiter + 'static,
     ) -> Self {
         Self {

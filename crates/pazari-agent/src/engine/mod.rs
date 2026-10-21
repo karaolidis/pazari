@@ -14,7 +14,7 @@ mod phase;
 mod refusal;
 mod release;
 mod streak;
-mod tally;
+mod transition;
 mod world;
 
 #[cfg(test)]
@@ -30,10 +30,11 @@ pub use crate::engine::{
         EngineConfig, ExhaustionMode, ExponentialConfig, GrowConfig, ReleaseConfig, SweepConfig,
         ThrottleMode, TitrateConfig,
     },
+    effects::Outcome,
     error::EngineError,
     event::{BootInfo, Event, Snapshot},
     phase::{Phase, PhaseKind},
-    tally::Tally,
+    transition::Transition,
 };
 use crate::engine::{
     counters::CounterTracker,
@@ -85,7 +86,7 @@ impl Engine {
         Ok((engine, ground))
     }
 
-    pub fn handle(&mut self, event: Event) -> Vec<Action> {
+    pub fn handle(&mut self, event: Event) -> Outcome {
         let before = self.phase;
         let mut fx = Effects::default();
 
@@ -189,12 +190,6 @@ impl Engine {
     #[must_use]
     pub const fn pending_request(&self) -> Option<RequestId> {
         self.phase.pending_request()
-    }
-
-    /// The transitions made since the engine started.
-    #[must_use]
-    pub const fn tally(&self) -> Tally {
-        self.world.tally()
     }
 }
 #[cfg(test)]
@@ -443,18 +438,22 @@ mod tests {
         let mut engine = started();
 
         assert_eq!(
-            engine.handle(Event::TotalChanged {
-                now: at(100),
-                total_mem: 2560 * MIB,
-            }),
+            engine
+                .handle(Event::TotalChanged {
+                    now: at(100),
+                    total_mem: 2560 * MIB,
+                })
+                .actions,
             vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
         );
 
         assert_eq!(
-            engine.handle(Event::TotalChanged {
-                now: at(101),
-                total_mem: BOOT,
-            }),
+            engine
+                .handle(Event::TotalChanged {
+                    now: at(101),
+                    total_mem: BOOT,
+                })
+                .actions,
             vec![Action::SetHigh(HIGH0), Action::SetMax(MAX0)]
         );
     }
@@ -992,7 +991,7 @@ mod tests {
                 },
             };
 
-            let actions = engine.handle(event);
+            let actions = engine.handle(event).actions;
             check(&engine, &actions, &mut model)?;
 
             visited.push(engine.phase().kind());

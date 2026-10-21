@@ -2,10 +2,9 @@ use std::{
     io::{self, Write},
     num::NonZeroU64,
     path::Path,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use pazari_types::{Clock, Timestamp};
 use serde::{Serialize, Serializer};
 use serde_with::{DurationMilliSeconds, serde_as};
 use thiserror::Error;
@@ -114,7 +113,7 @@ impl Event<'_> {
 #[derive(Debug)]
 pub struct Reporter<W> {
     out: W,
-    clock: Clock,
+    started: Instant,
 }
 
 impl<W: Write> Reporter<W> {
@@ -122,7 +121,7 @@ impl<W: Write> Reporter<W> {
     pub fn new(out: W) -> Self {
         Self {
             out,
-            clock: Clock::start(),
+            started: Instant::now(),
         }
     }
 
@@ -184,7 +183,7 @@ impl<W: Write> Reporter<W> {
 
     /// The time since the reporter started.
     fn elapsed(&self) -> Duration {
-        self.clock.now().saturating_duration_since(Timestamp::START)
+        self.started.elapsed()
     }
 
     fn emit(&mut self, event: &Event<'_>) -> Result<(), ReportError> {
@@ -249,7 +248,7 @@ mod tests {
     }
 
     fn plan(specs: &[&str]) -> Plan {
-        Plan::parse(specs, None).expect("the specs are a workable plan")
+        Plan::parse(specs).expect("the specs are a workable plan")
     }
 
     #[test]

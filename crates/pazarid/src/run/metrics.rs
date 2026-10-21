@@ -108,7 +108,7 @@ impl Observer {
             };
             let session = broker.negotiated(id);
 
-            if let Some(size) = entry.state.size() {
+            if let Some(size) = entry.value.size() {
                 series
                     .guests
                     .size

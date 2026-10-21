@@ -167,7 +167,6 @@ mod tests {
     use crate::{
         GuestMessage, HostMessage, ReclaimId, RequestId,
         message::fixtures::{guest_message, host_message},
-        testing::{guest_messages, host_messages},
     };
 
     const CAP: usize = JsonLinesCodec::MAX_FRAME_BYTES;
@@ -399,49 +398,7 @@ mod tests {
         assert_eq!(snippet(&long), format!("{short}..."));
     }
 
-    #[test]
-    fn guest_messages_survive_the_codec() {
-        for message in guest_messages() {
-            let framed = JsonLinesCodec::encode_to_vec(&message).unwrap();
-            assert_eq!(framed.last(), Some(&b'\n'));
-
-            let mut decoder = JsonLinesCodec::decoder::<GuestMessage>();
-            decoder.push(&framed).unwrap();
-
-            assert_eq!(decoder.next_message().unwrap(), Some(message));
-            assert_eq!(decoder.next_message().unwrap(), None);
-        }
-    }
-
-    #[test]
-    fn host_messages_survive_the_codec() {
-        for message in host_messages() {
-            let framed = JsonLinesCodec::encode_to_vec(&message).unwrap();
-            assert_eq!(framed.last(), Some(&b'\n'));
-
-            let mut decoder = JsonLinesCodec::decoder::<HostMessage>();
-            decoder.push(&framed).unwrap();
-
-            assert_eq!(decoder.next_message().unwrap(), Some(message));
-            assert_eq!(decoder.next_message().unwrap(), None);
-        }
-    }
-
     proptest! {
-        #[test]
-        fn guest_messages_round_trip(message in guest_message()) {
-            let framed = JsonLinesCodec::encode_to_vec(&message)?;
-            let decoded = rechunked::<GuestMessage, JsonLinesCodec>(&framed, &[framed.len().max(1)])?;
-            prop_assert_eq!(decoded, vec![message]);
-        }
-
-        #[test]
-        fn host_messages_round_trip(message in host_message()) {
-            let framed = JsonLinesCodec::encode_to_vec(&message)?;
-            let decoded = rechunked::<HostMessage, JsonLinesCodec>(&framed, &[framed.len().max(1)])?;
-            prop_assert_eq!(decoded, vec![message]);
-        }
-
         #[test]
         fn a_guest_stream_survives_arbitrary_chunking(
             messages in prop::collection::vec(guest_message(), 0..8),

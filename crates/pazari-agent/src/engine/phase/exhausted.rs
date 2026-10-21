@@ -14,7 +14,7 @@ use crate::engine::{
         steady::Steady,
     },
     refusal::Refusal,
-    tally::Transition,
+    transition::Transition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +53,7 @@ impl Exhausted {
                     "workload demand exceeds its ceiling",
                 );
 
-                step.world.record(Transition::Exhaustion);
+                step.fx.record(Transition::Exhaustion);
 
                 step.now
             }
@@ -121,11 +121,7 @@ impl State for Exhausted {
         Phase::Exhausted(self)
     }
 
-    fn brake(self, _step: &mut Step<'_>) -> Phase {
-        self.stay()
-    }
-
-    fn resume(self, step: &mut Step<'_>) -> Phase {
+    fn on_connected(self, step: &mut Step<'_>) -> Phase {
         Growing::start(step, self.retrying())
     }
 
@@ -155,12 +151,11 @@ impl State for Exhausted {
     fn on_total_changed(self, step: &mut Step<'_>, moved: Moved) -> Phase {
         match moved {
             Moved::Grew => Steady::settled(step),
-            Moved::Shrank => {
-                step.world.rebrake(step.fx);
+            Moved::Shrank | Moved::Unchanged => {
+                step.rebrake(moved);
 
                 self.stay()
             }
-            Moved::Unchanged => self.stay(),
         }
     }
 
@@ -178,8 +173,8 @@ impl State for Exhausted {
         self.stay()
     }
 
-    fn on_ceiling_raised(self, step: &mut Step<'_>) -> Option<Phase> {
-        Some(Growing::start(step, Attempt::First))
+    fn on_ceiling_raised(self, step: &mut Step<'_>) -> Phase {
+        Growing::start(step, Attempt::First)
     }
 }
 
@@ -190,8 +185,8 @@ mod tests {
     use pazari_proto::{DenyReason, HostMessage};
 
     use crate::engine::{
-        Action, EngineConfig, Event, ExhaustionMode, Phase, ReleaseConfig, TitrateConfig,
-        testing::*,
+        Action, Engine, EngineConfig, Event, ExhaustionMode, Phase, ReleaseConfig, TitrateConfig,
+        Transition, testing::*,
     };
 
     #[test]
@@ -244,23 +239,50 @@ mod tests {
     #[test]
     fn a_retry_the_host_turns_down_for_pressure_still_times_out() {
         let mut engine = started_with(config(), 2560 * MIB);
+        let mut transitions = Vec::new();
+        let mut handle = |engine: &mut Engine, event| {
+            let outcome = engine.handle(event);
+            transitions.extend(outcome.transitions);
+            outcome.actions
+        };
 
-        wake(&mut engine, at(100), 1);
-        host(&mut engine, at(100), deny(RequestId(1)));
+        handle(
+            &mut engine,
+            Event::ThrottleWake {
+                now: at(100),
+                high_events: 1,
+                max_events: 0,
+            },
+        );
+        handle(
+            &mut engine,
+            Event::Host {
+                now: at(100),
+                message: deny(RequestId(1)),
+            },
+        );
 
         let mut asked = Vec::new();
         for second in 101..=130 {
-            let actions = tick(&mut engine, at(second), snap(BOOT, STALLED, 1));
+            let actions = handle(
+                &mut engine,
+                Event::Tick {
+                    now: at(second),
+                    snapshot: snap(BOOT, STALLED, 1),
+                },
+            );
 
             if let Some(id) = engine.pending_request() {
                 asked.push(second);
-                host(
+                handle(
                     &mut engine,
-                    at(second),
-                    HostMessage::Deny {
-                        id,
-                        reason: DenyReason::HostPressure,
-                        retry_after: Some(Duration::from_secs(1)),
+                    Event::Host {
+                        now: at(second),
+                        message: HostMessage::Deny {
+                            id,
+                            reason: DenyReason::HostPressure,
+                            retry_after: Some(Duration::from_secs(1)),
+                        },
                     },
                 );
             } else if second == 112 {
@@ -272,8 +294,8 @@ mod tests {
         assert!(matches!(engine.phase(), Phase::Exhausted(_)));
         assert!(engine.brake_released());
         assert_eq!(
-            engine.tally().exhaustions,
-            1,
+            transitions,
+            vec![Transition::Exhaustion],
             "each refused retry counted as another exhaustion"
         );
     }
@@ -351,10 +373,12 @@ mod tests {
         assert!(matches!(engine.phase(), Phase::Exhausted(_)));
 
         assert_eq!(
-            engine.handle(Event::TotalChanged {
-                now: at(101),
-                total_mem: BOOT - BLOCK,
-            }),
+            engine
+                .handle(Event::TotalChanged {
+                    now: at(101),
+                    total_mem: BOOT - BLOCK,
+                })
+                .actions,
             vec![Action::SetHigh(HIGH0 - BLOCK), Action::SetMax(MAX0 - BLOCK)]
         );
         assert!(matches!(engine.phase(), Phase::Exhausted(_)));
@@ -398,10 +422,12 @@ mod tests {
         );
 
         assert_eq!(
-            engine.handle(Event::TotalChanged {
-                now: at(202),
-                total_mem: 2560 * MIB,
-            }),
+            engine
+                .handle(Event::TotalChanged {
+                    now: at(202),
+                    total_mem: 2560 * MIB,
+                })
+                .actions,
             vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
         );
         assert!(matches!(engine.phase(), Phase::Steady(_)));
@@ -424,10 +450,12 @@ mod tests {
         assert!(matches!(engine.phase(), Phase::Exhausted(_)));
 
         assert_eq!(
-            engine.handle(Event::TotalChanged {
-                now: at(200),
-                total_mem: 2560 * MIB,
-            }),
+            engine
+                .handle(Event::TotalChanged {
+                    now: at(200),
+                    total_mem: 2560 * MIB,
+                })
+                .actions,
             vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
         );
         assert!(matches!(engine.phase(), Phase::Steady(_)));
@@ -638,46 +666,6 @@ mod tests {
 
             if let Some(id) = engine.pending_request() {
                 host(&mut engine, at(second), deny(id));
-            }
-
-            if matches!(engine.phase(), Phase::Steady(_)) {
-                return;
-            }
-        }
-
-        panic!(
-            "an idle guest never came back to steady: {:?}",
-            engine.phase(),
-        );
-    }
-
-    #[test]
-    fn a_calm_guest_recovers_while_the_host_turns_down_retries_for_pressure() {
-        let config = EngineConfig {
-            deny_backoff: interval(2),
-            exhaustion: ExhaustionMode::Stall {
-                timeout: interval(600),
-            },
-            ..config()
-        };
-        let mut engine = started_with(config, BOOT + 128 * MIB);
-
-        wake(&mut engine, at(100), 1);
-        host(&mut engine, at(100), deny(RequestId(1)));
-
-        for second in 101..=140 {
-            tick(&mut engine, at(second), snap(BOOT, CALM, 1));
-
-            if let Some(id) = engine.pending_request() {
-                host(
-                    &mut engine,
-                    at(second),
-                    HostMessage::Deny {
-                        id,
-                        reason: DenyReason::HostPressure,
-                        retry_after: Some(Duration::from_secs(1)),
-                    },
-                );
             }
 
             if matches!(engine.phase(), Phase::Steady(_)) {

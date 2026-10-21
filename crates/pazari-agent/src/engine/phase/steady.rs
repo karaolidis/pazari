@@ -53,12 +53,8 @@ impl State for Steady {
         Phase::Steady(self)
     }
 
-    fn brake(self, step: &mut Step<'_>) -> Phase {
-        Phase::braked(step)
-    }
-
-    fn resume(self, _step: &mut Step<'_>) -> Phase {
-        self.stay()
+    fn on_throttled(self, step: &mut Step<'_>) -> Phase {
+        Phase::throttled(step)
     }
 
     fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, desired: u64) -> Phase {

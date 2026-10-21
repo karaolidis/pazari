@@ -68,17 +68,26 @@ const THP_ALWAYS: ThpAlwaysSection = ThpAlwaysSection::Fail;
 #[derive(Debug, Deserialize, Document)]
 #[serde(deny_unknown_fields)]
 pub struct File {
-    #[serde(default)]
+    #[serde_inline_default(TickSection {
+        interval: TICK_INTERVAL,
+    })]
     tick: TickSection,
 
     workload: WorkloadSection,
 
     host: HostSection,
 
-    #[serde(default)]
+    #[serde_inline_default(ResizeSection {
+        settle_grace: SETTLE_GRACE,
+        deny_backoff: DENY_BACKOFF,
+        hotplug_debounce: HOTPLUG_DEBOUNCE,
+    })]
     resize: ResizeSection,
 
-    #[serde(default)]
+    #[serde_inline_default(ReclaimSection {
+        chunk: RECLAIM_CHUNK,
+        swappiness: None,
+    })]
     reclaim: ReclaimSection,
 
     /// What the agent does when the workload throttles at `memory.high`.
@@ -104,10 +113,17 @@ pub struct File {
     #[doku(example = "kind = \"titrate\"")]
     release: ReleaseSection,
 
-    #[serde(default)]
+    #[serde_inline_default(ExhaustionSection {
+        recover_after: RECOVER_AFTER,
+        mode: ModeSection::Stall {
+            timeout: STALL_TIMEOUT,
+        },
+    })]
     exhaustion: ExhaustionSection,
 
-    #[serde(default)]
+    #[serde_inline_default(PreflightSection {
+        thp_always: THP_ALWAYS,
+    })]
     preflight: PreflightSection,
 
     metrics: Option<MetricsSection>,
@@ -162,21 +178,15 @@ impl File {
     }
 }
 
+#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct TickSection {
     /// How often the agent reads the workload cgroup and `/proc/meminfo`.
+    #[serde_inline_default(TICK_INTERVAL)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "1s")]
     interval: Duration,
-}
-
-impl Default for TickSection {
-    fn default() -> Self {
-        Self {
-            interval: TICK_INTERVAL,
-        }
-    }
 }
 
 #[serde_inline_default]
@@ -313,39 +323,35 @@ impl TransportSection {
     }
 }
 
+#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ResizeSection {
     /// How long a resize is left to settle.
+    #[serde_inline_default(SETTLE_GRACE)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "10s")]
     settle_grace: Duration,
 
     /// How long to wait before re-asking a host that denied a request.
+    #[serde_inline_default(DENY_BACKOFF)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "5s")]
     deny_backoff: Duration,
 
     /// How long the hotplug listener waits for one resize's uevent to end.
+    #[serde_inline_default(HOTPLUG_DEBOUNCE)]
     #[serde(deserialize_with = "humantime_serde::deserialize")]
     #[doku(as = "String", example = "250ms")]
     hotplug_debounce: Duration,
 }
 
-impl Default for ResizeSection {
-    fn default() -> Self {
-        Self {
-            settle_grace: SETTLE_GRACE,
-            deny_backoff: DENY_BACKOFF,
-            hotplug_debounce: HOTPLUG_DEBOUNCE,
-        }
-    }
-}
-
+#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ReclaimSection {
     /// How much one `memory.reclaim` write asks for.
+    #[serde_inline_default(RECLAIM_CHUNK)]
     #[doku(as = "String", example = "64MiB")]
     chunk: ByteSize,
 
@@ -353,15 +359,6 @@ pub struct ReclaimSection {
     /// reclaim at the guest's own `vm.swappiness`.
     #[doku(example = "0")]
     swappiness: Option<u8>,
-}
-
-impl Default for ReclaimSection {
-    fn default() -> Self {
-        Self {
-            chunk: RECLAIM_CHUNK,
-            swappiness: None,
-        }
-    }
 }
 
 impl ReclaimSection {
@@ -518,28 +515,22 @@ impl ReleaseSection {
     }
 }
 
+#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ExhaustionSection {
     /// Calm intervals that end an exhaustion.
+    #[serde_inline_default(RECOVER_AFTER)]
     #[doku(example = "3")]
     recover_after: u32,
 
     /// What the agent does once the workload wants more than the ceiling
     /// allows.
+    #[serde_inline_default(ModeSection::Stall {
+        timeout: STALL_TIMEOUT,
+    })]
     #[doku(example = "kind = \"stall\"")]
     mode: ModeSection,
-}
-
-impl Default for ExhaustionSection {
-    fn default() -> Self {
-        Self {
-            recover_after: RECOVER_AFTER,
-            mode: ModeSection::Stall {
-                timeout: STALL_TIMEOUT,
-            },
-        }
-    }
 }
 
 /// What the agent does once the workload wants more than the ceiling allows.
@@ -572,21 +563,15 @@ impl ModeSection {
     }
 }
 
+#[serde_inline_default]
 #[derive(Debug, Deserialize, Document)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PreflightSection {
     /// What preflight does when `/sys/kernel/mm/transparent_hugepage/enabled`
     /// is set to `always`.
+    #[serde_inline_default(THP_ALWAYS)]
     #[doku(example = "\"fail\"")]
     thp_always: ThpAlwaysSection,
-}
-
-impl Default for PreflightSection {
-    fn default() -> Self {
-        Self {
-            thp_always: THP_ALWAYS,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Document)]

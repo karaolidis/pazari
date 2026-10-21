@@ -152,23 +152,27 @@ pub const fn at(secs: u64) -> Timestamp {
 }
 
 pub fn tick(engine: &mut Engine, now: Timestamp, snapshot: Snapshot) -> Vec<Action> {
-    engine.handle(Event::Tick { now, snapshot })
+    engine.handle(Event::Tick { now, snapshot }).actions
 }
 
 pub fn wake(engine: &mut Engine, now: Timestamp, high_events: u64) -> Vec<Action> {
-    engine.handle(Event::ThrottleWake {
-        now,
-        high_events,
-        max_events: 0,
-    })
+    engine
+        .handle(Event::ThrottleWake {
+            now,
+            high_events,
+            max_events: 0,
+        })
+        .actions
 }
 
 pub fn reclaimed(engine: &mut Engine, now: Timestamp, reclaimed: u64) -> Vec<Action> {
-    engine.handle(Event::ReclaimFinished { now, reclaimed })
+    engine
+        .handle(Event::ReclaimFinished { now, reclaimed })
+        .actions
 }
 
 pub fn host(engine: &mut Engine, now: Timestamp, message: HostMessage) -> Vec<Action> {
-    engine.handle(Event::Host { now, message })
+    engine.handle(Event::Host { now, message }).actions
 }
 
 pub const fn request(id: u64, current: u64, target: u64) -> Action {
@@ -194,12 +198,14 @@ pub const fn deny(id: RequestId) -> HostMessage {
 }
 
 pub fn connect(engine: &mut Engine, now: Timestamp, ceiling: u64, status: Duration) -> Vec<Action> {
-    engine.handle(Event::Connected {
-        now,
-        ceiling,
-        status_interval: status,
-        hotplugged: 0,
-    })
+    engine
+        .handle(Event::Connected {
+            now,
+            ceiling,
+            status_interval: status,
+            hotplugged: 0,
+        })
+        .actions
 }
 
 pub fn reconnect(
@@ -208,12 +214,14 @@ pub fn reconnect(
     ceiling: u64,
     hotplugged: u64,
 ) -> Vec<Action> {
-    engine.handle(Event::Connected {
-        now,
-        ceiling,
-        status_interval: HOUR,
-        hotplugged,
-    })
+    engine
+        .handle(Event::Connected {
+            now,
+            ceiling,
+            status_interval: HOUR,
+            hotplugged,
+        })
+        .actions
 }
 
 pub fn started_with(config: EngineConfig, ceiling: u64) -> Engine {
@@ -245,10 +253,12 @@ pub fn grown(engine: &mut Engine) {
     );
 
     assert_eq!(
-        engine.handle(Event::TotalChanged {
-            now: at(102),
-            total_mem: 2560 * MIB,
-        }),
+        engine
+            .handle(Event::TotalChanged {
+                now: at(102),
+                total_mem: 2560 * MIB,
+            })
+            .actions,
         vec![Action::SetMax(2304 * MIB), Action::SetHigh(2048 * MIB)]
     );
 

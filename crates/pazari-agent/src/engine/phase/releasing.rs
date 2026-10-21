@@ -54,7 +54,7 @@ impl Releasing {
                 "free memory already covers the release",
             );
 
-            return releasing.on_reclaim_finished(step, 0);
+            return releasing.offer(step, bytes, 0);
         };
 
         debug!(
@@ -90,91 +90,8 @@ impl Releasing {
         }
     }
 
-    const fn settling(target: u64, expires: Deadline) -> Self {
-        Self {
-            stage: Stage::Settling { target, expires },
-        }
-    }
-}
-
-impl State for Releasing {
-    fn stay(self) -> Phase {
-        Phase::Releasing(self)
-    }
-
-    fn brake(self, step: &mut Step<'_>) -> Phase {
-        if !matches!(self.stage, Stage::Freeing { .. }) {
-            return self.stay();
-        }
-
-        self.refuse(step, Refusal::Braked);
-
-        step.world.cancel_reclaim(step.fx);
-
-        Phase::braked(step)
-    }
-
-    fn resume(self, _step: &mut Step<'_>) -> Phase {
-        self.stay()
-    }
-
-    fn advance(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
-        match self.stage {
-            Stage::Settling { expires, .. } if expires.reached(step.now) => Steady::released(step),
-            _ => self.stay(),
-        }
-    }
-
-    fn on_total_changed(self, step: &mut Step<'_>, moved: Moved) -> Phase {
-        match self.stage {
-            Stage::Settling { target, .. } if step.limits().total_mem() <= target => {
-                Steady::released(step)
-            }
-            _ => {
-                if moved != Moved::Unchanged {
-                    step.world.rebrake(step.fx);
-                }
-
-                self.stay()
-            }
-        }
-    }
-
-    fn on_grant(self, step: &mut Step<'_>, id: RequestId, target: u64) -> Phase {
-        if !self.answers(id) {
-            return self.stay();
-        }
-
-        let expires = Deadline::after(step.now, step.config().settle_grace.get());
-
-        Self::settling(target, expires).on_total_changed(step, Moved::Unchanged)
-    }
-
-    fn on_deny(
-        self,
-        step: &mut Step<'_>,
-        id: RequestId,
-        _reason: DenyReason,
-        _retry_after: Option<Duration>,
-    ) -> Phase {
-        if !self.answers(id) {
-            return self.stay();
-        }
-
-        Steady::released(step)
-    }
-
-    fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, _desired: u64) -> Phase {
-        step.nak(id, Refusal::Releasing);
-
-        self.stay()
-    }
-
-    fn on_reclaim_finished(self, step: &mut Step<'_>, reclaimed: u64) -> Phase {
-        let Stage::Freeing { bytes, .. } = self.stage else {
-            return self.stay();
-        };
-
+    /// Offers back what is left of `bytes` once `reclaimed` has been freed.
+    fn offer(self, step: &mut Step<'_>, bytes: NonZeroU64, reclaimed: u64) -> Phase {
         let Some(releasable) = step.world.release_budget_after_reclaim(bytes, reclaimed) else {
             self.refuse(step, Refusal::Spent);
 
@@ -205,6 +122,88 @@ impl State for Releasing {
                 target: current.saturating_sub(releasable.get()),
             },
         })
+    }
+}
+
+impl State for Releasing {
+    fn stay(self) -> Phase {
+        Phase::Releasing(self)
+    }
+
+    fn on_throttled(self, step: &mut Step<'_>) -> Phase {
+        if !matches!(self.stage, Stage::Freeing { .. }) {
+            return self.stay();
+        }
+
+        self.refuse(step, Refusal::Braked);
+
+        step.world.cancel_reclaim(step.fx);
+
+        Phase::throttled(step)
+    }
+
+    fn advance(self, step: &mut Step<'_>, _pressure: Pressure) -> Phase {
+        match self.stage {
+            Stage::Settling { expires, .. } if expires.reached(step.now) => Steady::released(step),
+            _ => self.stay(),
+        }
+    }
+
+    fn on_total_changed(self, step: &mut Step<'_>, moved: Moved) -> Phase {
+        match self.stage {
+            Stage::Settling { target, .. } if step.limits().total_mem() <= target => {
+                Steady::released(step)
+            }
+            _ => {
+                step.rebrake(moved);
+
+                self.stay()
+            }
+        }
+    }
+
+    fn on_grant(self, step: &mut Step<'_>, id: RequestId, target: u64) -> Phase {
+        if !self.answers(id) {
+            return self.stay();
+        }
+
+        if step.limits().total_mem() <= target {
+            return Steady::released(step);
+        }
+
+        let expires = Deadline::after(step.now, step.config().settle_grace.get());
+
+        Phase::Releasing(Self {
+            stage: Stage::Settling { target, expires },
+        })
+    }
+
+    fn on_deny(
+        self,
+        step: &mut Step<'_>,
+        id: RequestId,
+        _reason: DenyReason,
+        _retry_after: Option<Duration>,
+    ) -> Phase {
+        if !self.answers(id) {
+            return self.stay();
+        }
+
+        Steady::released(step)
+    }
+
+    fn on_reclaim_request(self, step: &mut Step<'_>, id: ReclaimId, _desired: u64) -> Phase {
+        step.nak(id, Refusal::Releasing);
+
+        self.stay()
+    }
+
+    fn on_reclaim_finished(self, step: &mut Step<'_>, reclaimed: u64) -> Phase {
+        let Stage::Freeing { bytes, .. } = self.stage else {
+            return self.stay();
+        };
+
+        self.offer(step, bytes, reclaimed)
     }
 
     fn on_disconnected(self, step: &mut Step<'_>) -> Phase {
@@ -261,6 +260,7 @@ mod tests {
                         now: at(143),
                         reclaimed: 0,
                     })
+                    .actions
                     .as_slice(),
                 [Action::Send(GuestMessage::ReclaimNak {
                     id: ReclaimId(7),
@@ -374,10 +374,12 @@ mod tests {
         );
 
         assert_eq!(
-            engine.handle(Event::ReclaimFinished {
-                now: at(145),
-                reclaimed: 256 * MIB,
-            }),
+            engine
+                .handle(Event::ReclaimFinished {
+                    now: at(145),
+                    reclaimed: 256 * MIB,
+                })
+                .actions,
             vec![Action::Send(GuestMessage::OfferRelease {
                 id: RequestId(2),
                 current: 2560 * MIB,
@@ -465,10 +467,12 @@ mod tests {
         }
 
         assert_eq!(
-            engine.handle(Event::ReclaimFinished {
-                now: at(144),
-                reclaimed: 256 * MIB,
-            }),
+            engine
+                .handle(Event::ReclaimFinished {
+                    now: at(144),
+                    reclaimed: 256 * MIB,
+                })
+                .actions,
             vec![Action::Send(GuestMessage::OfferRelease {
                 id: RequestId(2),
                 current: 2560 * MIB,
@@ -489,10 +493,12 @@ mod tests {
         );
 
         assert_eq!(
-            engine.handle(Event::TotalChanged {
-                now: at(146),
-                total_mem: 2304 * MIB,
-            }),
+            engine
+                .handle(Event::TotalChanged {
+                    now: at(146),
+                    total_mem: 2304 * MIB,
+                })
+                .actions,
             vec![Action::SetHigh(1792 * MIB), Action::SetMax(2048 * MIB)]
         );
         assert!(matches!(engine.phase(), Phase::Steady(_)));

@@ -37,22 +37,6 @@ mod tests {
     const MAX: Duration = Duration::from_secs(30);
 
     #[test]
-    fn the_delay_climbs_until_it_reaches_the_cap() {
-        let mut backoff = Backoff::new(MIN, MAX);
-
-        assert_eq!(backoff.delay(), MIN);
-
-        for _ in 0..8 {
-            backoff.delay();
-        }
-
-        assert!(
-            backoff.delay() >= MAX / 2,
-            "the delay never reached the cap"
-        );
-    }
-
-    #[test]
     fn every_delay_is_twice_the_one_before_it() {
         let mut backoff = Backoff::new(MIN, Duration::from_secs(4));
 

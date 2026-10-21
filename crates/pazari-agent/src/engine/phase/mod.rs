@@ -20,7 +20,7 @@ use crate::engine::{
     effects::Effects,
     limits::{Brake, Limits, Moved},
     refusal::Refusal,
-    tally::Transition,
+    transition::Transition,
     world::{Guest, World},
 };
 
@@ -48,6 +48,12 @@ impl Step<'_> {
         self.world.brake(brake, self.fx);
     }
 
+    pub fn rebrake(&mut self, moved: Moved) {
+        if moved != Moved::Unchanged {
+            self.world.rebrake(self.fx);
+        }
+    }
+
     pub fn send(&mut self, message: GuestMessage) {
         self.world.send(message, self.fx);
     }
@@ -61,10 +67,6 @@ impl Step<'_> {
 pub trait State: Copy {
     fn stay(self) -> Phase;
 
-    fn brake(self, step: &mut Step<'_>) -> Phase;
-
-    fn resume(self, step: &mut Step<'_>) -> Phase;
-
     fn advance(self, _step: &mut Step<'_>, _pressure: Pressure) -> Phase {
         self.stay()
     }
@@ -73,10 +75,12 @@ pub trait State: Copy {
         self.stay()
     }
 
+    fn on_throttled(self, _step: &mut Step<'_>) -> Phase {
+        self.stay()
+    }
+
     fn on_total_changed(self, step: &mut Step<'_>, moved: Moved) -> Phase {
-        if moved != Moved::Unchanged {
-            step.world.rebrake(step.fx);
-        }
+        step.rebrake(moved);
 
         self.stay()
     }
@@ -101,8 +105,12 @@ pub trait State: Copy {
         self.stay()
     }
 
-    fn on_ceiling_raised(self, _step: &mut Step<'_>) -> Option<Phase> {
-        None
+    fn on_ceiling_raised(self, _step: &mut Step<'_>) -> Phase {
+        self.stay()
+    }
+
+    fn on_connected(self, _step: &mut Step<'_>) -> Phase {
+        self.stay()
     }
 
     fn on_disconnected(self, _step: &mut Step<'_>) -> Phase {
@@ -143,7 +151,7 @@ impl PhaseKind {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Steady => "steady",
-            Self::Growing => "awaiting_grant",
+            Self::Growing => "growing",
             Self::Reclaiming => "reclaiming",
             Self::Releasing => "releasing",
             Self::Exhausted => "exhausted",
@@ -175,12 +183,12 @@ impl Phase {
     }
 
     /// Answers the workload hitting the brake.
-    pub fn braked(step: &mut Step<'_>) -> Self {
+    pub fn throttled(step: &mut Step<'_>) -> Self {
         let Some(amount) = step.world.throttle_reclaim() else {
-            return Growing::braked(step);
+            return Growing::braked(step, step.now);
         };
 
-        step.world.record(Transition::ThrottleReclaim);
+        step.fx.record(Transition::ThrottleReclaim);
 
         if step.world.reclaiming() {
             return Reclaiming::waiting(step, amount);

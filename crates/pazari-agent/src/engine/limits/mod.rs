@@ -163,7 +163,7 @@ mod tests {
     fn applied(mut limits: Limits, brake: Brake) -> Vec<Action> {
         let mut fx = Effects::default();
         limits.apply(brake, &mut fx);
-        fx.drain()
+        fx.drain().actions
     }
 
     #[test]
@@ -215,7 +215,7 @@ mod tests {
         limits.apply(limits.brake(), &mut fx);
 
         assert_eq!(
-            fx.drain(),
+            fx.drain().actions,
             vec![Action::SetMax(3840 * MIB), Action::SetHigh(3840 * MIB)]
         );
     }

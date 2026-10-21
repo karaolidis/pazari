@@ -8,7 +8,7 @@ use crate::engine::{
     Engine,
     effects::Effects,
     limits::Moved,
-    phase::{Phase, State, Step},
+    phase::{Phase, State},
 };
 
 impl Engine {
@@ -23,9 +23,8 @@ impl Engine {
         self.world.connect(status_interval, hotplugged);
         self.emit_status(now, fx);
 
-        if !self.adopt_ceiling(now, ceiling, fx) {
-            self.transition(now, fx, Phase::resume);
-        }
+        self.adopt_ceiling(now, ceiling, fx);
+        self.transition(now, fx, Phase::on_connected);
     }
 
     pub(in crate::engine) fn on_disconnected(&mut self, now: Timestamp, fx: &mut Effects) {
@@ -39,9 +38,9 @@ impl Engine {
         now: Timestamp,
         ceiling: u64,
         fx: &mut Effects,
-    ) -> bool {
+    ) {
         if self.world.set_ceiling(ceiling) != Moved::Grew {
-            return false;
+            return;
         }
 
         debug!(
@@ -50,19 +49,7 @@ impl Engine {
             "ceiling raised",
         );
 
-        let mut step = Step {
-            world: &mut self.world,
-            fx,
-            now,
-        };
-
-        let Some(phase) = self.phase.on_ceiling_raised(&mut step) else {
-            return false;
-        };
-
-        self.phase = phase;
-
-        true
+        self.transition(now, fx, Phase::on_ceiling_raised);
     }
 
     /// Sends a status once one is due, from the first reading on.

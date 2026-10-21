@@ -72,12 +72,12 @@ Sizing the two reserves is covered in
 The agent is always in one of five modes, reported by the
 .Va pazari_agent_mode
 metric.
-.Bl -tag -width "awaiting_grant"
+.Bl -tag -width "reclaiming"
 .It Cm steady
 The limits are in place and nothing is pending.
 This is the only mode in which the agent accepts a reclaim request from the
 host.
-.It Cm awaiting_grant
+.It Cm growing
 A grant request is outstanding, a refused request is waiting to be retried, or
 granted memory has not yet arrived.
 The limits do not move.

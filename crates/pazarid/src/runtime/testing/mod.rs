@@ -299,7 +299,7 @@ pub const fn meminfo(total: u64, available: u64, swap_total: u64) -> MemInfo {
 
 #[derive(Debug, Default)]
 pub struct MockMemory {
-    meminfo: Mutex<MemInfo>,
+    meminfo: MemInfo,
     pressure: Option<Pressure>,
     swaps: Vec<String>,
     blind: bool,
@@ -309,7 +309,7 @@ impl MockMemory {
     #[must_use]
     pub fn new(meminfo: MemInfo) -> Self {
         Self {
-            meminfo: Mutex::new(meminfo),
+            meminfo,
             ..Self::default()
         }
     }
@@ -334,15 +334,11 @@ impl MockMemory {
         self.blind = true;
         self
     }
-
-    pub fn set(&self, meminfo: MemInfo) {
-        *self.meminfo.lock().expect("no test poisons the mock") = meminfo;
-    }
 }
 
 impl HostMemory for MockMemory {
     fn meminfo(&self) -> impl Future<Output = Result<MemInfo, RuntimeError>> + Send {
-        future::ready(Ok(*self.meminfo.lock().expect("no test poisons the mock")))
+        future::ready(Ok(self.meminfo))
     }
 
     fn pressure(&self) -> impl Future<Output = Result<Option<Pressure>, RuntimeError>> + Send {

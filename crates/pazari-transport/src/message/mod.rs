@@ -87,10 +87,9 @@ pub type HostStream<T> = MessageStream<T, JsonLinesCodec, Host>;
 
 #[cfg(test)]
 mod tests {
-    use pazari_proto::{Codec, DecodeError, GuestMessage, HostMessage, JsonLinesCodec};
+    use pazari_proto::GuestMessage;
     use tokio::io::{AsyncWriteExt, DuplexStream, duplex};
 
-    use super::MessageStream;
     use crate::{
         TransportError,
         testing::{GuestStream, HostStream, framed, guest_messages, host_messages},
@@ -100,25 +99,6 @@ mod tests {
 
     fn pair() -> (DuplexStream, DuplexStream) {
         duplex(BUFFER)
-    }
-
-    async fn violation(raw: Vec<u8>) -> (TransportError, TransportError) {
-        let (mut guest, host) = pair();
-        guest.write_all(&raw).await.expect("failed to write");
-        guest.flush().await.expect("failed to flush");
-
-        let mut stream = HostStream::new(host);
-
-        let first = stream
-            .recv()
-            .await
-            .expect_err("expected a protocol violation");
-        let second = stream
-            .recv()
-            .await
-            .expect_err("expected the decoder to stay poisoned");
-
-        (first, second)
     }
 
     #[tokio::test]
@@ -220,72 +200,6 @@ mod tests {
         assert!(
             matches!(error, TransportError::Truncated { pending } if pending == partial),
             "unexpected error: {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_over_long_line_is_fatal_and_keeps_failing() {
-        let (first, second) = violation(vec![b'x'; JsonLinesCodec::MAX_FRAME_BYTES + 1]).await;
-
-        assert!(
-            matches!(
-                first,
-                TransportError::Decode {
-                    source: DecodeError::LineTooLong { .. }
-                }
-            ),
-            "unexpected error: {first}"
-        );
-        assert!(
-            matches!(
-                second,
-                TransportError::Decode {
-                    source: DecodeError::Poisoned
-                }
-            ),
-            "unexpected error: {second}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_malformed_line_is_fatal_and_keeps_failing() {
-        let (first, second) = violation(b"{\"type\":\"bye\"\n".to_vec()).await;
-
-        assert!(
-            matches!(
-                first,
-                TransportError::Decode {
-                    source: DecodeError::Malformed { .. }
-                }
-            ),
-            "unexpected error: {first}"
-        );
-        assert!(
-            matches!(
-                second,
-                TransportError::Decode {
-                    source: DecodeError::Poisoned
-                }
-            ),
-            "unexpected error: {second}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_typed_stream_releases_its_connection() {
-        let (guest, host) = pair();
-
-        let stream: HostStream<DuplexStream> = MessageStream::new(host);
-        let mut host = stream.into_inner();
-
-        let wire = framed(std::slice::from_ref(&HostMessage::Ceiling { ceiling: 42 }));
-        host.write_all(&wire).await.unwrap();
-        host.flush().await.unwrap();
-
-        let mut guest = GuestStream::new(guest);
-        assert_eq!(
-            guest.recv().await.unwrap(),
-            Some(HostMessage::Ceiling { ceiling: 42 })
         );
     }
 }

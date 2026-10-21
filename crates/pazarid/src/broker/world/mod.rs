@@ -9,9 +9,9 @@ use crate::broker::{
     action::Action,
     arbiter::{Arbiter, Ask, Decision, HostView, Request},
     effects::Effects,
-    guest::{Entry, Geometry, Guests, Reconcile},
+    guest::{Geometry, Guest, Guests, Reconcile},
     policy::Policy,
-    registry::{GuestId, Registry},
+    registry::{Entry, GuestId, Registry},
     session::Session,
 };
 
@@ -24,10 +24,10 @@ pub struct World {
 }
 
 impl World {
-    pub fn new(policy: Policy, registry: Registry, arbiter: impl Arbiter + 'static) -> Self {
+    pub fn new<T>(policy: Policy, registry: Registry<T>, arbiter: impl Arbiter + 'static) -> Self {
         Self {
             policy,
-            guests: Guests::new(registry),
+            guests: registry.map(|_| Guest::default()),
             arbiter: Box::new(arbiter),
             host: HostView::default(),
         }
@@ -145,7 +145,7 @@ impl World {
 
         let request = Request {
             now,
-            guest: entry.state.view_at(guest, &entry.spec, geometry),
+            guest: entry.value.view_at(guest, &entry.spec, geometry),
             ask,
             others: &others,
             host: self.host,
@@ -161,7 +161,7 @@ impl World {
         let candidates: Vec<_> = self
             .guests
             .iter()
-            .filter(|(_, entry)| !entry.state.asked() && !entry.state.shrinking())
+            .filter(|(_, entry)| !entry.value.asked() && !entry.value.shrinking())
             .filter_map(|(id, entry)| entry.view(id))
             .collect();
 
@@ -222,7 +222,7 @@ impl World {
     }
 
     pub fn settle(&mut self, guest: GuestId, size: u64, hotplugged: u64) {
-        let Entry { spec, state } = self.guests.get_mut(guest);
+        let Entry { spec, value: state } = self.guests.get_mut(guest);
 
         state.settle(size, hotplugged);
 

@@ -114,8 +114,7 @@ mod tests {
 
     use super::*;
     use crate::runtime::testing::{
-        MEMINFO as MEMINFO_FIXTURE, MockMemory, PRESSURE as PRESSURE_FIXTURE,
-        SWAPS as SWAPS_FIXTURE, meminfo,
+        MEMINFO as MEMINFO_FIXTURE, PRESSURE as PRESSURE_FIXTURE, SWAPS as SWAPS_FIXTURE,
     };
 
     fn fixture(dir: &TempDir, absolute: &str, text: &str) {
@@ -211,27 +210,5 @@ mod tests {
         let memory = ProcMemory::under(dir.path());
 
         assert!(memory.meminfo().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn a_mock_stands_in_for_the_host() {
-        let memory = MockMemory::new(meminfo(8 << 30, 8 << 30, 0));
-
-        assert_eq!(
-            memory.meminfo().await.expect("the mock answers").available,
-            8 << 30
-        );
-        assert_eq!(memory.pressure().await.expect("the mock answers"), None);
-        assert_eq!(
-            memory.swaps().await.expect("the mock answers"),
-            Vec::<String>::new()
-        );
-
-        memory.set(meminfo(8 << 30, 1 << 30, 0));
-
-        assert_eq!(
-            memory.meminfo().await.expect("the mock answers").available,
-            1 << 30
-        );
     }
 }

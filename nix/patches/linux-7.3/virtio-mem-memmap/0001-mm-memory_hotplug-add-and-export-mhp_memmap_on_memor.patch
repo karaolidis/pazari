@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nikolaos Karaolidis <nick@karaolidis.com>
+Date: Sat, 26 Sep 2026 17:35:20 +0100
+Subject: [PATCH 1/6] mm/memory_hotplug: add and export
+ mhp_memmap_on_memory_nr_pages()
+
+virtio-mem plugs and unplugs subblocks smaller than a memory block. To
+add memory with MHP_MEMMAP_ON_MEMORY, it has to know at probe time how
+many pages at the start of each memory block will host the memmap:
+those pages never reach the buddy and must stay plugged while the
+memory block is added.
+
+memory_block_memmap_on_memory_pages() returns a non-zero value even if
+the core would ignore MHP_MEMMAP_ON_MEMORY, and recomputing the value in
+the driver would duplicate the padding of
+"memory_hotplug.memmap_on_memory=force". Add a helper that returns the
+number of memmap pages, or 0 if the flag would be ignored. Both inputs
+are fixed after boot.
+---
+ include/linux/memory_hotplug.h |  6 ++++++
+ mm/memory_hotplug.c            | 15 +++++++++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/include/linux/memory_hotplug.h b/include/linux/memory_hotplug.h
+index b39605d30896..1b261d85e69d 100644
+--- a/include/linux/memory_hotplug.h
++++ b/include/linux/memory_hotplug.h
+@@ -74,6 +74,7 @@ struct mhp_params {
+ bool mhp_range_allowed(u64 start, u64 size, bool need_mapping);
+ struct range mhp_get_pluggable_range(bool need_mapping);
+ bool mhp_supports_memmap_on_memory(void);
++unsigned long mhp_memmap_on_memory_nr_pages(void);
+ 
+ /*
+  * Zone resizing functions
+@@ -220,6 +221,11 @@ static inline bool mhp_supports_memmap_on_memory(void)
+ 	return false;
+ }
+ 
++static inline unsigned long mhp_memmap_on_memory_nr_pages(void)
++{
++	return 0;
++}
++
+ static inline void pgdat_kswapd_lock(pg_data_t *pgdat) {}
+ static inline void pgdat_kswapd_unlock(pg_data_t *pgdat) {}
+ static inline void pgdat_kswapd_lock_init(pg_data_t *pgdat) {}
+diff --git a/mm/memory_hotplug.c b/mm/memory_hotplug.c
+index 226ab9cb078a..800011ca194e 100644
+--- a/mm/memory_hotplug.c
++++ b/mm/memory_hotplug.c
+@@ -1409,6 +1409,21 @@ bool mhp_supports_memmap_on_memory(void)
+ }
+ EXPORT_SYMBOL_GPL(mhp_supports_memmap_on_memory);
+ 
++/**
++ * mhp_memmap_on_memory_nr_pages - self-hosted memmap pages per memory block
++ *
++ * Return: the number of pages at the start of each memory block that host its
++ * memmap when adding memory with MHP_MEMMAP_ON_MEMORY, including padding for
++ * "memory_hotplug.memmap_on_memory=force"; or 0 if the flag would be ignored.
++ */
++unsigned long mhp_memmap_on_memory_nr_pages(void)
++{
++	if (!mhp_supports_memmap_on_memory())
++		return 0;
++	return memory_block_memmap_on_memory_pages();
++}
++EXPORT_SYMBOL_GPL(mhp_memmap_on_memory_nr_pages);
++
+ static void altmap_free(struct vmem_altmap *altmap)
+ {
+ 	WARN_ONCE(altmap->alloc, "Altmap not fully unmapped");

@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nikolaos Karaolidis <nick@karaolidis.com>
+Date: Sat, 26 Sep 2026 21:43:00 +0100
+Subject: [PATCH 6/6] Documentation/admin-guide/mm: document virtio-mem
+ memmap_on_memory
+
+Document that virtio-mem only uses memory_hotplug.memmap_on_memory with
+virtio_mem.memmap_on_memory=1, and how the memmap subblocks affect the
+plugged size in Sub Block Mode.
+---
+ Documentation/admin-guide/mm/memory-hotplug.rst | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/Documentation/admin-guide/mm/memory-hotplug.rst b/Documentation/admin-guide/mm/memory-hotplug.rst
+index 0207f8725142..a348efdd1ad5 100644
+--- a/Documentation/admin-guide/mm/memory-hotplug.rst
++++ b/Documentation/admin-guide/mm/memory-hotplug.rst
+@@ -454,6 +454,10 @@ The following module parameters are currently defined:
+ 				 architecture does not support the forced mode
+ 				 in all configurations.
+ 
++				 virtio-mem additionally requires
++				 ``virtio_mem.memmap_on_memory=1``. See
++				 `ZONE_MOVABLE Sizing Considerations`_.
++
+ ``online_policy``		 read-write: Set the basic policy used for
+ 				 automatic zone selection when onlining memory
+ 				 blocks without specifying a target zone.
+@@ -628,6 +632,17 @@ ZONE_MOVABLE, especially when fine-tuning zone ratios:
+ - In certain DAX configurations the memory map for the device memory will be
+   allocated from the kernel zones.
+ 
++- The memory map of hotplugged memory is allocated from the kernel zones,
++  unless ``memory_hotplug.memmap_on_memory`` is used (for virtio-mem, together
++  with ``virtio_mem.memmap_on_memory=1``).
++
++  With virtio-mem in Sub Block Mode, the subblocks containing the memory map of
++  a memory block stay plugged until the memory block is removed. They count
++  towards the plugged size of the device but are not available to Linux:
++  plugging 128 MiB into an empty 128 MiB memory block makes 126 MiB available.
++  The plugged size can stay below the requested size by up to these subblocks
++  of one memory block.
++
+ - KASAN can have a significant memory overhead, for example, consuming 1/8th of
+   the total system memory size as (unmovable) tracking metadata.
+ 

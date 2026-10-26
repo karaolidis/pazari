@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nikolaos Karaolidis <nick@karaolidis.com>
+Date: Tue, 29 Sep 2026 22:12:50 +0100
+Subject: [PATCH] Documentation: mm: memory-hotplug: describe inode pinning by
+ ZONE_MOVABLE
+
+Add filesystem metadata to the ZONE_MOVABLE sizing considerations. With
+the default dirty_ratio, single-page files on ext4 can keep about 50000
+dirty inodes, some 70 MiB of kernel memory, per GiB of dirtyable memory.
+---
+ Documentation/admin-guide/mm/memory-hotplug.rst | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/Documentation/admin-guide/mm/memory-hotplug.rst b/Documentation/admin-guide/mm/memory-hotplug.rst
+index a348efdd1ad5..7d3dede47bb3 100644
+--- a/Documentation/admin-guide/mm/memory-hotplug.rst
++++ b/Documentation/admin-guide/mm/memory-hotplug.rst
+@@ -656,6 +656,13 @@ ZONE_MOVABLE, especially when fine-tuning zone ratios:
+   In addition, using ZONE_MOVABLE might make page pinning more expensive,
+   because of the page migration overhead.
+ 
++- Filesystem metadata, such as inodes and dentries, is unmovable, while the
++  page cache of the same files is usually in ZONE_MOVABLE. The kernel frees
++  unused, clean inodes with little page cache by dropping that cache (counted
++  in ``pginodesteal`` and ``kswapd_inodesteal``). Other inodes stay, so
++  workloads with many such files need larger kernel zones. As the dirty limits
++  include ZONE_MOVABLE, ``vm.dirty_bytes`` may be needed to bound dirty inodes.
++
+ By default, all the memory configured at boot time is managed by the kernel
+ zones and ZONE_MOVABLE is not used.
+ 

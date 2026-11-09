@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "Deterministic memory workload generator"
 authors.workspace = true
+license.workspace = true
 
 [lints]
 workspace = true

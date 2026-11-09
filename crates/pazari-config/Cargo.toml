@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "Configuration loading shared by the pazari binaries"
 authors.workspace = true
+license.workspace = true
 
 [lints]
 workspace = true

@@ -83,7 +83,7 @@ let
       };
     };
 
-  patchedSupported = patched pkgs.linuxPackages_7_2;
+  patchedSupported = patched pkgs.linuxPackages_7_3;
 
   failed =
     machine:

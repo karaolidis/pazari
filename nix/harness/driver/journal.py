@@ -4,7 +4,7 @@ import json
 import subprocess
 import sys
 from argparse import ArgumentParser
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 PREFIX = "F_"
 
@@ -34,7 +34,7 @@ def stamp(record):
     raw = record.get("__REALTIME_TIMESTAMP")
 
     try:
-        when = datetime.fromtimestamp(int(raw) / 1_000_000, tz=timezone.utc)
+        when = datetime.fromtimestamp(int(raw) / 1_000_000, tz=UTC)
     except (TypeError, ValueError):
         return "".ljust(12)
 

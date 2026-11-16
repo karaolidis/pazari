@@ -12,10 +12,10 @@ dirty inodes, some 70 MiB of kernel memory, per GiB of dirtyable memory.
  1 file changed, 7 insertions(+)
 
 diff --git a/Documentation/admin-guide/mm/memory-hotplug.rst b/Documentation/admin-guide/mm/memory-hotplug.rst
-index a348efdd1ad5..7d3dede47bb3 100644
+index 0207f87..d4e5845 100644
 --- a/Documentation/admin-guide/mm/memory-hotplug.rst
 +++ b/Documentation/admin-guide/mm/memory-hotplug.rst
-@@ -656,6 +656,13 @@ ZONE_MOVABLE, especially when fine-tuning zone ratios:
+@@ -641,6 +641,13 @@ ZONE_MOVABLE, especially when fine-tuning zone ratios:
    In addition, using ZONE_MOVABLE might make page pinning more expensive,
    because of the page migration overhead.
  

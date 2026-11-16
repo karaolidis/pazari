@@ -26,7 +26,7 @@ No functional change; the inode shrinker uses it later in this series.
  4 files changed, 41 insertions(+), 8 deletions(-)
 
 diff --git a/include/linux/shrinker.h b/include/linux/shrinker.h
-index 1a00be90d93a..2179e6b18005 100644
+index 1a00be9..2179e6b 100644
 --- a/include/linux/shrinker.h
 +++ b/include/linux/shrinker.h
 @@ -53,6 +53,9 @@ struct shrink_control {
@@ -40,7 +40,7 @@ index 1a00be90d93a..2179e6b18005 100644
  
  #define SHRINK_STOP (~0UL)
 diff --git a/mm/internal.h b/mm/internal.h
-index 38b1165212c9..874955170b2b 100644
+index 38b1165..8749551 100644
 --- a/mm/internal.h
 +++ b/mm/internal.h
 @@ -1429,7 +1429,7 @@ static inline bool pte_needs_soft_dirty_wp(struct vm_area_struct *vma, pte_t pte
@@ -53,7 +53,7 @@ index 38b1165212c9..874955170b2b 100644
  int shmem_add_to_page_cache(struct folio *folio,
  			    struct address_space *mapping,
 diff --git a/mm/shrinker.c b/mm/shrinker.c
-index 7ec2a9704f6f..803fcb9f7351 100644
+index 7ec2a97..803fcb9 100644
 --- a/mm/shrinker.c
 +++ b/mm/shrinker.c
 @@ -476,7 +476,8 @@ static unsigned long do_shrink_slab(struct shrink_control *shrinkctl,
@@ -120,7 +120,7 @@ index 7ec2a9704f6f..803fcb9f7351 100644
  
  		if (!shrinker_try_get(shrinker))
 diff --git a/mm/vmscan.c b/mm/vmscan.c
-index f11491ee9ed5..8b725811d38a 100644
+index 6a53762..91eb58d 100644
 --- a/mm/vmscan.c
 +++ b/mm/vmscan.c
 @@ -151,6 +151,9 @@ struct scan_control {
@@ -166,7 +166,7 @@ index f11491ee9ed5..8b725811d38a 100644
  	} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)) != NULL);
  
  	return freed;
-@@ -5116,7 +5136,8 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
+@@ -5121,7 +5141,8 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
  
  	need_rotate = try_to_shrink_lruvec(lruvec, sc);
  
@@ -176,7 +176,7 @@ index f11491ee9ed5..8b725811d38a 100644
  
  	if (!sc->proactive)
  		vmpressure(sc->gfp_mask, sc->order, memcg, false,
-@@ -6220,7 +6241,7 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
+@@ -6225,7 +6246,7 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
  		shrink_lruvec(lruvec, sc);
  
  		shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
@@ -185,7 +185,7 @@ index f11491ee9ed5..8b725811d38a 100644
  
  		/* Record the group's reclaim efficiency */
  		if (!sc->proactive)
-@@ -6441,6 +6462,7 @@ static void shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
+@@ -6446,6 +6467,7 @@ static void shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
  		sc->gfp_mask |= __GFP_HIGHMEM;
  		sc->reclaim_idx = gfp_zone(sc->gfp_mask);
  	}
@@ -193,7 +193,7 @@ index f11491ee9ed5..8b725811d38a 100644
  
  	for_each_zone_zonelist_nodemask(zone, z, zonelist,
  					sc->reclaim_idx, sc->nodemask) {
-@@ -7222,6 +7244,7 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
+@@ -7227,6 +7249,7 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
  				break;
  			}
  		}
@@ -201,7 +201,7 @@ index f11491ee9ed5..8b725811d38a 100644
  
  		/*
  		 * If the pgdat is imbalanced then ignore boosting and preserve
-@@ -7850,6 +7873,7 @@ static unsigned long __node_reclaim(struct pglist_data *pgdat,
+@@ -7856,6 +7879,7 @@ static unsigned long __node_reclaim(struct pglist_data *pgdat,
  	 */
  	noreclaim_flag = memalloc_noreclaim_save();
  	set_task_reclaim_state(p, &sc->reclaim_state);

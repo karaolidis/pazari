@@ -54,7 +54,7 @@ Dirty inodes are not covered: the dirty limits include ZONE_MOVABLE.
  2 files changed, 62 insertions(+), 10 deletions(-)
 
 diff --git a/fs/inode.c b/fs/inode.c
-index bc93c1757a38..d18aecde0697 100644
+index bc93c17..d18aecd 100644
 --- a/fs/inode.c
 +++ b/fs/inode.c
 @@ -548,6 +548,26 @@ void wait_on_new_inode(struct inode *inode)
@@ -181,7 +181,7 @@ index bc93c1757a38..d18aecde0697 100644
  }
  
 diff --git a/mm/migrate.c b/mm/migrate.c
-index b5e9ddf375a2..f75e55acc727 100644
+index b5e9ddf..f75e55a 100644
 --- a/mm/migrate.c
 +++ b/mm/migrate.c
 @@ -1109,6 +1109,7 @@ static int move_to_new_folio(struct folio *dst, struct folio *src,
